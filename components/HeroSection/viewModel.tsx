@@ -6,7 +6,7 @@ import type {
   StoreSearchResult,
 } from "../../models/product.model";
 
-const getApiBaseUrl = () => {
+export const getApiBaseUrl = () => {
   const configuredApiUrl =
     import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
   const apiUrlWithProtocol = /^https?:\/\//i.test(configuredApiUrl)

@@ -2,13 +2,13 @@ from typing import Optional
 import re
 from urllib.parse import parse_qs, unquote, urlparse
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models.product import PriceHistory, Product
-from schemas.product import ProductCreate
+from models.product import KnownSku, PriceHistory, Product
+from schemas.product import ProductCreate, SkuBatchRequest
 from scrapers.comparison import _lead_redirect_info
 from services.scraper_service import (
     TARGET_STORES,
@@ -18,6 +18,7 @@ from services.scraper_service import (
 )
 
 product_router = APIRouter()
+BATCH_SKU_LIMIT = 30
 TARGET_STORE_NAMES = list(
     {
         name
@@ -101,6 +102,24 @@ def _query_terms(search_text: str):
     return [term.strip() for term in search_text.split() if len(term.strip()) >= 2]
 
 
+def _normalize_sku(value: str):
+    value = (value or "").strip().upper()
+    return _primary_sku(value) or value
+
+
+def _normalize_sku_list(values):
+    normalized = []
+    seen = set()
+
+    for value in values or []:
+        sku = _normalize_sku(value)
+        if sku and sku not in seen:
+            normalized.append(sku)
+            seen.add(sku)
+
+    return normalized
+
+
 def _apply_search_filter(query, search_text: str, match_all: bool):
     terms = _query_terms(search_text)
     if not terms:
@@ -133,6 +152,83 @@ def _serialize_results(results):
         )
 
     return serialized
+
+
+def _sku_status_map(db: Session, skus=None):
+    requested_skus = set(_normalize_sku_list(skus))
+
+    if requested_skus:
+        statuses = {}
+        for sku in requested_skus:
+            results = _find_sku_products(db, sku)
+            product_ids = {product.id for product, _price in results}
+            urls = {price.url for _product, price in results}
+            stores = {price.store for _product, price in results}
+            last_update = max((price.timestamp for _product, price in results), default=None)
+            statuses[sku] = {
+                "sku": sku,
+                "in_database": bool(results),
+                "product_count": len(product_ids),
+                "offer_count": len(urls),
+                "store_count": len(stores),
+                "last_update": last_update,
+            }
+        return statuses
+
+    known_skus = {
+        _normalize_sku(row[0])
+        for row in db.query(KnownSku.sku).all()
+        if row[0]
+    }
+    product_skus = {
+        _normalize_sku(row[0])
+        for row in db.query(Product.sku).filter(Product.sku.isnot(None)).distinct().all()
+        if row[0]
+    }
+    all_skus = known_skus | product_skus
+    all_skus_list = sorted(all_skus)
+
+    statuses = {
+        sku: {
+            "sku": sku,
+            "in_database": False,
+            "product_count": 0,
+            "offer_count": 0,
+            "store_count": 0,
+            "last_update": None,
+        }
+        for sku in all_skus
+    }
+
+    if not all_skus:
+        return statuses
+
+    rows = (
+        db.query(
+            Product.sku.label("sku"),
+            func.count(func.distinct(Product.id)).label("product_count"),
+            func.count(func.distinct(PriceHistory.url)).label("offer_count"),
+            func.count(func.distinct(PriceHistory.store)).label("store_count"),
+            func.max(PriceHistory.timestamp).label("last_update"),
+        )
+        .join(PriceHistory, Product.id == PriceHistory.product_id)
+        .filter(func.upper(Product.sku).in_(all_skus_list))
+        .group_by(Product.sku)
+        .all()
+    )
+
+    for row in rows:
+        sku = _normalize_sku(row.sku)
+        statuses[sku] = {
+            "sku": sku,
+            "in_database": bool(row.offer_count),
+            "product_count": row.product_count or 0,
+            "offer_count": row.offer_count or 0,
+            "store_count": row.store_count or 0,
+            "last_update": row.last_update,
+        }
+
+    return statuses
 
 
 def _find_products(db: Session, search_text: Optional[str] = None):
@@ -180,6 +276,86 @@ def _find_sku_products(db: Session, sku: str):
         )
     )
     return query.order_by(PriceHistory.price.asc()).limit(250).all()
+
+
+@product_router.get("/skus/status")
+def list_sku_status(
+    q: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    requested_skus = _normalize_sku_list(re.split(r"[\s,;]+", q or "")) if q else None
+    statuses = _sku_status_map(db, requested_skus)
+    items = sorted(
+        statuses.values(),
+        key=lambda item: (
+            item["last_update"] is None,
+            item["sku"],
+        ),
+    )
+    return {"items": items}
+
+
+@product_router.post("/batch-search")
+def batch_search_products(payload: SkuBatchRequest, db: Session = Depends(get_db)):
+    skus = _normalize_sku_list(payload.skus)
+    if not skus:
+        raise HTTPException(status_code=400, detail="Informe ao menos um SKU valido.")
+    if len(skus) > BATCH_SKU_LIMIT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Limite de {BATCH_SKU_LIMIT} SKUs por extracao.",
+        )
+
+    items = []
+    for sku in skus:
+        try:
+            cached_results = _serialize_results(_find_sku_products(db, sku))
+            if cached_results and not payload.force_refresh:
+                summary = build_summary_from_cached_results(cached_results, sku)
+                status = "cached"
+            else:
+                summary = run_all_scrapers(sku, db)
+                status = "updated"
+
+            sku_status = _sku_status_map(db, [sku]).get(sku, {})
+            items.append(
+                {
+                    "sku": sku,
+                    "status": status,
+                    "message": (
+                        f"{len(summary['results'])} ofertas analisadas em "
+                        f"{len(summary['comparison'])} linhas comparativas."
+                    ),
+                    "results_count": len(summary["results"]),
+                    "stores_count": len(
+                        [store for store in summary["stores"] if store["available"]]
+                    ),
+                    "comparison_count": len(summary["comparison"]),
+                    "in_database": sku_status.get("in_database", False),
+                    "offer_count": sku_status.get("offer_count", 0),
+                    "store_count": sku_status.get("store_count", 0),
+                    "last_update": sku_status.get("last_update"),
+                }
+            )
+        except Exception as exc:
+            db.rollback()
+            sku_status = _sku_status_map(db, [sku]).get(sku, {})
+            items.append(
+                {
+                    "sku": sku,
+                    "status": "error",
+                    "message": str(exc),
+                    "results_count": 0,
+                    "stores_count": 0,
+                    "comparison_count": 0,
+                    "in_database": sku_status.get("in_database", False),
+                    "offer_count": sku_status.get("offer_count", 0),
+                    "store_count": sku_status.get("store_count", 0),
+                    "last_update": sku_status.get("last_update"),
+                }
+            )
+
+    return {"items": items}
 
 
 @product_router.post("/", status_code=201)

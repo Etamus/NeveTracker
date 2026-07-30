@@ -6,6 +6,7 @@ set "BACKEND_DIR=%ROOT%backend\"
 set "FRONTEND_DIR=%ROOT%"
 set "PREPARE_SCRIPT=%ROOT%preparar.bat"
 set "VENV_PY=%BACKEND_DIR%.venv\Scripts\python.exe"
+set "NODE_ENV_FILE=%ROOT%.tools\node\env.bat"
 set "BACKEND_URL=http://127.0.0.1:8000"
 set "FRONTEND_URL=http://127.0.0.1:5173"
 set "LOCK_DIR=%ROOT%.iniciar.lock"
@@ -23,6 +24,7 @@ mkdir "%LOCK_DIR%" >nul 2>nul
 if errorlevel 1 (
   echo Ja existe uma inicializacao em andamento.
   echo Se nenhuma janela estiver abrindo, apague a pasta "%LOCK_DIR%" e tente novamente.
+  pause
   exit /b 1
 )
 
@@ -35,6 +37,7 @@ if not exist "%PREPARE_SCRIPT%" (
 set "NEED_PREPARE=0"
 if not exist "%VENV_PY%" set "NEED_PREPARE=1"
 if not exist "%FRONTEND_DIR%node_modules\" set "NEED_PREPARE=1"
+if not exist "%NODE_ENV_FILE%" set "NEED_PREPARE=1"
 
 if "%NEED_PREPARE%"=="1" (
   echo Dependencias ainda nao preparadas. Executando preparar.bat...
@@ -54,6 +57,55 @@ if not exist "%VENV_PY%" (
 
 if not exist "%FRONTEND_DIR%node_modules\" (
   echo ERRO: node_modules do frontend nao encontrado em "%FRONTEND_DIR%node_modules".
+  set "EXIT_CODE=1"
+  goto :cleanup
+)
+
+if not exist "%NODE_ENV_FILE%" (
+  echo ERRO: Ambiente do Node nao encontrado em "%NODE_ENV_FILE%".
+  set "EXIT_CODE=1"
+  goto :cleanup
+)
+
+call "%NODE_ENV_FILE%"
+
+set "NEED_NODE_REPAIR=0"
+if not defined NODE_EXE set "NEED_NODE_REPAIR=1"
+if not defined NPM_CMD set "NEED_NODE_REPAIR=1"
+if defined NODE_EXE if not exist "%NODE_EXE%" set "NEED_NODE_REPAIR=1"
+if defined NPM_CMD if not exist "%NPM_CMD%" set "NEED_NODE_REPAIR=1"
+
+if "%NEED_NODE_REPAIR%"=="1" (
+  echo Ambiente do Node incompleto. Reexecutando preparar.bat...
+  call "%PREPARE_SCRIPT%"
+  if errorlevel 1 (
+    echo ERRO: preparar.bat falhou ao reparar o Node.
+    set "EXIT_CODE=1"
+    goto :cleanup
+  )
+  call "%NODE_ENV_FILE%"
+)
+
+if not defined NODE_EXE (
+  echo ERRO: NODE_EXE nao foi definido pelo ambiente do Node.
+  set "EXIT_CODE=1"
+  goto :cleanup
+)
+
+if not defined NPM_CMD (
+  echo ERRO: NPM_CMD nao foi definido pelo ambiente do Node.
+  set "EXIT_CODE=1"
+  goto :cleanup
+)
+
+if not exist "%NODE_EXE%" (
+  echo ERRO: Node configurado nao foi encontrado em "%NODE_EXE%".
+  set "EXIT_CODE=1"
+  goto :cleanup
+)
+
+if not exist "%NPM_CMD%" (
+  echo ERRO: npm configurado nao foi encontrado em "%NPM_CMD%".
   set "EXIT_CODE=1"
   goto :cleanup
 )
@@ -79,7 +131,7 @@ if errorlevel 1 (
 call :url_ok "%FRONTEND_URL%/"
 if errorlevel 1 (
   echo Iniciando frontend neste CMD...
-  start "NevePrice Frontend" /B /D "%FRONTEND_DIR%" cmd /c "npm run dev -- --host 127.0.0.1 --port 5173 --strictPort"
+  start "NevePrice Frontend" /B /D "%FRONTEND_DIR%" cmd /c "call ""%NODE_ENV_FILE%"" && call ""%NPM_CMD%"" run dev -- --host 127.0.0.1 --port 5173 --strictPort"
   set "LAUNCHED_FRONTEND=1"
 ) else (
   echo Frontend ja esta disponivel. Nao vou iniciar outra instancia.
@@ -90,7 +142,11 @@ call :wait_url "%FRONTEND_URL%/" 30
 if errorlevel 1 (
   echo AVISO: Frontend ainda nao respondeu. Este CMD permanecera aberto para diagnostico.
 ) else (
-  start "" "%FRONTEND_URL%/"
+  if defined NEVEPRICE_NO_BROWSER (
+    echo Navegador nao aberto porque NEVEPRICE_NO_BROWSER esta definido.
+  ) else (
+    start "" "%FRONTEND_URL%/"
+  )
 )
 
 echo.
@@ -98,15 +154,18 @@ echo Enderecos locais:
 echo Backend:  %BACKEND_URL%
 echo Frontend: %FRONTEND_URL%
 
-if "%LAUNCHED_BACKEND%%LAUNCHED_FRONTEND%"=="00" goto :cleanup
-
 if exist "%LOCK_DIR%" rmdir "%LOCK_DIR%" >nul 2>nul
 echo.
-echo Backend e frontend foram iniciados neste unico CMD.
-echo Feche esta janela ou pressione Ctrl+C para encerrar os processos.
+if "%LAUNCHED_BACKEND%%LAUNCHED_FRONTEND%"=="00" (
+  echo Backend e frontend ja estavam em execucao.
+) else (
+  echo Backend e frontend foram iniciados neste CMD.
+)
+echo Este console ficara aberto para manter o ambiente visivel.
+echo Feche esta janela ou pressione Ctrl+C quando quiser encerrar.
 
 :keepalive
-timeout /t 3600 /nobreak >nul
+ping -n 3601 127.0.0.1 >nul 2>nul
 goto :keepalive
 
 :cleanup

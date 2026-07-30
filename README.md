@@ -115,7 +115,9 @@ preparar.bat
 
 O script:
 
-- Verifica Python, Node e npm.
+- Verifica Python.
+- Usa Node/npm do sistema se houver versão compatível.
+- Baixa Node.js portátil em `.tools/node/` quando Node não existir ou for antigo.
 - Aceita `python` ou `py`, escolhendo automaticamente o disponível.
 - Cria `backend\.venv` se necessário.
 - Atualiza o `pip` no ambiente virtual.
@@ -123,6 +125,8 @@ O script:
 - Executa `npm install` na raiz do frontend.
 - Cria arquivos `.env` locais sem sobrescrever configurações válidas.
 - Usa caminhos relativos, funcionando mesmo com espaços no nome da pasta.
+
+`.tools/` é ignorado pelo Git; o Node portátil fica apenas na máquina local.
 
 ## Iniciar Localmente
 

@@ -412,7 +412,7 @@ const EmptyState = ({ searched }: { searched: boolean }) => (
 );
 
 const LoadingState = () => (
-  <div className="overflow-hidden rounded-lg border border-[var(--border)] bg-white">
+  <div className="overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--surface)]">
     <div className="flex h-16 items-center gap-3 border-b border-[var(--border)] px-5">
       <div className="skeleton h-9 w-64" />
       <div className="ml-auto skeleton h-9 w-28" />
@@ -1140,7 +1140,7 @@ const ProductAnalytics = ({ row, onBack }: { row: ComparisonRow; onBack: () => v
         <article className="detail-stat"><span>Preço médio</span><strong>{formatCurrency(row.pma)}</strong><small>{row.offer_count} ofertas analisadas</small></article>
         <article className="detail-stat"><span>Amplitude</span><strong>{formatCurrency(spread)}</strong><small>Entre menor e maior preço</small></article>
       </div>
-      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(360px,0.85fr)]">
+      <div className="mt-4 grid items-start gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(360px,0.85fr)]">
         <section className="data-panel">
           <div className="data-panel__header"><div><h2>Distribuição de preços</h2><p>{row.name}</p></div></div>
           <div className="p-4 sm:p-5"><PriceChart products={offers} /></div>

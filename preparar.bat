@@ -8,6 +8,8 @@ set "VENV_DIR=%BACKEND_DIR%.venv"
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 set "BACKEND_ENV=%BACKEND_DIR%.env"
 set "FRONTEND_ENV=%FRONTEND_DIR%.env.local"
+set "ENSURE_NODE_SCRIPT=%ROOT%scripts\ensure_node.py"
+set "NODE_ENV_FILE=%ROOT%.tools\node\env.bat"
 
 echo.
 echo === NevePrice: preparacao local ===
@@ -31,23 +33,48 @@ if not defined PY_CMD (
   exit /b 1
 )
 
-where node >nul 2>nul
-if errorlevel 1 (
-  echo ERRO: Node.js nao foi encontrado.
-  echo Instale o Node.js e deixe o comando node disponivel no PATH.
+if not exist "%ENSURE_NODE_SCRIPT%" (
+  echo ERRO: Helper de Node nao encontrado em "%ENSURE_NODE_SCRIPT%".
   exit /b 1
 )
 
-where npm >nul 2>nul
+echo Preparando Node.js para o frontend...
+%PY_CMD% "%ENSURE_NODE_SCRIPT%" "%ROOT%"
 if errorlevel 1 (
-  echo ERRO: npm nao foi encontrado.
-  echo Instale o Node.js com npm e tente novamente.
+  echo ERRO: Falha ao preparar o Node.js portatil.
+  exit /b 1
+)
+
+if not exist "%NODE_ENV_FILE%" (
+  echo ERRO: Arquivo de ambiente do Node nao foi criado em "%NODE_ENV_FILE%".
+  exit /b 1
+)
+
+call "%NODE_ENV_FILE%"
+
+if not defined NODE_EXE (
+  echo ERRO: NODE_EXE nao foi definido pelo ambiente do Node.
+  exit /b 1
+)
+
+if not defined NPM_CMD (
+  echo ERRO: NPM_CMD nao foi definido pelo ambiente do Node.
+  exit /b 1
+)
+
+if not exist "%NODE_EXE%" (
+  echo ERRO: Node configurado nao foi encontrado em "%NODE_EXE%".
+  exit /b 1
+)
+
+if not exist "%NPM_CMD%" (
+  echo ERRO: npm configurado nao foi encontrado em "%NPM_CMD%".
   exit /b 1
 )
 
 echo Python: %PY_CMD%
-node --version
-call npm --version
+"%NODE_EXE%" --version
+call "%NPM_CMD%" --version
 echo.
 
 if not exist "%VENV_PY%" (
@@ -125,7 +152,7 @@ if errorlevel 1 (
 
 echo Instalando dependencias do frontend...
 pushd "%FRONTEND_DIR%"
-call npm install
+call "%NPM_CMD%" install
 if errorlevel 1 (
   popd
   echo ERRO: Falha ao executar npm install no frontend.

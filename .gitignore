@@ -21,6 +21,7 @@ dist/
 # Local project files
 .env
 .env.local
+.tools/
 .iniciar.lock/
 *.log
 

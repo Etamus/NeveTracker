@@ -43,3 +43,28 @@ export interface SearchResponse {
   stores?: StoreSearchResult[];
   comparison?: ComparisonRow[];
 }
+
+export interface SkuStatusItem {
+  sku: string;
+  in_database: boolean;
+  product_count: number;
+  offer_count: number;
+  store_count: number;
+  last_update?: string | null;
+}
+
+export interface SkuStatusResponse {
+  items: SkuStatusItem[];
+}
+
+export interface SkuBatchResult extends SkuStatusItem {
+  status: "updated" | "cached" | "error";
+  message: string;
+  results_count: number;
+  stores_count: number;
+  comparison_count: number;
+}
+
+export interface SkuBatchResponse {
+  items: SkuBatchResult[];
+}

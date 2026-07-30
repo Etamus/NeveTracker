@@ -2,23 +2,35 @@ import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
   BarChart3,
+  CheckCircle2,
+  Database,
   Download,
   Grid2X2,
+  LoaderCircle,
   LogOut,
+  Moon,
   PackageSearch,
   PanelLeftClose,
   PanelLeftOpen,
   Search,
   Settings,
+  Sun,
   UserRound,
   X,
 } from "lucide-react";
 import SlidingTabs from "../SlidingTabs";
-import useHeroSection from "./viewModel";
+import type {
+  SkuBatchResponse,
+  SkuBatchResult,
+  SkuStatusItem,
+  SkuStatusResponse,
+} from "../../models/product.model";
+import useHeroSection, { getApiBaseUrl } from "./viewModel";
 import logoUrl from "../../static/logo.png";
 
 const AUTH_USERS = [{ username: "DEUSM2", password: "1234" }];
 const AUTH_STORAGE_KEY = "neveprice-auth-user";
+const THEME_STORAGE_KEY = "neveprice-theme";
 
 const navigation = [
   { label: "Ofertas", description: "Comparação de preços", icon: PackageSearch },
@@ -26,15 +38,56 @@ const navigation = [
   { label: "Analytics", description: "Leitura de mercado", icon: BarChart3 },
 ];
 
+type ThemeMode = "light" | "dark";
+
+const getInitialTheme = (): ThemeMode => {
+  const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+  if (storedTheme === "light" || storedTheme === "dark") return storedTheme;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+};
+
+const parseSkuInput = (value: string) => {
+  const matches = value.toUpperCase().match(/\bW\d{6,}\b|\b\d{8,}\b/g) || [];
+  const fallback = value
+    .toUpperCase()
+    .split(/[\s,;]+/)
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 2);
+  return [...new Set(matches.length ? matches : fallback)];
+};
+
+const formatDateTime = (value?: string | null) => {
+  if (!value) return "Nunca";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Nunca";
+  return new Intl.DateTimeFormat("pt-BR", {
+    day: "2-digit",
+    month: "short",
+    year: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+};
+
 export const HeroSection = () => {
   const [activeTab, setActiveTab] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [extractionsOpen, setExtractionsOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [loginUser, setLoginUser] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [authError, setAuthError] = useState("");
+  const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
+  const [skuInput, setSkuInput] = useState("");
+  const [forceExtraction, setForceExtraction] = useState(true);
+  const [skuStatusItems, setSkuStatusItems] = useState<SkuStatusItem[]>([]);
+  const [skuStatusLoading, setSkuStatusLoading] = useState(false);
+  const [extractionRunning, setExtractionRunning] = useState(false);
+  const [extractionResults, setExtractionResults] = useState<SkuBatchResult[]>([]);
+  const [extractionError, setExtractionError] = useState("");
   const accountRef = useRef<HTMLDivElement>(null);
   const [currentUser, setCurrentUser] = useState<string | null>(() => {
     const storedUser = window.localStorage.getItem(AUTH_STORAGE_KEY);
@@ -54,6 +107,8 @@ export const HeroSection = () => {
     const closeMenus = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setLoginOpen(false);
+        setSettingsOpen(false);
+        setExtractionsOpen(false);
         setAccountOpen(false);
         setSidebarOpen(false);
       }
@@ -62,6 +117,11 @@ export const HeroSection = () => {
     window.addEventListener("keydown", closeMenus);
     return () => window.removeEventListener("keydown", closeMenus);
   }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  }, [theme]);
 
   useEffect(() => {
     const closeAccountMenu = (event: PointerEvent) => {
@@ -120,6 +180,72 @@ export const HeroSection = () => {
     setCurrentUser(null);
     setAccountOpen(false);
     window.localStorage.removeItem(AUTH_STORAGE_KEY);
+  };
+
+  const loadSkuStatus = async (skus?: string[]) => {
+    setSkuStatusLoading(true);
+    const query = skus?.length ? `?q=${encodeURIComponent(skus.join(","))}` : "";
+
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/products/skus/status${query}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = (await response.json()) as SkuStatusResponse;
+      setSkuStatusItems(data.items || []);
+    } catch (error) {
+      console.error("Erro ao carregar SKUs:", error);
+      setExtractionError("Não foi possível carregar os SKUs do banco.");
+    } finally {
+      setSkuStatusLoading(false);
+    }
+  };
+
+  const openSettings = () => {
+    setAccountOpen(false);
+    setSettingsOpen(true);
+  };
+
+  const openExtractions = () => {
+    setAccountOpen(false);
+    setExtractionError("");
+    setExtractionResults([]);
+    setExtractionsOpen(true);
+    void loadSkuStatus();
+  };
+
+  const runExtractions = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const skus = parseSkuInput(skuInput);
+
+    if (!skus.length) {
+      setExtractionError("Informe ao menos um SKU.");
+      return;
+    }
+
+    setExtractionRunning(true);
+    setExtractionError("");
+    setExtractionResults([]);
+
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/products/batch-search`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skus, force_refresh: forceExtraction }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => null);
+        throw new Error(errorData?.detail || `HTTP ${response.status}`);
+      }
+
+      const data = (await response.json()) as SkuBatchResponse;
+      setExtractionResults(data.items || []);
+      await loadSkuStatus(skus);
+    } catch (error) {
+      console.error("Erro ao extrair SKUs:", error);
+      setExtractionError(error instanceof Error ? error.message : "Falha ao extrair SKUs.");
+    } finally {
+      setExtractionRunning(false);
+    }
   };
 
   const switchTab = (index: number) => {
@@ -183,11 +309,11 @@ export const HeroSection = () => {
           <div ref={accountRef} className="account-menu-root mt-auto border-t border-[var(--border)] pt-4">
             {currentUser && accountOpen && (
               <div className="account-popover">
-                <button type="button" className="account-popover__item">
+                <button type="button" className="account-popover__item" onClick={openSettings}>
                   <Settings size={15} />
                   Configurações
                 </button>
-                <button type="button" className="account-popover__item">
+                <button type="button" className="account-popover__item" onClick={openExtractions}>
                   <Download size={15} />
                   Extrações
                 </button>
@@ -334,6 +460,139 @@ export const HeroSection = () => {
               <button type="submit" className="button-primary">Entrar</button>
             </div>
           </form>
+        </div>
+      )}
+
+      {settingsOpen && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setSettingsOpen(false)}>
+          <section
+            className="workspace-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Configurações"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="dialog-header">
+              <div>
+                <span className="dialog-icon"><Settings size={19} /></span>
+                <h2>Configurações</h2>
+              </div>
+              <button type="button" className="icon-button" onClick={() => setSettingsOpen(false)} aria-label="Fechar">
+                <X size={17} />
+              </button>
+            </div>
+
+            <div className="settings-row">
+              <div>
+                <strong>Tema</strong>
+                <span>{theme === "dark" ? "Escuro" : "Claro"}</span>
+              </div>
+              <button
+                type="button"
+                className="theme-switch"
+                onClick={() => setTheme((currentTheme) => (currentTheme === "dark" ? "light" : "dark"))}
+              >
+                {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+                {theme === "dark" ? "Usar claro" : "Usar escuro"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {extractionsOpen && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setExtractionsOpen(false)}>
+          <section
+            className="workspace-dialog workspace-dialog--wide"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Extrações"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="dialog-header">
+              <div>
+                <span className="dialog-icon"><Database size={19} /></span>
+                <h2>Extrações</h2>
+              </div>
+              <button type="button" className="icon-button" onClick={() => setExtractionsOpen(false)} aria-label="Fechar">
+                <X size={17} />
+              </button>
+            </div>
+
+            <form onSubmit={runExtractions} className="extraction-form">
+              <label className="textarea-field">
+                <span>SKUs</span>
+                <textarea
+                  value={skuInput}
+                  onChange={(event) => {
+                    setSkuInput(event.target.value);
+                    setExtractionError("");
+                  }}
+                  placeholder={"W10531315\nW11300680\n326064779"}
+                />
+              </label>
+
+              <div className="extraction-actions">
+                <label className="check-field">
+                  <input
+                    type="checkbox"
+                    checked={forceExtraction}
+                    onChange={(event) => setForceExtraction(event.target.checked)}
+                  />
+                  <span>Atualizar via APIs</span>
+                </label>
+                <button type="submit" className="button-primary" disabled={extractionRunning}>
+                  {extractionRunning ? <LoaderCircle size={15} className="animate-spin" /> : <Download size={15} />}
+                  Extrair
+                </button>
+              </div>
+            </form>
+
+            {extractionError && <p className="auth-error">{extractionError}</p>}
+
+            {extractionResults.length > 0 && (
+              <div className="extraction-results">
+                {extractionResults.map((item) => (
+                  <div key={item.sku} className="extraction-result-row">
+                    <span className={`status-dot status-dot--${item.status}`} />
+                    <div className="min-w-0 flex-1">
+                      <strong>{item.sku}</strong>
+                      <small>{item.message}</small>
+                    </div>
+                    <span>{item.stores_count} lojas</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="sku-status-card">
+              <div className="sku-status-card__header">
+                <div>
+                  <h3>Banco local</h3>
+                  <p>{skuStatusItems.length} SKUs acompanhados</p>
+                </div>
+                <button type="button" className="table-action" onClick={() => void loadSkuStatus()} aria-label="Atualizar SKUs">
+                  {skuStatusLoading ? <LoaderCircle size={16} className="animate-spin" /> : <CheckCircle2 size={16} />}
+                </button>
+              </div>
+              <div className="sku-status-list">
+                {skuStatusLoading && !skuStatusItems.length ? (
+                  <p className="sku-status-empty">Carregando...</p>
+                ) : skuStatusItems.length ? (
+                  skuStatusItems.map((item) => (
+                    <div key={item.sku} className="sku-status-row">
+                      <strong>{item.sku}</strong>
+                      <span>{item.offer_count} ofertas</span>
+                      <span>{item.store_count} lojas</span>
+                      <time>{formatDateTime(item.last_update)}</time>
+                    </div>
+                  ))
+                ) : (
+                  <p className="sku-status-empty">Nenhum SKU no banco local.</p>
+                )}
+              </div>
+            </div>
+          </section>
         </div>
       )}
     </div>

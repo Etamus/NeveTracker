@@ -17,3 +17,8 @@ class ProductCreate(BaseModel):
     sku: Optional[str] = None
 
     initial_price: PriceHistoryCreate
+
+
+class SkuBatchRequest(BaseModel):
+    skus: List[str]
+    force_refresh: bool = True

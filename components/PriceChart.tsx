@@ -51,12 +51,12 @@ export const PriceChart = ({ products }: PriceChartProps) => {
     <div className="h-[320px] min-h-[280px] w-full">
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={chartData} margin={{ top: 12, right: 14, left: 4, bottom: 18 }}>
-          <CartesianGrid stroke="#e8ebef" vertical={false} strokeDasharray="3 4" />
+          <CartesianGrid stroke="var(--chart-grid)" vertical={false} strokeDasharray="3 4" />
           <XAxis
             dataKey="store"
             axisLine={false}
             tickLine={false}
-            tick={{ fill: "#7c8695", fontSize: 10, fontWeight: 500 }}
+            tick={{ fill: "var(--muted)", fontSize: 10, fontWeight: 500 }}
             tickFormatter={shortStore}
             tickMargin={12}
             interval="preserveStartEnd"
@@ -65,7 +65,7 @@ export const PriceChart = ({ products }: PriceChartProps) => {
           <YAxis
             axisLine={false}
             tickLine={false}
-            tick={{ fill: "#7c8695", fontSize: 10 }}
+            tick={{ fill: "var(--muted)", fontSize: 10 }}
             tickFormatter={(value) => currencyFormatter.format(Number(value))}
             width={78}
             tickMargin={8}
@@ -73,7 +73,7 @@ export const PriceChart = ({ products }: PriceChartProps) => {
           <Tooltip
             cursor={{ stroke: "#a6b0bd", strokeDasharray: "3 4" }}
             contentStyle={{
-              background: "#111827",
+              background: "var(--tooltip-bg)",
               border: "none",
               borderRadius: "7px",
               boxShadow: "0 12px 28px rgba(15, 23, 42, 0.18)",
@@ -90,12 +90,12 @@ export const PriceChart = ({ products }: PriceChartProps) => {
             type="monotone"
             dataKey="price"
             name="Preço"
-            stroke="#0f7180"
+            stroke="var(--accent)"
             strokeWidth={2.25}
-            fill="#e6f3f5"
+            fill="var(--chart-fill)"
             fillOpacity={0.8}
-            dot={{ r: 3.5, fill: "#ffffff", stroke: "#0f7180", strokeWidth: 2 }}
-            activeDot={{ r: 5, fill: "#0f7180", stroke: "#ffffff", strokeWidth: 2 }}
+            dot={{ r: 3.5, fill: "var(--surface)", stroke: "var(--accent)", strokeWidth: 2 }}
+            activeDot={{ r: 5, fill: "var(--accent)", stroke: "var(--surface)", strokeWidth: 2 }}
           />
         </AreaChart>
       </ResponsiveContainer>
