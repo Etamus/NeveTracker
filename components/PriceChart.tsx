@@ -7,31 +7,33 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { useEffect, useMemo, useState } from "react";
 import type { Product } from "../models/product.model";
+import {
+  createCurrencyFormatter,
+  getInterfacePreferences,
+  INTERFACE_PREFERENCES_EVENT,
+  type InterfacePreferences,
+} from "../src/preferences";
 
 interface PriceChartProps {
   products: Product[];
 }
 
-const currencyFormatter = new Intl.NumberFormat("pt-BR", {
-  style: "currency",
-  currency: "BRL",
-  minimumFractionDigits: 0,
-  maximumFractionDigits: 0,
-});
-
-const preciseCurrencyFormatter = new Intl.NumberFormat("pt-BR", {
-  style: "currency",
-  currency: "BRL",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
 const shortStore = (value: string) =>
   value.length > 13 ? `${value.slice(0, 12)}…` : value;
 
 export const PriceChart = ({ products }: PriceChartProps) => {
+  const [interfacePreferences, setInterfacePreferences] = useState<InterfacePreferences>(getInterfacePreferences);
+  const currencyFormatter = useMemo(() => createCurrencyFormatter(interfacePreferences, 0, 0), [interfacePreferences]);
+  const preciseCurrencyFormatter = useMemo(() => createCurrencyFormatter(interfacePreferences), [interfacePreferences]);
   const cheapestByStore = new Map<string, { store: string; price: number }>();
+
+  useEffect(() => {
+    const syncPreferences = () => setInterfacePreferences(getInterfacePreferences());
+    window.addEventListener(INTERFACE_PREFERENCES_EVENT, syncPreferences);
+    return () => window.removeEventListener(INTERFACE_PREFERENCES_EVENT, syncPreferences);
+  }, []);
 
   products.forEach((product) => {
     const price = Number(product.current_price);

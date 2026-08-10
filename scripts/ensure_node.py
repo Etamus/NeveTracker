@@ -51,20 +51,17 @@ def _write_env(root: Path, node_exe: Path, npm_cmd: Path) -> None:
     env_file = root / ".tools" / "node" / "env.bat"
     npx_cmd = node_home / "npx.cmd"
     env_file.parent.mkdir(parents=True, exist_ok=True)
-    env_file.write_text(
-        "\n".join(
-            [
-                "@echo off",
-                f'set "NODE_HOME={node_home}"',
-                f'set "NODE_EXE={node_exe}"',
-                f'set "NPM_CMD={npm_cmd}"',
-                f'set "NPX_CMD={npx_cmd}"',
-                'set "PATH=%NODE_HOME%;%PATH%"',
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    lines = [
+        "@echo off",
+        f'set "NODE_HOME={node_home}"',
+        f'set "NODE_EXE={node_exe}"',
+        f'set "NPM_CMD={npm_cmd}"',
+        f'set "NPX_CMD={npx_cmd}"',
+        'set "PATH=%NODE_HOME%;%PATH%"',
+        "",
+    ]
+    encoding = "mbcs" if sys.platform == "win32" else "utf-8"
+    env_file.write_text("\r\n".join(lines), encoding=encoding)
 
 
 def _global_node() -> Optional[Tuple[Path, Path]]:
@@ -125,10 +122,12 @@ def _download_portable_node(root: Path) -> Tuple[Path, Path]:
     with tempfile.TemporaryDirectory() as temp_dir:
         zip_path = Path(temp_dir) / zip_name
         urllib.request.urlretrieve(url, zip_path)
+        extracted = node_root / zip_name[:-4]
+        if extracted.exists():
+            shutil.rmtree(extracted)
         with zipfile.ZipFile(zip_path) as archive:
             archive.extractall(node_root)
 
-    extracted = node_root / zip_name[:-4]
     node_exe = extracted / "node.exe"
     npm_cmd = extracted / "npm.cmd"
     if not node_exe.exists() or not npm_cmd.exists():
@@ -138,19 +137,36 @@ def _download_portable_node(root: Path) -> Tuple[Path, Path]:
 
 
 def main() -> int:
-    root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd().resolve()
+    root_arg = sys.argv[1].strip('"') if len(sys.argv) > 1 else None
+    root = Path(root_arg).resolve() if root_arg else Path.cwd().resolve()
 
-    found = _global_node() or _portable_node(root)
+    source = "Node portatil existente"
+    found = _portable_node(root)
     if not found:
-        found = _download_portable_node(root)
+        try:
+            found = _download_portable_node(root)
+            source = "Node portatil baixado"
+        except Exception as error:
+            found = _global_node()
+            if not found:
+                raise RuntimeError(
+                    "Nao foi possivel baixar o Node portatil e nenhum Node global compativel foi encontrado."
+                ) from error
+            source = "Node global compativel"
+            print(f"AVISO: falha ao baixar Node portatil ({error}). Usando Node global compativel.")
 
     node_exe, npm_cmd = found
     _write_env(root, node_exe, npm_cmd)
     version = ".".join(str(part) for part in _node_version(node_exe))
+    print(f"Origem: {source}")
     print(f"Node pronto: {node_exe} ({version})")
     print(f"npm pronto:  {npm_cmd}")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception as error:
+        print(f"ERRO: {error}", file=sys.stderr)
+        raise SystemExit(1)

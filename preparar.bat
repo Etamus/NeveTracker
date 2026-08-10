@@ -39,7 +39,7 @@ if not exist "%ENSURE_NODE_SCRIPT%" (
 )
 
 echo Preparando Node.js para o frontend...
-%PY_CMD% "%ENSURE_NODE_SCRIPT%" "%ROOT%"
+%PY_CMD% "%ENSURE_NODE_SCRIPT%" "%ROOT%."
 if errorlevel 1 (
   echo ERRO: Falha ao preparar o Node.js portatil.
   exit /b 1

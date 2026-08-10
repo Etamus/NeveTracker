@@ -20,6 +20,14 @@ import {
 } from "lucide-react";
 import type { ComparisonRow, Product } from "../models/product.model";
 import { PriceChart } from "./PriceChart";
+import {
+  createCompactFormatter,
+  createCurrencyFormatter,
+  getInterfacePreferences,
+  INTERFACE_PREFERENCES_EVENT,
+  STORE_OPTIONS,
+  type InterfacePreferences,
+} from "../src/preferences";
 
 interface SlidingTabsProps {
   activeTab: number;
@@ -36,19 +44,7 @@ type StoreRankingState = { row: ComparisonRow; left: number; top: number };
 const PAGE_SIZE = 12;
 const CARD_PAGE_SIZE = 12;
 const BRAND_FILTERS = ["Consul", "Brastemp", "Whirlpool"];
-const STORE_FILTERS = [
-  { label: "Mercado Livre", aliases: ["mercado livre", "meli", "-ml", "mlb"] },
-  { label: "Magazine Luiza", aliases: ["magazine luiza", "magalu"] },
-  { label: "Amazon Brasil", aliases: ["amazon brasil", "amazon"] },
-  { label: "Leroy Merlin", aliases: ["leroy merlin", "leroy"] },
-  { label: "Shopee", aliases: ["shopee"] },
-  { label: "Duofrio", aliases: ["duofrio", "dufrio"] },
-  { label: "Friolar", aliases: ["friolar", "friolar peças", "friolar pecas"] },
-  { label: "Refrigeração Mota", aliases: ["refrigeração mota", "refrigeracao mota"] },
-  { label: "MG Parts", aliases: ["mg parts", "mgparts"] },
-  { label: "Gold Service", aliases: ["gold service", "goldservice"] },
-  { label: "ComClick", aliases: ["comclick", "com click"] },
-];
+const STORE_FILTERS = STORE_OPTIONS;
 const PRODUCT_STOP_WORDS = new Set([
   "a", "as", "com", "da", "de", "do", "dos", "e", "em", "na", "no", "os", "para", "por",
 ]);
@@ -73,19 +69,7 @@ const sortOptions: Array<{ value: SortOrder; label: string }> = [
   { value: "price_desc", label: "Maior preço" },
 ];
 
-const currencyFormatter = new Intl.NumberFormat("pt-BR", {
-  style: "currency",
-  currency: "BRL",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
-const compactFormatter = new Intl.NumberFormat("pt-BR", {
-  notation: "compact",
-  maximumFractionDigits: 1,
-});
-
-const formatCurrency = (value: number) => currencyFormatter.format(value || 0);
+const formatCurrency = (value: number) => createCurrencyFormatter(getInterfacePreferences()).format(value || 0);
 
 const truncateText = (value: string, maxLength = 28) =>
   value.length > maxLength ? `${value.slice(0, maxLength - 3).trimEnd()}...` : value;
@@ -453,6 +437,7 @@ export default function SlidingTabs({
   const [visibleCards, setVisibleCards] = useState(CARD_PAGE_SIZE);
   const [selectedRow, setSelectedRow] = useState<ComparisonRow | null>(null);
   const [hoveredStoreRanking, setHoveredStoreRanking] = useState<StoreRankingState | null>(null);
+  const [interfacePreferences, setInterfacePreferences] = useState<InterfacePreferences>(getInterfacePreferences);
   const filterControlRef = useRef<HTMLDivElement>(null);
   const sortControlRef = useRef<HTMLDivElement>(null);
 
@@ -471,7 +456,15 @@ export default function SlidingTabs({
   }, [products, rows]);
 
   const brands = BRAND_FILTERS;
-  const stores = STORE_FILTERS.map((store) => store.label);
+  const stores = useMemo(() => STORE_FILTERS.map((store) => store.label), []);
+  const compactFormatter = useMemo(() => createCompactFormatter(interfacePreferences), [interfacePreferences]);
+  const defaultStoreSelection = useMemo(
+    () =>
+      interfacePreferences.defaultStores.length === stores.length
+        ? []
+        : interfacePreferences.defaultStores.filter((store) => stores.includes(store)),
+    [interfacePreferences.defaultStores, stores],
+  );
 
   useEffect(() => {
     const closeControls = (event: PointerEvent) => {
@@ -485,6 +478,21 @@ export default function SlidingTabs({
   }, []);
 
   useEffect(() => {
+    const syncPreferences = () => {
+      const nextPreferences = getInterfacePreferences();
+      setInterfacePreferences(nextPreferences);
+      setSelectedStores(
+        nextPreferences.defaultStores.length === stores.length
+          ? []
+          : nextPreferences.defaultStores.filter((store) => stores.includes(store)),
+      );
+    };
+
+    window.addEventListener(INTERFACE_PREFERENCES_EVENT, syncPreferences);
+    return () => window.removeEventListener(INTERFACE_PREFERENCES_EVENT, syncPreferences);
+  }, [stores]);
+
+  useEffect(() => {
     setVisibleRows(PAGE_SIZE);
     setVisibleCards(CARD_PAGE_SIZE);
   }, [resultSearch, selectedBrands, selectedStores, sortOrder, lastQuery]);
@@ -492,10 +500,10 @@ export default function SlidingTabs({
   useEffect(() => {
     setResultSearch("");
     setSelectedBrands([]);
-    setSelectedStores([]);
+    setSelectedStores(defaultStoreSelection);
     setSortOrder("stores_desc");
     setHoveredStoreRanking(null);
-  }, [lastQuery]);
+  }, [defaultStoreSelection, lastQuery]);
 
   useEffect(() => {
     if (activeTab !== 2) setSelectedRow(null);
@@ -593,7 +601,7 @@ export default function SlidingTabs({
 
   const clearFilters = () => {
     setSelectedBrands([]);
-    setSelectedStores([]);
+    setSelectedStores(defaultStoreSelection);
   };
 
   const showStoreRanking = (

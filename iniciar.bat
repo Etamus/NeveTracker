@@ -5,6 +5,8 @@ set "ROOT=%~dp0"
 set "BACKEND_DIR=%ROOT%backend\"
 set "FRONTEND_DIR=%ROOT%"
 set "PREPARE_SCRIPT=%ROOT%preparar.bat"
+set "RUN_BACKEND_SCRIPT=%ROOT%scripts\run_backend.bat"
+set "RUN_FRONTEND_SCRIPT=%ROOT%scripts\run_frontend.bat"
 set "VENV_PY=%BACKEND_DIR%.venv\Scripts\python.exe"
 set "NODE_ENV_FILE=%ROOT%.tools\node\env.bat"
 set "BACKEND_URL=http://127.0.0.1:8000"
@@ -13,6 +15,11 @@ set "LOCK_DIR=%ROOT%.iniciar.lock"
 set "EXIT_CODE=0"
 set "LAUNCHED_BACKEND=0"
 set "LAUNCHED_FRONTEND=0"
+set "BACKEND_WAIT_SECONDS=90"
+set "FRONTEND_WAIT_SECONDS=90"
+
+if defined NEVEPRICE_BACKEND_WAIT_SECONDS set "BACKEND_WAIT_SECONDS=%NEVEPRICE_BACKEND_WAIT_SECONDS%"
+if defined NEVEPRICE_FRONTEND_WAIT_SECONDS set "FRONTEND_WAIT_SECONDS=%NEVEPRICE_FRONTEND_WAIT_SECONDS%"
 
 echo.
 echo === NevePrice: iniciar local ===
@@ -20,16 +27,25 @@ echo Backend:  %BACKEND_URL%
 echo Frontend: %FRONTEND_URL%
 echo.
 
-mkdir "%LOCK_DIR%" >nul 2>nul
+call :create_lock
 if errorlevel 1 (
-  echo Ja existe uma inicializacao em andamento.
-  echo Se nenhuma janela estiver abrindo, apague a pasta "%LOCK_DIR%" e tente novamente.
-  pause
   exit /b 1
 )
 
 if not exist "%PREPARE_SCRIPT%" (
   echo ERRO: preparar.bat nao foi encontrado em "%PREPARE_SCRIPT%".
+  set "EXIT_CODE=1"
+  goto :cleanup
+)
+
+if not exist "%RUN_BACKEND_SCRIPT%" (
+  echo ERRO: Runner do backend nao encontrado em "%RUN_BACKEND_SCRIPT%".
+  set "EXIT_CODE=1"
+  goto :cleanup
+)
+
+if not exist "%RUN_FRONTEND_SCRIPT%" (
+  echo ERRO: Runner do frontend nao encontrado em "%RUN_FRONTEND_SCRIPT%".
   set "EXIT_CODE=1"
   goto :cleanup
 )
@@ -113,16 +129,16 @@ if not exist "%NPM_CMD%" (
 call :url_ok "%BACKEND_URL%/"
 if errorlevel 1 (
   echo Iniciando backend neste CMD...
-  start "NevePrice Backend" /B /D "%BACKEND_DIR%" cmd /c ""%VENV_PY%" -m uvicorn main:app --reload --host 127.0.0.1 --port 8000"
+  start "NevePrice Backend" /B "%COMSPEC%" /d /c ""%RUN_BACKEND_SCRIPT%" "%BACKEND_DIR%." "%VENV_PY%""
   set "LAUNCHED_BACKEND=1"
 ) else (
   echo Backend ja esta disponivel. Nao vou iniciar outra instancia.
 )
 
 echo Aguardando backend ficar disponivel...
-call :wait_url "%BACKEND_URL%/" 60
+call :wait_url "%BACKEND_URL%/" %BACKEND_WAIT_SECONDS%
 if errorlevel 1 (
-  echo ERRO: Backend nao respondeu em ate 60 segundos.
+  echo ERRO: Backend nao respondeu em ate %BACKEND_WAIT_SECONDS% segundos.
   echo Verifique as mensagens deste CMD para ler o erro do backend.
   set "EXIT_CODE=1"
   goto :cleanup
@@ -131,16 +147,19 @@ if errorlevel 1 (
 call :url_ok "%FRONTEND_URL%/"
 if errorlevel 1 (
   echo Iniciando frontend neste CMD...
-  start "NevePrice Frontend" /B /D "%FRONTEND_DIR%" cmd /c "call ""%NODE_ENV_FILE%"" && call ""%NPM_CMD%"" run dev -- --host 127.0.0.1 --port 5173 --strictPort"
+  start "NevePrice Frontend" /B "%COMSPEC%" /d /c ""%RUN_FRONTEND_SCRIPT%" "%FRONTEND_DIR%." "%NODE_ENV_FILE%""
   set "LAUNCHED_FRONTEND=1"
 ) else (
   echo Frontend ja esta disponivel. Nao vou iniciar outra instancia.
 )
 
 echo Aguardando frontend ficar disponivel...
-call :wait_url "%FRONTEND_URL%/" 30
+call :wait_url "%FRONTEND_URL%/" %FRONTEND_WAIT_SECONDS%
 if errorlevel 1 (
-  echo AVISO: Frontend ainda nao respondeu. Este CMD permanecera aberto para diagnostico.
+  echo ERRO: Frontend nao respondeu em ate %FRONTEND_WAIT_SECONDS% segundos.
+  echo Verifique as mensagens deste CMD para ler o erro do frontend.
+  set "EXIT_CODE=1"
+  goto :cleanup
 ) else (
   if defined NEVEPRICE_NO_BROWSER (
     echo Navegador nao aberto porque NEVEPRICE_NO_BROWSER esta definido.
@@ -164,17 +183,40 @@ if "%LAUNCHED_BACKEND%%LAUNCHED_FRONTEND%"=="00" (
 echo Este console ficara aberto para manter o ambiente visivel.
 echo Feche esta janela ou pressione Ctrl+C quando quiser encerrar.
 
+if defined NEVEPRICE_EXIT_AFTER_READY exit /b 0
+
 :keepalive
 ping -n 3601 127.0.0.1 >nul 2>nul
 goto :keepalive
 
 :cleanup
 if exist "%LOCK_DIR%" rmdir "%LOCK_DIR%" >nul 2>nul
-if not "%EXIT_CODE%"=="0" pause
+if not "%EXIT_CODE%"=="0" if not defined NEVEPRICE_NO_PAUSE pause
 exit /b %EXIT_CODE%
 
+:create_lock
+mkdir "%LOCK_DIR%" >nul 2>nul
+if not errorlevel 1 exit /b 0
+
+call :url_ok "%BACKEND_URL%/"
+set "LOCK_BACKEND_STATUS=%ERRORLEVEL%"
+call :url_ok "%FRONTEND_URL%/"
+set "LOCK_FRONTEND_STATUS=%ERRORLEVEL%"
+
+if not "%LOCK_BACKEND_STATUS%%LOCK_FRONTEND_STATUS%"=="00" (
+  echo Trava antiga encontrada. Limpando "%LOCK_DIR%"...
+  rmdir "%LOCK_DIR%" >nul 2>nul
+  mkdir "%LOCK_DIR%" >nul 2>nul
+  if not errorlevel 1 exit /b 0
+)
+
+echo Ja existe uma inicializacao em andamento.
+echo Se nenhuma janela estiver abrindo, apague a pasta "%LOCK_DIR%" e tente novamente.
+if not defined NEVEPRICE_NO_PAUSE pause
+exit /b 1
+
 :url_ok
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r = Invoke-WebRequest -UseBasicParsing -Uri '%~1' -TimeoutSec 2; if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) { exit 0 } } catch { }; exit 1" >nul 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$u=[Uri]'%~1'; $port=$u.Port; if ($port -lt 0) { if ($u.Scheme -eq 'https') { $port=443 } else { $port=80 } }; $c=New-Object Net.Sockets.TcpClient; try { $t=$c.ConnectAsync($u.Host,$port); if (-not $t.Wait(1200)) { exit 1 }; if ($c.Connected) { exit 0 }; exit 1 } catch { exit 1 } finally { $c.Close() }" >nul 2>nul
 exit /b %errorlevel%
 
 :wait_url
@@ -187,5 +229,5 @@ call :url_ok "%WAIT_URL%"
 if not errorlevel 1 exit /b 0
 set /a WAIT_COUNT+=1
 if !WAIT_COUNT! GEQ %WAIT_LIMIT% exit /b 1
-timeout /t 1 /nobreak >nul
+ping -n 2 127.0.0.1 >nul 2>nul
 goto :wait_loop
