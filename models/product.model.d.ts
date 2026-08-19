@@ -7,10 +7,27 @@ export interface Product {
   current_price: number;
   store: string;
   source?: string | null;
+  discovery_source?: string | null;
   url: string;
   image_url?: string | null;
   last_update: string; // ISO Date string vinda do backend
   description?: string | null;
+  cash_price?: number | null;
+  installment_price?: number | null;
+  installment_count?: number | null;
+  installment_value?: number | null;
+  payment_difference?: number | null;
+  shipping_cost?: number | null;
+  shipping_method?: string | null;
+  delivery_min_days?: number | null;
+  delivery_max_days?: number | null;
+  handling_min_days?: number | null;
+  handling_max_days?: number | null;
+  destination_zip?: string | null;
+  availability?: string | null;
+  logistics_source?: string | null;
+  logistics_captured_at?: string | null;
+  is_cached?: boolean;
 }
 
 export interface StoreSearchResult {
@@ -20,6 +37,7 @@ export interface StoreSearchResult {
   message?: string | null;
   product: Product | null;
   products?: Product[];
+  cadence?: "hourly" | "3x_daily" | string | null;
 }
 
 export interface ComparisonRow {

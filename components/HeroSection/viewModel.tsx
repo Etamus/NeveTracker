@@ -5,6 +5,7 @@ import type {
   SearchResponse,
   StoreSearchResult,
 } from "../../models/product.model";
+import { getInterfacePreferences } from "../../src/preferences";
 
 export const getApiBaseUrl = () => {
   const configuredApiUrl =
@@ -25,22 +26,33 @@ const useHeroSection = () => {
   const [feedback, setFeedback] = useState("");
   const [lastQuery, setLastQuery] = useState("");
 
-  const handleSearch = async () => {
+  const handleSearch = async (selectedSkus: string[] = [], queryLabel?: string) => {
     if (loading) return;
 
     const query = productName.trim();
-    if (!query) return;
+    if (!query && !selectedSkus.length) return;
 
     setLoading(true);
     setFeedback("");
-    setLastQuery(query);
+    setLastQuery(queryLabel || query);
 
     const apiBase = getApiBaseUrl();
+    const skus = [...new Set(selectedSkus.map((sku) => sku.trim().toUpperCase()).filter(Boolean))];
 
     try {
-      const response = await fetch(
-        `${apiBase}/products/search?q=${encodeURIComponent(query)}`,
-      );
+      const response = skus.length
+        ? await fetch(`${apiBase}/products/search/batch`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              skus,
+              force_refresh: false,
+              refresh_if_stale: true,
+              postal_code: getInterfacePreferences().logisticsPostalCode || null,
+              scope: "all",
+            }),
+          })
+        : await fetch(`${apiBase}/products/search?q=${encodeURIComponent(query)}`);
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }

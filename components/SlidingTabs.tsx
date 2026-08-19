@@ -327,6 +327,58 @@ const formatDate = (value?: string) => {
   }).format(date);
 };
 
+const paymentLabel = (offer: Product) => {
+  const cash = offer.cash_price || offer.current_price;
+  if (offer.installment_price && offer.installment_price > cash) {
+    return `À vista · +${formatCurrency(offer.installment_price - cash)} a prazo`;
+  }
+  return "À vista";
+};
+
+const shippingLabel = (offer: Product) =>
+  offer.shipping_cost === 0
+    ? "Frete grátis"
+    : offer.shipping_cost != null
+      ? `Frete ${formatCurrency(offer.shipping_cost)}`
+      : "Frete não informado";
+
+const leadTimeLabel = (offer: Product) => {
+  if (offer.delivery_min_days == null && offer.delivery_max_days == null) return "Prazo não informado";
+  const minimum = offer.delivery_min_days ?? offer.delivery_max_days;
+  const maximum = offer.delivery_max_days ?? offer.delivery_min_days;
+  return minimum === maximum ? `${minimum} dias úteis` : `${minimum}-${maximum} dias úteis`;
+};
+
+const analyticsShippingLabel = (offer: Product) => {
+  if (offer.shipping_cost == null) return "";
+  return `Frete: ${formatCurrency(offer.shipping_cost)}`;
+};
+
+const analyticsLeadTimeLabel = (offer: Product) =>
+  offer.delivery_min_days == null && offer.delivery_max_days == null ? "" : leadTimeLabel(offer);
+
+const tableShippingLabel = (offer?: Product) => {
+  if (offer?.shipping_cost == null) return "—";
+  return offer.shipping_cost === 0 ? "Grátis" : formatCurrency(offer.shipping_cost);
+};
+
+const tableLeadTimeLabel = (offer?: Product) => {
+  if (!offer || (offer.delivery_min_days == null && offer.delivery_max_days == null)) return "—";
+  const minimum = offer.delivery_min_days ?? offer.delivery_max_days;
+  const maximum = offer.delivery_max_days ?? offer.delivery_min_days;
+  return minimum === maximum ? `${minimum} dias úteis` : `${minimum}-${maximum} dias úteis`;
+};
+
+const installmentDetails = (offers: Product[]) => {
+  const offer = offers
+    .filter((item) => Number(item.installment_price) > 0)
+    .sort((left, right) => Number(left.installment_price) - Number(right.installment_price))[0];
+  if (!offer?.installment_price) return null;
+  const cashPrice = offer.cash_price || offer.current_price;
+  const difference = offer.payment_difference ?? Math.max(0, offer.installment_price - cashPrice);
+  return { price: offer.installment_price, difference };
+};
+
 const initials = (name: string) =>
   name
     .split(/\s+/)
@@ -459,11 +511,15 @@ export default function SlidingTabs({
   }, [products, rows]);
 
   const brands = BRAND_FILTERS;
-  const stores = useMemo(() => STORE_FILTERS.map((store) => store.label), []);
+  const stores = useMemo(() => {
+    const labels = new Set(STORE_FILTERS.map((store) => store.label));
+    marketProducts.forEach((product) => labels.add(product.source || product.store));
+    return [...labels];
+  }, [marketProducts]);
   const compactFormatter = useMemo(() => createCompactFormatter(interfacePreferences), [interfacePreferences]);
   const defaultStoreSelection = useMemo(
     () =>
-      interfacePreferences.defaultStores.length === stores.length
+      STORE_FILTERS.every((store) => interfacePreferences.defaultStores.includes(store.label))
         ? []
         : interfacePreferences.defaultStores.filter((store) => stores.includes(store)),
     [interfacePreferences.defaultStores, stores],
@@ -485,7 +541,7 @@ export default function SlidingTabs({
       const nextPreferences = getInterfacePreferences();
       setInterfacePreferences(nextPreferences);
       setSelectedStores(
-        nextPreferences.defaultStores.length === stores.length
+        STORE_FILTERS.every((store) => nextPreferences.defaultStores.includes(store.label))
           ? []
           : nextPreferences.defaultStores.filter((store) => stores.includes(store)),
       );
@@ -908,11 +964,14 @@ const OffersTable = ({
           <table className="offer-table">
             <thead>
               <tr>
-                <th className="w-[42%]">Produto</th>
+                <th className="w-[30%]">Produto</th>
                 <th>Marca / SKU</th>
                 <th className="text-center">Lojas</th>
                 <th className="text-center">Preço médio</th>
                 <th className="text-center">Melhor preço</th>
+                <th className="text-center">Á PRAZO</th>
+                <th className="text-center">Frete</th>
+                <th className="text-center">Lead time</th>
                 <th>Atualização</th>
                 <th className="w-14" />
               </tr>
@@ -920,6 +979,8 @@ const OffersTable = ({
             <tbody>
               {rows.map((row) => {
                 const image = getRowImage(row);
+                const cheapestOffer = bestOffersByStore(row.offers)[0];
+                const installment = installmentDetails(row.offers);
                 return (
                   <tr key={`${row.id}-${row.name}`}>
                     <td>
@@ -964,6 +1025,26 @@ const OffersTable = ({
                           <small title={row.cheapest_store}>{truncateText(row.cheapest_store)}</small>
                         </span>
                       </a>
+                    </td>
+                    <td className="text-center">
+                      {installment ? (
+                        <span className="offer-data-cell">
+                          <strong>{formatCurrency(installment.price)}</strong>
+                          <small>+{formatCurrency(installment.difference)} vs. à vista</small>
+                        </span>
+                      ) : (
+                        <span className="offer-data-cell offer-data-cell--empty">—</span>
+                      )}
+                    </td>
+                    <td className="text-center">
+                      <span className="offer-data-cell">
+                        <strong>{tableShippingLabel(cheapestOffer)}</strong>
+                      </span>
+                    </td>
+                    <td className="text-center">
+                      <span className="offer-data-cell">
+                        <strong>{tableLeadTimeLabel(cheapestOffer)}</strong>
+                      </span>
                     </td>
                     <td>
                       <span className="text-[13px] text-[var(--muted)]">{formatDate(row.offers[0]?.last_update)}</span>
@@ -1048,6 +1129,8 @@ const CatalogGrid = ({
                   <div>
                     <p className="text-xs font-medium text-[var(--muted)]">Preço atual</p>
                     <p className="mt-0.5 text-lg font-semibold tracking-tight text-[var(--foreground)]">{formatCurrency(product.current_price)}</p>
+                    <p className="mt-1 text-xs font-medium text-[var(--muted)]">{paymentLabel(product)}</p>
+                    <p className="mt-0.5 text-xs text-[var(--muted)]">{shippingLabel(product)} · {leadTimeLabel(product)}</p>
                   </div>
                   <a href={product.url} target="_blank" rel="noreferrer" className="catalog-link" aria-label={`Abrir ${product.name}`}>
                     <ExternalLink size={15} />
@@ -1219,7 +1302,8 @@ const ProductAnalytics = ({ row, onBack }: { row: ComparisonRow; onBack: () => v
               <a key={`${offer.store}-${offer.url}`} href={offer.url} target="_blank" rel="noreferrer" className="detail-offer-row">
                 <span className="store-ranking-index">{String(index + 1).padStart(2, "0")}</span>
                 <span className="min-w-0 flex-1"><strong>{offer.store}</strong><small>{formatDate(offer.last_update)}</small></span>
-                <span className="text-right"><strong className={index === 0 ? "!text-[var(--success)]" : ""}>{formatCurrency(offer.current_price)}</strong><small>{index === 0 ? "Melhor preço" : "Ver produto"}</small></span>
+                <span className="detail-offer-logistics"><strong>{analyticsShippingLabel(offer)}</strong><small>{analyticsLeadTimeLabel(offer)}</small></span>
+                <span className="text-right"><strong className={index === 0 ? "!text-[var(--success)]" : ""}>{formatCurrency(offer.current_price)}</strong><small>Ver produto</small></span>
                 <ExternalLink size={14} />
               </a>
             ))}

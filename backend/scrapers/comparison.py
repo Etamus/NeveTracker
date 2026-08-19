@@ -30,7 +30,7 @@ TARGET_STORE_ALIASES = {
 
 cache = TTLCache(maxsize=100, ttl=900)
 cache_lock = RLock()
-COMPARISON_STORE_LIMIT = 24
+COMPARISON_STORE_LIMIT = 60
 LEAD_TIMEOUT = 8
 
 
@@ -348,15 +348,18 @@ def _comparison_candidate(item, product_query):
     price = _as_float(item.get("price"))
     relative_url = item.get("url")
 
-    if not store_label or not name or not price or not relative_url:
+    if not name or not price or not relative_url:
         return None
+
+    source_label = store_label or merchant_name.strip() or item.get("_source_name") or "Comparador"
 
     return {
         "name": name.strip(),
         "price": price,
-        "store": merchant_name.strip() or store_label,
-        "source": store_label,
-        "seller": merchant_name.strip() or store_label,
+        "store": merchant_name.strip() or source_label,
+        "source": source_label,
+        "seller": merchant_name.strip() or source_label,
+        "discovery_source": item.get("_source_name") or "Comparador",
         "url": urljoin(item["_base_url"], relative_url),
         "brand": store_label,
         "category": item.get("categoryName") or product_query,

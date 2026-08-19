@@ -15,6 +15,10 @@ O foco atual do sistema é comparar ofertas por **lojistas reais** sempre que a 
 - Visualização "Design" em cards com imagem, preço e link de acesso ao produto.
 - Dashboard por item com gráfico de preços e tabela comparativa por fonte.
 - Exportação do Analytics em Excel, com abas de resumo, lojistas e ofertas.
+- Pesquisa conjunta de até 30 SKUs, preservando a visão agregada no Analytics e no Excel.
+- Condições à vista/a prazo, diferença de pagamento, frete e prazo quando publicados pela fonte.
+- CEP logístico configurável e atualização individual dos SKUs do banco local.
+- Agendamento manual por dias, janela de horário e repetição configurável de 0 a 12 horas.
 - Análises de dados e dashboards gerados através da IA **NeveAI**.
 - Banco SQLite local, sem depender de Docker, serviços pagos ou programas externos.
 - Scripts `.bat` para preparar e iniciar o projeto no Windows.
@@ -168,6 +172,10 @@ O token do Mercado Livre é opcional; quando informado, habilita a API oficial a
 ```text
 GET /              # Status da API
 GET /products/search?q=SKU_OU_TERMO
+POST /products/search/batch
+POST /products/batch-search
+GET /products/skus/status
+GET|PUT /products/schedule
 POST /products/export/analytics
 ```
 
@@ -185,6 +193,8 @@ A busca retorna:
 - Não exige permissões de administrador.
 - Não usa serviços pagos obrigatórios.
 - Scraping e consultas gratuitas podem sofrer bloqueios temporários por parte das lojas.
+- Frete e prazo dependem do CEP e da informação publicada pelo lojista; ausência é retornada como dado não informado.
+- O cache local permanece identificado e serve como contingência, sem ser apresentado como coleta nova.
 - Dados salvos no SQLite podem ser reaproveitados para reduzir novas coletas.
 
 ## Licença

@@ -12,6 +12,7 @@ from scrapers.comparison import (
     scrape_target_catalog,
 )
 from services.store_registry import STORE_BY_LABEL, TARGET_STORES
+from services.offer_enrichment import enrich_offers, normalize_postal_code
 
 STORE_ITEM_LIMIT = 50
 CATALOG_ROW_LIMIT = 30
@@ -236,7 +237,33 @@ KNOWN_BRANDS = {
     "shop",
 }
 
-VARIANT_SCRAPERS = {"scrape_amazon", "scrape_leroy", "scrape_shopee"}
+VARIANT_SCRAPERS = {
+    "scrape_amazon",
+    "scrape_leroy",
+    "scrape_mercadoLivre",
+    "scrape_shopee",
+    "search_mercado_livre",
+}
+
+OFFER_DETAIL_FIELDS = (
+    "discovery_source",
+    "cash_price",
+    "installment_price",
+    "installment_count",
+    "installment_value",
+    "payment_difference",
+    "shipping_cost",
+    "shipping_method",
+    "delivery_min_days",
+    "delivery_max_days",
+    "handling_min_days",
+    "handling_max_days",
+    "destination_zip",
+    "availability",
+    "logistics_source",
+    "logistics_captured_at",
+    "is_cached",
+)
 
 
 def _normalize_text(value):
@@ -410,7 +437,7 @@ def _normalize_result(item, product_query, store_label=None):
     if _is_generic_listing_name(name):
         return None
 
-    return {
+    normalized = {
         "name": name[:255],
         "price": price,
         "store": seller[:100],
@@ -421,6 +448,14 @@ def _normalize_result(item, product_query, store_label=None):
         "image_url": item.get("image_url"),
         "sku": sku,
     }
+    normalized.update(
+        {
+            field: item.get(field)
+            for field in OFFER_DETAIL_FIELDS
+            if item.get(field) is not None
+        }
+    )
+    return normalized
 
 
 def _offer_url_identity(url):
@@ -466,7 +501,7 @@ def _deduplicate(items):
 
 
 def _product_response(item, fallback_id):
-    return {
+    response = {
         "id": item.get("id") or fallback_id,
         "name": item["name"],
         "brand": item["brand"],
@@ -479,6 +514,16 @@ def _product_response(item, fallback_id):
         "sku": item.get("sku"),
         "last_update": item.get("last_update") or datetime.utcnow().isoformat(),
     }
+    response.update(
+        {
+            field: item.get(field)
+            for field in OFFER_DETAIL_FIELDS
+            if item.get(field) is not None
+        }
+    )
+    response.setdefault("cash_price", response["current_price"])
+    response.setdefault("is_cached", False)
+    return response
 
 
 def _product_tokens(name):
@@ -879,6 +924,9 @@ def _build_payloads(raw_by_store, product_query):
 
         available_results.extend(store_products)
         best_product = store_products[0] if store_products else None
+        cache_only = bool(store_products) and all(
+            product.get("is_cached") for product in store_products
+        )
 
         if best_product:
             store_payloads.append(
@@ -886,9 +934,10 @@ def _build_payloads(raw_by_store, product_query):
                     "key": store_config["key"],
                     "label": store_config["label"],
                     "available": True,
-                    "message": None,
+                    "message": "Cache local" if cache_only else None,
                     "product": best_product,
                     "products": store_products,
+                    "cadence": store_config.get("cadence"),
                 }
             )
         else:
@@ -897,13 +946,43 @@ def _build_payloads(raw_by_store, product_query):
                     "key": store_config["key"],
                     "label": store_config["label"],
                     "available": False,
-                    "message": "Não disponível",
+                    "message": "Sem retorno atual",
                     "product": None,
                     "products": [],
+                    "cadence": store_config.get("cadence"),
                 }
             )
 
     return available_results, store_payloads
+
+
+def _append_discovered_store_payloads(store_payloads, available_results):
+    registered_names = {
+        _normalize_text(name)
+        for store in TARGET_STORES
+        for name in (store["label"], *store.get("aliases", ()))
+    }
+    discovered = {}
+    for product in available_results:
+        source = product.get("source") or product.get("store") or "Outras lojas"
+        if _normalize_text(source) in registered_names:
+            continue
+        discovered.setdefault(source, []).append(product)
+
+    for source, products in sorted(discovered.items()):
+        ordered = sorted(products, key=lambda product: product["current_price"])
+        store_payloads.append(
+            {
+                "key": f"discovered_{_normalize_text(source).replace(' ', '_')}",
+                "label": source,
+                "available": True,
+                "message": "Descoberta via comparador",
+                "product": ordered[0],
+                "products": ordered,
+                "cadence": "3x_daily",
+            }
+        )
+    return store_payloads
 
 
 def build_summary_from_cached_results(available_results, product_query):
@@ -927,17 +1006,29 @@ def build_summary_from_cached_results(available_results, product_query):
             key=lambda product: product["current_price"],
         )
         best_product = store_products[0] if store_products else None
+        cache_only = bool(store_products) and all(
+            product.get("is_cached") for product in store_products
+        )
 
         store_payloads.append(
             {
                 "key": store_config["key"],
                 "label": store_config["label"],
                 "available": bool(best_product),
-                "message": None if best_product else "Não disponível",
+                "message": (
+                    "Cache local"
+                    if cache_only
+                    else None
+                    if best_product
+                    else "Sem retorno atual"
+                ),
                 "product": best_product,
                 "products": store_products,
+                "cadence": store_config.get("cadence"),
             }
         )
+
+    _append_discovered_store_payloads(store_payloads, available_results)
 
     return {
         "processed_count": 0,
@@ -945,6 +1036,34 @@ def build_summary_from_cached_results(available_results, product_query):
         "stores": store_payloads,
         "comparison": _build_comparison_rows(available_results, product_query),
     }
+
+
+def _coerce_datetime(value):
+    if not value or isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _price_detail_values(item, cached=False, fallback=None):
+    values = {
+        field: item.get(field)
+        for field in OFFER_DETAIL_FIELDS
+        if field not in {"logistics_captured_at", "is_cached"}
+    }
+    if fallback is not None:
+        for field, value in values.items():
+            if value is None:
+                values[field] = getattr(fallback, field, None)
+    values["cash_price"] = values.get("cash_price") or item.get("price")
+    captured_at = _coerce_datetime(item.get("logistics_captured_at"))
+    values["logistics_captured_at"] = captured_at or (
+        getattr(fallback, "logistics_captured_at", None) if fallback is not None else None
+    )
+    values["is_cached"] = cached
+    return values
 
 
 def _save_result(item, db: Session):
@@ -973,6 +1092,7 @@ def _save_result(item, db: Session):
             store=item["store"],
             source=item.get("source") or item["store"],
             url=item["url"],
+            **_price_detail_values(item),
         )
         db.add(new_price)
         return 1
@@ -997,12 +1117,46 @@ def _save_result(item, db: Session):
             store=item["store"],
             source=source,
             url=item["url"],
+            **_price_detail_values(item, fallback=existing_price),
         )
         db.add(new_price)
         return 1
 
+    for field, value in _price_detail_values(item, fallback=existing_price).items():
+        setattr(existing_price, field, value)
     existing_price.timestamp = datetime.utcnow()
     return 0
+
+
+def _price_details_from_model(price, cached=True):
+    details = {
+        field: getattr(price, field, None)
+        for field in OFFER_DETAIL_FIELDS
+        if field not in {"logistics_captured_at", "is_cached"}
+    }
+    captured_at = getattr(price, "logistics_captured_at", None)
+    if captured_at:
+        details["logistics_captured_at"] = captured_at.isoformat()
+    details["is_cached"] = cached
+    return details
+
+
+def _cached_item(product, latest_price, source):
+    return {
+        "name": product.name,
+        "price": latest_price.price,
+        "store": latest_price.store,
+        "source": source,
+        "url": latest_price.url,
+        "brand": product.brand,
+        "category": product.category,
+        "image_url": product.image_url,
+        "sku": product.sku,
+        "last_update": (
+            latest_price.timestamp.isoformat() if latest_price.timestamp else None
+        ),
+        **_price_details_from_model(latest_price),
+    }
 
 
 def _cached_sku_items_by_store(db: Session, sku: str):
@@ -1027,26 +1181,30 @@ def _cached_sku_items_by_store(db: Session, sku: str):
         if not store:
             continue
 
-        cached[store["key"]].append(
-            {
-                "name": product.name,
-                "price": latest_price.price,
-                "store": latest_price.store,
-                "source": source,
-                "url": latest_price.url,
-                "brand": product.brand,
-                "category": product.category,
-                "image_url": product.image_url,
-                "sku": product.sku,
-                "last_update": (
-                    latest_price.timestamp.isoformat()
-                    if latest_price.timestamp
-                    else None
-                ),
-            }
-        )
+        cached[store["key"]].append(_cached_item(product, latest_price, source))
 
     return cached
+
+
+def _cached_discovered_sku_items(db: Session, sku: str):
+    registered_names = {
+        _normalize_text(name)
+        for store in TARGET_STORES
+        for name in (store["label"], *store.get("aliases", ()))
+    }
+    items = []
+    for product in db.query(Product).filter(Product.sku == sku).all():
+        latest_price = max(
+            product.prices,
+            key=lambda price: price.timestamp or datetime.min,
+            default=None,
+        )
+        if not latest_price:
+            continue
+        source = latest_price.source or latest_price.store
+        if _normalize_text(source) not in registered_names:
+            items.append(_cached_item(product, latest_price, source))
+    return items
 
 
 def _run_store_scrapers(store_config, product_query):
@@ -1105,18 +1263,30 @@ def _run_store_scrapers(store_config, product_query):
     )
 
 
-def run_all_scrapers(product_query: str, db: Session):
-    print(f" LOG: Iniciando buscas gratuitas para '{product_query}'")
+def run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="all"):
+    postal_code = normalize_postal_code(postal_code)
+    scope = scope if scope in {"all", "sites", "retail"} else "all"
+    print(f" LOG: Iniciando buscas gratuitas para '{product_query}' ({scope})")
     raw_by_store = {store["key"]: [] for store in TARGET_STORES}
-    worker_count = min(8, len(TARGET_STORES) + 1)
+    selected_stores = [
+        store
+        for store in TARGET_STORES
+        if scope == "all" or store.get("scope") == scope
+    ]
+    worker_count = min(8, max(1, len(selected_stores) + 1))
+    comparison_items = []
 
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         store_futures = {
             executor.submit(_run_store_scrapers, store, product_query): store
-            for store in TARGET_STORES
+            for store in selected_stores
             if store.get("direct_scrapers")
         }
-        comparison_future = executor.submit(scrape_comparison_offers, product_query)
+        comparison_future = (
+            executor.submit(scrape_comparison_offers, product_query)
+            if scope in {"all", "retail"}
+            else None
+        )
 
         for future in as_completed(store_futures):
             store = store_futures[future]
@@ -1125,32 +1295,78 @@ def run_all_scrapers(product_query: str, db: Session):
             except Exception as exc:
                 print(f" WARNING: Extracao de {store['label']} falhou: {exc}")
 
-        try:
-            comparison_items = comparison_future.result()
-        except Exception as exc:
-            print(f" WARNING: Comparadores falharam: {exc}")
-            comparison_items = []
+        if comparison_future:
+            try:
+                comparison_items = comparison_future.result()
+            except Exception as exc:
+                print(f" WARNING: Comparadores falharam: {exc}")
 
+    discovered_items = []
+    selected_store_keys = {store["key"] for store in selected_stores}
     for item in comparison_items:
         store = STORE_BY_LABEL.get(item.get("source"))
-        if not store:
-            continue
-        normalized = _normalize_result(item, product_query, store["label"])
+        normalized = _normalize_result(
+            item,
+            product_query,
+            store["label"] if store else None,
+        )
         if normalized and not _is_accessory_mismatch(normalized, product_query):
-            raw_by_store[store["key"]].append(normalized)
+            if store and store["key"] in selected_store_keys:
+                raw_by_store[store["key"]].append(normalized)
+            elif not store:
+                discovered_items.append(normalized)
+
+    query_sku = _primary_sku(product_query)
+    if query_sku:
+        tagged_items = []
+        for store_key, items in raw_by_store.items():
+            tagged_items.extend({**item, "_bucket": store_key} for item in items)
+        tagged_items.extend({**item, "_bucket": "_discovered"} for item in discovered_items)
+        enriched = enrich_offers(tagged_items[:120], postal_code)
+        enriched.extend(tagged_items[120:])
+        raw_by_store = {store["key"]: [] for store in TARGET_STORES}
+        discovered_items = []
+        for item in enriched:
+            bucket = item.pop("_bucket", "_discovered")
+            if bucket == "_discovered":
+                discovered_items.append(item)
+            else:
+                raw_by_store[bucket].append(item)
 
     fresh_results, _fresh_store_payloads = _build_payloads(raw_by_store, product_query)
-    query_sku = _primary_sku(product_query)
+    fresh_discovered = [
+        _product_response(item, 800000 + index)
+        for index, item in enumerate(
+            sorted(_deduplicate(discovered_items), key=lambda item: item["price"]),
+            start=1,
+        )
+    ]
+    fresh_results.extend(fresh_discovered)
     if query_sku:
         cached_by_store = _cached_sku_items_by_store(db, query_sku)
         for store in TARGET_STORES:
             if not raw_by_store[store["key"]]:
                 raw_by_store[store["key"]] = cached_by_store[store["key"]]
 
+        fresh_identities = {_offer_url_identity(item["url"]) for item in fresh_discovered}
+        for cached_item in _cached_discovered_sku_items(db, query_sku):
+            if _offer_url_identity(cached_item["url"]) not in fresh_identities:
+                discovered_items.append(cached_item)
+
     available_results, store_payloads = _build_payloads(raw_by_store, product_query)
+    available_results.extend(
+        _product_response(item, 850000 + index)
+        for index, item in enumerate(
+            sorted(_deduplicate(discovered_items), key=lambda item: item["price"]),
+            start=1,
+        )
+    )
+    store_payloads = _append_discovered_store_payloads(
+        store_payloads, available_results
+    )
 
     processed_count = 0
-    storage_limit = STORE_ITEM_LIMIT * len(TARGET_STORES)
+    storage_limit = STORE_ITEM_LIMIT * (len(TARGET_STORES) + 4)
     for index, item in enumerate(fresh_results[:storage_limit]):
         storage_item = {
             "name": item["name"],
@@ -1162,6 +1378,11 @@ def run_all_scrapers(product_query: str, db: Session):
             "category": item["category"],
             "image_url": item.get("image_url"),
             "sku": item.get("sku"),
+            **{
+                field: item.get(field)
+                for field in OFFER_DETAIL_FIELDS
+                if item.get(field) is not None
+            },
         }
         try:
             processed_count += _save_result(storage_item, db)
@@ -1188,4 +1409,5 @@ def run_all_scrapers(product_query: str, db: Session):
         "results": available_results,
         "stores": store_payloads,
         "comparison": comparison_rows,
+        "scope": scope,
     }

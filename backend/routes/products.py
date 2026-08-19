@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 import re
 from urllib.parse import parse_qs, unquote, urlparse
@@ -9,26 +9,26 @@ from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models.product import KnownSku, PriceHistory, Product
-from schemas.product import AnalyticsExportRequest, ProductCreate, SkuBatchRequest
+from models.product import ExtractionSchedule, KnownSku, PriceHistory, Product
+from schemas.product import (
+    AnalyticsExportRequest,
+    ExtractionScheduleRequest,
+    ProductCreate,
+    SkuBatchRequest,
+)
 from scrapers.comparison import _lead_redirect_info
 from services.scraper_service import (
-    TARGET_STORES,
+    OFFER_DETAIL_FIELDS,
+    _extract_skus,
     _primary_sku,
     build_summary_from_cached_results,
     run_all_scrapers,
 )
 from services.analytics_export import build_analytics_workbook
+from services.offer_enrichment import normalize_postal_code
 
 product_router = APIRouter()
 BATCH_SKU_LIMIT = 30
-TARGET_STORE_NAMES = list(
-    {
-        name
-        for store in TARGET_STORES
-        for name in [store["label"], *store.get("aliases", [])]
-    }
-)
 
 
 def _seller_from_url(store, source, url):
@@ -138,8 +138,7 @@ def _serialize_results(results):
     for product, price in results:
         source = price.source or price.store
         resolved = _resolve_cached_offer(price.store, source, price.url)
-        serialized.append(
-            {
+        item = {
                 "id": product.id,
                 "name": product.name,
                 "brand": product.brand,
@@ -151,8 +150,14 @@ def _serialize_results(results):
                 "source": source,
                 "url": resolved["url"],
                 "last_update": price.timestamp,
+                "cash_price": price.cash_price or price.price,
+                "is_cached": True,
             }
-        )
+        for field in OFFER_DETAIL_FIELDS:
+            value = getattr(price, field, None)
+            if value is not None and field not in {"cash_price", "is_cached"}:
+                item[field] = value
+        serialized.append(item)
 
     return serialized
 
@@ -188,9 +193,10 @@ def _sku_status_map(db: Session, skus=None):
         for row in db.query(Product.sku).filter(Product.sku.isnot(None)).distinct().all()
         if row[0]
     }
-    all_skus = known_skus | product_skus
-    all_skus_list = sorted(all_skus)
-
+    name_skus = set()
+    for row in db.query(Product.name).all():
+        name_skus.update(_extract_skus(row[0] or ""))
+    all_skus = known_skus | product_skus | name_skus
     statuses = {
         sku: {
             "sku": sku,
@@ -206,44 +212,39 @@ def _sku_status_map(db: Session, skus=None):
     if not all_skus:
         return statuses
 
-    rows = (
-        db.query(
-            Product.sku.label("sku"),
-            func.count(func.distinct(Product.id)).label("product_count"),
-            func.count(func.distinct(PriceHistory.url)).label("offer_count"),
-            func.count(func.distinct(PriceHistory.store)).label("store_count"),
-            func.max(PriceHistory.timestamp).label("last_update"),
-        )
-        .join(PriceHistory, Product.id == PriceHistory.product_id)
-        .filter(func.upper(Product.sku).in_(all_skus_list))
-        .group_by(Product.sku)
-        .all()
-    )
+    aggregates = {
+        sku: {"products": set(), "urls": set(), "stores": set(), "last_update": None}
+        for sku in all_skus
+    }
+    for product, price in _latest_products_query(db).all():
+        row_skus = set(_extract_skus(product.name or ""))
+        if product.sku:
+            row_skus.add(_normalize_sku(product.sku))
+        for sku in row_skus.intersection(all_skus):
+            aggregate = aggregates[sku]
+            aggregate["products"].add(product.id)
+            aggregate["urls"].add(price.url)
+            aggregate["stores"].add(price.store)
+            if not aggregate["last_update"] or (
+                price.timestamp and price.timestamp > aggregate["last_update"]
+            ):
+                aggregate["last_update"] = price.timestamp
 
-    for row in rows:
-        sku = _normalize_sku(row.sku)
+    for sku, aggregate in aggregates.items():
         statuses[sku] = {
             "sku": sku,
-            "in_database": bool(row.offer_count),
-            "product_count": row.product_count or 0,
-            "offer_count": row.offer_count or 0,
-            "store_count": row.store_count or 0,
-            "last_update": row.last_update,
+            "in_database": bool(aggregate["urls"]),
+            "product_count": len(aggregate["products"]),
+            "offer_count": len(aggregate["urls"]),
+            "store_count": len(aggregate["stores"]),
+            "last_update": aggregate["last_update"],
         }
 
     return statuses
 
 
 def _find_products(db: Session, search_text: Optional[str] = None):
-    query = _latest_products_query(db).filter(
-        or_(
-            PriceHistory.source.in_(TARGET_STORE_NAMES),
-            and_(
-                PriceHistory.source.is_(None),
-                PriceHistory.store.in_(TARGET_STORE_NAMES),
-            ),
-        )
-    )
+    query = _latest_products_query(db)
 
     if search_text:
         strict_results = (
@@ -269,15 +270,6 @@ def _find_sku_products(db: Session, sku: str):
     query = _latest_products_query(db).filter(
         or_(Product.sku == sku, Product.name.ilike(f"%{sku}%"))
     )
-    query = query.filter(
-        or_(
-            PriceHistory.source.in_(TARGET_STORE_NAMES),
-            and_(
-                PriceHistory.source.is_(None),
-                PriceHistory.store.in_(TARGET_STORE_NAMES),
-            ),
-        )
-    )
     return query.order_by(PriceHistory.price.asc()).limit(250).all()
 
 
@@ -298,6 +290,64 @@ def list_sku_status(
     return {"items": items}
 
 
+def _schedule_response(schedule):
+    days = []
+    for value in (schedule.days or "1").split(","):
+        try:
+            day = int(value)
+        except ValueError:
+            continue
+        if 0 <= day <= 6 and day not in days:
+            days.append(day)
+
+    return {
+        "enabled": schedule.enabled,
+        "postal_code": schedule.postal_code,
+        "start_time": schedule.start_time,
+        "end_time": schedule.end_time,
+        "days": days or [1],
+        "repeat_every_hours": schedule.repeat_every_hours,
+        "force_refresh": schedule.force_refresh,
+        "last_run_key": schedule.last_run_key,
+        "last_run": schedule.last_run,
+        "updated_at": schedule.updated_at,
+    }
+
+
+@product_router.get("/schedule")
+def get_extraction_schedule(db: Session = Depends(get_db)):
+    schedule = db.query(ExtractionSchedule).filter(ExtractionSchedule.id == 1).first()
+    if not schedule:
+        schedule = ExtractionSchedule(id=1, policy="custom")
+        db.add(schedule)
+        db.commit()
+        db.refresh(schedule)
+    return _schedule_response(schedule)
+
+
+@product_router.put("/schedule")
+def update_extraction_schedule(
+    payload: ExtractionScheduleRequest,
+    db: Session = Depends(get_db),
+):
+    schedule = db.query(ExtractionSchedule).filter(ExtractionSchedule.id == 1).first()
+    if not schedule:
+        schedule = ExtractionSchedule(id=1, policy="custom")
+        db.add(schedule)
+    schedule.enabled = payload.enabled
+    schedule.policy = "custom"
+    schedule.postal_code = normalize_postal_code(payload.postal_code)
+    schedule.start_time = payload.start_time
+    schedule.end_time = payload.end_time
+    schedule.days = ",".join(str(day) for day in payload.days)
+    schedule.repeat_every_hours = payload.repeat_every_hours
+    schedule.force_refresh = payload.force_refresh
+    schedule.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(schedule)
+    return _schedule_response(schedule)
+
+
 @product_router.post("/batch-search")
 def batch_search_products(payload: SkuBatchRequest, db: Session = Depends(get_db)):
     skus = _normalize_sku_list(payload.skus)
@@ -309,16 +359,11 @@ def batch_search_products(payload: SkuBatchRequest, db: Session = Depends(get_db
             detail=f"Limite de {BATCH_SKU_LIMIT} SKUs por extracao.",
         )
 
+    _register_skus(db, skus)
     items = []
     for sku in skus:
         try:
-            cached_results = _serialize_results(_find_sku_products(db, sku))
-            if cached_results and not payload.force_refresh:
-                summary = build_summary_from_cached_results(cached_results, sku)
-                status = "cached"
-            else:
-                summary = run_all_scrapers(sku, db)
-                status = "updated"
+            summary, status = _search_sku_summary(sku, payload, db)
 
             sku_status = _sku_status_map(db, [sku]).get(sku, {})
             items.append(
@@ -361,6 +406,121 @@ def batch_search_products(payload: SkuBatchRequest, db: Session = Depends(get_db
     return {"items": items}
 
 
+def _register_skus(db: Session, skus):
+    existing = {
+        row[0]
+        for row in db.query(KnownSku.sku).filter(KnownSku.sku.in_(skus)).all()
+    }
+    for sku in skus:
+        if sku not in existing:
+            db.add(KnownSku(sku=sku))
+    db.commit()
+
+
+def _search_sku_summary(sku, payload, db):
+    cached_results = _serialize_results(_find_sku_products(db, sku))
+    latest = max(
+        (item.get("last_update") for item in cached_results if item.get("last_update")),
+        default=None,
+    )
+    stale_hours = 1 if payload.scope == "sites" else 8
+    stale = not latest or latest < datetime.utcnow() - timedelta(hours=stale_hours)
+    should_refresh = (
+        payload.force_refresh
+        or not cached_results
+        or (payload.refresh_if_stale and stale)
+    )
+    if not should_refresh:
+        return build_summary_from_cached_results(cached_results, sku), "cached"
+    return (
+        run_all_scrapers(
+            sku,
+            db,
+            postal_code=payload.postal_code,
+            scope=payload.scope,
+        ),
+        "updated",
+    )
+
+
+def _combine_summaries(summaries, skus):
+    results = []
+    seen_results = set()
+    comparison = []
+    stores = {}
+
+    for summary in summaries:
+        for item in summary["results"]:
+            identity = (item.get("sku"), item.get("url"))
+            if identity not in seen_results:
+                seen_results.add(identity)
+                results.append(item)
+
+        for row in summary["comparison"]:
+            comparison.append({**row, "id": len(comparison) + 1})
+
+        for store in summary["stores"]:
+            aggregate = stores.setdefault(
+                store["key"],
+                {
+                    **store,
+                    "available": False,
+                    "product": None,
+                    "products": [],
+                },
+            )
+            known_urls = {product["url"] for product in aggregate["products"]}
+            for product in store.get("products") or []:
+                if product["url"] not in known_urls:
+                    aggregate["products"].append(product)
+                    known_urls.add(product["url"])
+            aggregate["available"] = bool(aggregate["products"])
+            aggregate["product"] = min(
+                aggregate["products"],
+                key=lambda product: product["current_price"],
+                default=None,
+            )
+            aggregate["message"] = None if aggregate["available"] else "Nao disponivel"
+
+    return {
+        "message": (
+            f"Busca conjunta concluida para {len(skus)} SKUs: "
+            f"{len(results)} ofertas em {len(comparison)} produtos."
+        ),
+        "results": results,
+        "stores": list(stores.values()),
+        "comparison": comparison,
+        "skus": skus,
+    }
+
+
+@product_router.post("/search/batch")
+def search_sku_batch(payload: SkuBatchRequest, db: Session = Depends(get_db)):
+    skus = _normalize_sku_list(payload.skus)
+    if not skus:
+        raise HTTPException(status_code=400, detail="Informe ao menos um SKU valido.")
+    if len(skus) > BATCH_SKU_LIMIT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Limite de {BATCH_SKU_LIMIT} SKUs por pesquisa.",
+        )
+
+    _register_skus(db, skus)
+    summaries = []
+    for sku in skus:
+        try:
+            summary, _status = _search_sku_summary(sku, payload, db)
+            summaries.append(summary)
+        except Exception as exc:
+            db.rollback()
+            print(f" ERROR: Pesquisa de {sku} falhou: {exc}")
+            cached = _serialize_results(_find_sku_products(db, sku))
+            if cached:
+                summaries.append(build_summary_from_cached_results(cached, sku))
+
+    return _combine_summaries(summaries, skus)
+
+
 @product_router.post("/export/analytics")
 def export_analytics(payload: AnalyticsExportRequest):
     if not payload.rows:
@@ -399,6 +559,16 @@ def create_product(product_data: ProductCreate, db: Session = Depends(get_db)):
         store=product_data.initial_price.store,
         source=product_data.initial_price.source or product_data.initial_price.store,
         url=product_data.initial_price.url,
+        cash_price=(
+            product_data.initial_price.cash_price or product_data.initial_price.price
+        ),
+        installment_price=product_data.initial_price.installment_price,
+        installment_count=product_data.initial_price.installment_count,
+        installment_value=product_data.initial_price.installment_value,
+        shipping_cost=product_data.initial_price.shipping_cost,
+        delivery_min_days=product_data.initial_price.delivery_min_days,
+        delivery_max_days=product_data.initial_price.delivery_max_days,
+        destination_zip=product_data.initial_price.destination_zip,
     )
 
     db.add(new_price)
@@ -415,8 +585,13 @@ def search_products(
 
 
 @product_router.post("/refresh")
-def refresh_prices(q: str, db: Session = Depends(get_db)):
-    summary = run_all_scrapers(q, db)
+def refresh_prices(
+    q: str,
+    postal_code: Optional[str] = None,
+    scope: str = "all",
+    db: Session = Depends(get_db),
+):
+    summary = run_all_scrapers(q, db, postal_code=postal_code, scope=scope)
     return {
         "message": (
             "Busca finalizada. "

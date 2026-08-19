@@ -7,12 +7,14 @@ import {
   Database,
   Download,
   Grid2X2,
+  ListChecks,
   LoaderCircle,
   LogOut,
   Moon,
   PackageSearch,
   PanelLeftClose,
   PanelLeftOpen,
+  RefreshCw,
   Search,
   Settings,
   Sun,
@@ -34,7 +36,6 @@ import {
   getInterfacePreferences,
   localeOptions,
   saveInterfacePreferences,
-  STORE_OPTIONS,
   type InterfacePreferences,
 } from "../../src/preferences";
 
@@ -72,8 +73,6 @@ const weekDays = [
   { value: 0, label: "Dom" },
 ];
 
-const frequencyOptions = [0, 1, 2, 3, 4, 6, 8, 12];
-
 const defaultScheduleSettings: ScheduledExtractionSettings = {
   enabled: false,
   time: "09:00",
@@ -95,8 +94,8 @@ const getInitialScheduleSettings = (): ScheduledExtractionSettings => {
     if (!storedSettings) return defaultScheduleSettings;
 
     const parsed = JSON.parse(storedSettings) as Partial<ScheduledExtractionSettings>;
-    const storedRepeatEveryHours = Number(parsed.repeatEveryHours) || 0;
-    const repeatEveryHours = frequencyOptions.includes(storedRepeatEveryHours) ? storedRepeatEveryHours : 0;
+    const storedRepeatEveryHours = Math.trunc(Number(parsed.repeatEveryHours) || 0);
+    const repeatEveryHours = Math.min(12, Math.max(0, storedRepeatEveryHours));
     const days = Array.isArray(parsed.days)
       ? parsed.days.filter((day) => Number.isInteger(day) && day >= 0 && day <= 6)
       : defaultScheduleSettings.days;
@@ -146,6 +145,7 @@ export const HeroSection = () => {
   const [loginOpen, setLoginOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [extractionsOpen, setExtractionsOpen] = useState(false);
+  const [skuSelectorOpen, setSkuSelectorOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [loginUser, setLoginUser] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
@@ -163,8 +163,13 @@ export const HeroSection = () => {
   const [extractionRunning, setExtractionRunning] = useState(false);
   const [extractionResults, setExtractionResults] = useState<SkuBatchResult[]>([]);
   const [extractionError, setExtractionError] = useState("");
+  const [refreshingSku, setRefreshingSku] = useState<string | null>(null);
+  const [refreshingAllSkus, setRefreshingAllSkus] = useState(false);
+  const [selectedSearchSkus, setSelectedSearchSkus] = useState<string[]>([]);
+  const [draftSearchSkus, setDraftSearchSkus] = useState<string[]>([]);
+  const [skuSelectorFilter, setSkuSelectorFilter] = useState("");
+  const [skuSelectorError, setSkuSelectorError] = useState("");
   const accountRef = useRef<HTMLDivElement>(null);
-  const scheduleRunningRef = useRef(false);
   const [currentUser, setCurrentUser] = useState<string | null>(() => {
     const storedUser = window.localStorage.getItem(AUTH_STORAGE_KEY);
     return AUTH_USERS.find((user) => user.username === storedUser)?.username || null;
@@ -185,6 +190,7 @@ export const HeroSection = () => {
         setLoginOpen(false);
         setSettingsOpen(false);
         setExtractionsOpen(false);
+        setSkuSelectorOpen(false);
         setAccountOpen(false);
         setSidebarOpen(false);
       }
@@ -214,87 +220,15 @@ export const HeroSection = () => {
     return () => document.removeEventListener("pointerdown", closeAccountMenu, true);
   }, []);
 
-  useEffect(() => {
-    const runScheduledExtraction = async () => {
-      if (!scheduleSettings.enabled || scheduleRunningRef.current || !scheduleSettings.days.length) return;
-
-      const now = new Date();
-      const [scheduledHour, scheduledMinute] = scheduleSettings.time.split(":").map(Number);
-      const [endHour, endMinute] = scheduleSettings.endTime.split(":").map(Number);
-      const nowMinutes = now.getHours() * 60 + now.getMinutes();
-      const scheduledMinutes = scheduledHour * 60 + scheduledMinute;
-      const endMinutes = Math.max(endHour * 60 + endMinute, scheduledMinutes);
-      const intervalMinutes = scheduleSettings.repeatEveryHours * 60;
-
-      if (
-        nowMinutes < scheduledMinutes ||
-        nowMinutes > endMinutes ||
-        !scheduleSettings.days.includes(now.getDay())
-      ) {
-        return;
-      }
-
-      const elapsedMinutes = nowMinutes - scheduledMinutes;
-      const shouldRunOnce = scheduleSettings.repeatEveryHours === 0 && elapsedMinutes === 0;
-      const shouldRunRepeated = intervalMinutes > 0 && elapsedMinutes % intervalMinutes === 0;
-      const runSlot = intervalMinutes > 0 ? elapsedMinutes / intervalMinutes : 0;
-      const runKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}-${scheduleSettings.time}-${scheduleSettings.endTime}-${scheduleSettings.repeatEveryHours}-${runSlot}`;
-
-      if ((!shouldRunOnce && !shouldRunRepeated) || scheduleSettings.lastRunKey === runKey) return;
-
-      scheduleRunningRef.current = true;
-      setScheduleStatus("Executando atualização programada...");
-
-      try {
-        const statusResponse = await fetch(`${getApiBaseUrl()}/products/skus/status`);
-        if (!statusResponse.ok) throw new Error(`HTTP ${statusResponse.status}`);
-
-        const statusData = (await statusResponse.json()) as SkuStatusResponse;
-        const skus = [
-          ...new Set((statusData.items || []).map((item) => item.sku).filter((sku): sku is string => Boolean(sku))),
-        ];
-
-        if (skus.length) {
-          const extractionResponse = await fetch(`${getApiBaseUrl()}/products/batch-search`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ skus, force_refresh: scheduleSettings.forceRefresh }),
-          });
-
-          if (!extractionResponse.ok) throw new Error(`HTTP ${extractionResponse.status}`);
-
-          const query = `?q=${encodeURIComponent(skus.join(","))}`;
-          const updatedStatusResponse = await fetch(`${getApiBaseUrl()}/products/skus/status${query}`);
-          if (updatedStatusResponse.ok) {
-            const updatedStatusData = (await updatedStatusResponse.json()) as SkuStatusResponse;
-            setSkuStatusItems(updatedStatusData.items || []);
-          }
-
-          setScheduleStatus(`Atualização programada concluída para ${skus.length} SKUs.`);
-        } else {
-          setScheduleStatus("Nenhum SKU encontrado no banco local.");
-        }
-
-        setScheduleSettings((currentSettings) => ({ ...currentSettings, lastRunKey: runKey }));
-      } catch (error) {
-        console.error("Erro na extração programada:", error);
-        setScheduleStatus("Falha na atualização programada.");
-      } finally {
-        scheduleRunningRef.current = false;
-      }
-    };
-
-    const intervalId = window.setInterval(() => void runScheduledExtraction(), 30000);
-    void runScheduledExtraction();
-    return () => window.clearInterval(intervalId);
-  }, [scheduleSettings]);
-
   const submitSearch = (event?: FormEvent) => {
     event?.preventDefault();
     if (loading || !productName.trim()) return;
     setActiveTab(0);
     setSidebarOpen(false);
-    handleSearch();
+    void handleSearch(
+      selectedSearchSkus,
+      selectedSearchSkus.length ? `${selectedSearchSkus.length} SKUs selecionados` : undefined,
+    );
   };
 
   const openLogin = () => {
@@ -350,18 +284,6 @@ export const HeroSection = () => {
     });
   };
 
-  const toggleDefaultStore = (store: string) => {
-    updateInterfacePreferences((currentPreferences) => {
-      const defaultStores = currentPreferences.defaultStores.includes(store)
-        ? currentPreferences.defaultStores.length > 1
-          ? currentPreferences.defaultStores.filter((selectedStore) => selectedStore !== store)
-          : currentPreferences.defaultStores
-        : [...currentPreferences.defaultStores, store];
-
-      return { ...currentPreferences, defaultStores };
-    });
-  };
-
   const loadSkuStatus = async (skus?: string[]) => {
     setSkuStatusLoading(true);
     const query = skus?.length ? `?q=${encodeURIComponent(skus.join(","))}` : "";
@@ -391,6 +313,22 @@ export const HeroSection = () => {
     setExtractionTab("extract");
     setExtractionsOpen(true);
     void loadSkuStatus();
+    void fetch(`${getApiBaseUrl()}/products/schedule`)
+      .then((response) => response.ok ? response.json() : null)
+      .then((data) => {
+        if (!data) return;
+        setScheduleSettings((currentSettings) => ({
+          ...currentSettings,
+          enabled: Boolean(data.enabled),
+          time: typeof data.start_time === "string" ? data.start_time : currentSettings.time,
+          endTime: typeof data.end_time === "string" ? data.end_time : currentSettings.endTime,
+          days: Array.isArray(data.days) && data.days.length ? data.days : currentSettings.days,
+          repeatEveryHours: Math.min(12, Math.max(0, Math.trunc(Number(data.repeat_every_hours) || 0))),
+          forceRefresh: data.force_refresh !== false,
+          lastRunKey: typeof data.last_run_key === "string" ? data.last_run_key : undefined,
+        }));
+      })
+      .catch(() => undefined);
   };
 
   const toggleScheduleDay = (day: number) => {
@@ -405,8 +343,28 @@ export const HeroSection = () => {
     });
   };
 
-  const saveSchedule = () => {
-    setScheduleStatus("Programação salva.");
+  const saveSchedule = async () => {
+    setScheduleStatus("Salvando...");
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/products/schedule`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: scheduleSettings.enabled,
+          start_time: scheduleSettings.time,
+          end_time: scheduleSettings.endTime,
+          days: scheduleSettings.days,
+          repeat_every_hours: scheduleSettings.repeatEveryHours,
+          force_refresh: scheduleSettings.forceRefresh,
+          postal_code: interfacePreferences.logisticsPostalCode || null,
+        }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setScheduleStatus("Programação salva.");
+    } catch (error) {
+      console.error("Erro ao salvar programação:", error);
+      setScheduleStatus("Não foi possível salvar a programação.");
+    }
   };
 
   const runExtractions = async (event: FormEvent<HTMLFormElement>) => {
@@ -426,7 +384,12 @@ export const HeroSection = () => {
       const response = await fetch(`${getApiBaseUrl()}/products/batch-search`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ skus, force_refresh: forceExtraction }),
+        body: JSON.stringify({
+          skus,
+          force_refresh: forceExtraction,
+          postal_code: interfacePreferences.logisticsPostalCode || null,
+          scope: "all",
+        }),
       });
 
       if (!response.ok) {
@@ -436,13 +399,118 @@ export const HeroSection = () => {
 
       const data = (await response.json()) as SkuBatchResponse;
       setExtractionResults(data.items || []);
-      await loadSkuStatus(skus);
+      await loadSkuStatus();
     } catch (error) {
       console.error("Erro ao extrair SKUs:", error);
       setExtractionError(error instanceof Error ? error.message : "Falha ao extrair SKUs.");
     } finally {
       setExtractionRunning(false);
     }
+  };
+
+  const refreshSingleSku = async (sku: string) => {
+    if (refreshingSku) return;
+    setRefreshingSku(sku);
+    setExtractionError("");
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/products/batch-search`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          skus: [sku],
+          force_refresh: true,
+          postal_code: interfacePreferences.logisticsPostalCode || null,
+          scope: "all",
+        }),
+      });
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => null);
+        throw new Error(errorData?.detail || `HTTP ${response.status}`);
+      }
+      const data = (await response.json()) as SkuBatchResponse;
+      setExtractionResults(data.items || []);
+      await loadSkuStatus();
+    } catch (error) {
+      setExtractionError(error instanceof Error ? error.message : "Falha ao atualizar o SKU.");
+    } finally {
+      setRefreshingSku(null);
+    }
+  };
+
+  const refreshAllSkus = async () => {
+    const skus = skuStatusItems.map((item) => item.sku).filter(Boolean);
+    if (!skus.length || refreshingAllSkus) return;
+
+    setRefreshingAllSkus(true);
+    setExtractionError("");
+    setExtractionResults([]);
+    const results: SkuBatchResult[] = [];
+
+    try {
+      for (let index = 0; index < skus.length; index += 30) {
+        const response = await fetch(`${getApiBaseUrl()}/products/batch-search`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            skus: skus.slice(index, index + 30),
+            force_refresh: true,
+            postal_code: interfacePreferences.logisticsPostalCode || null,
+            scope: "all",
+          }),
+        });
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => null);
+          throw new Error(errorData?.detail || `HTTP ${response.status}`);
+        }
+        const data = (await response.json()) as SkuBatchResponse;
+        results.push(...(data.items || []));
+      }
+
+      setExtractionResults(results);
+      await loadSkuStatus();
+    } catch (error) {
+      setExtractionError(error instanceof Error ? error.message : "Falha ao atualizar o banco local.");
+    } finally {
+      setRefreshingAllSkus(false);
+    }
+  };
+
+  const openSkuSelector = () => {
+    setDraftSearchSkus(selectedSearchSkus);
+    setSkuSelectorFilter("");
+    setSkuSelectorError("");
+    setSkuSelectorOpen(true);
+    void loadSkuStatus();
+  };
+
+  const toggleDraftSearchSku = (sku: string) => {
+    setDraftSearchSkus((currentSkus) => {
+      if (currentSkus.includes(sku)) {
+        setSkuSelectorError("");
+        return currentSkus.filter((item) => item !== sku);
+      }
+      if (currentSkus.length >= 30) {
+        setSkuSelectorError("Selecione no máximo 30 SKUs por pesquisa.");
+        return currentSkus;
+      }
+      setSkuSelectorError("");
+      return [...currentSkus, sku];
+    });
+  };
+
+  const searchSelectedSkus = () => {
+    if (!draftSearchSkus.length || loading) {
+      setSkuSelectorError("Selecione ao menos um SKU.");
+      return;
+    }
+
+    const label = `${draftSearchSkus.length} ${draftSearchSkus.length === 1 ? "SKU selecionado" : "SKUs selecionados"}`;
+    setSelectedSearchSkus(draftSearchSkus);
+    setProductName(label);
+    setSkuSelectorOpen(false);
+    setActiveTab(0);
+    setSidebarOpen(false);
+    void handleSearch(draftSearchSkus, label);
   };
 
   const switchTab = (index: number) => {
@@ -458,6 +526,10 @@ export const HeroSection = () => {
 
     setSidebarOpen((open) => !open);
   };
+
+  const visibleSkuSelectorItems = skuStatusItems.filter((item) =>
+    item.sku.toLowerCase().includes(skuSelectorFilter.trim().toLowerCase()),
+  );
 
   return (
     <div className={`app-shell ${sidebarCollapsed ? "app-shell--sidebar-collapsed" : ""}`}>
@@ -566,11 +638,24 @@ export const HeroSection = () => {
           </div>
 
           <form onSubmit={submitSearch} className="header-search">
+            <button
+              type="button"
+              className={selectedSearchSkus.length ? "sku-select-trigger sku-select-trigger--active" : "sku-select-trigger"}
+              onClick={openSkuSelector}
+              aria-label="Selecionar SKUs do banco local"
+              title="Selecionar vários SKUs"
+            >
+              <ListChecks size={17} />
+              {selectedSearchSkus.length > 0 && <span>{selectedSearchSkus.length}</span>}
+            </button>
             <input
               type="search"
               value={productName}
-              onChange={(event) => setProductName(event.target.value)}
-              placeholder="Buscar produto, modelo ou SKU..."
+              onChange={(event) => {
+                setSelectedSearchSkus([]);
+                setProductName(event.target.value);
+              }}
+              placeholder="Buscar produto ou modelo..."
               disabled={loading}
               aria-label="Buscar produtos"
             />
@@ -667,6 +752,91 @@ export const HeroSection = () => {
         </div>
       )}
 
+      {skuSelectorOpen && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setSkuSelectorOpen(false)}>
+          <section
+            className="workspace-dialog workspace-dialog--sku-selector"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Selecionar SKUs"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="dialog-header">
+              <div>
+                <span className="dialog-icon"><ListChecks size={19} /></span>
+                <h2>Selecionar SKUs</h2>
+              </div>
+              <button type="button" className="icon-button" onClick={() => setSkuSelectorOpen(false)} aria-label="Fechar">
+                <X size={17} />
+              </button>
+            </div>
+
+            <div className="sku-selector-toolbar">
+              <Search size={16} />
+              <input
+                type="search"
+                value={skuSelectorFilter}
+                onChange={(event) => setSkuSelectorFilter(event.target.value)}
+                placeholder="Filtrar SKUs do banco..."
+                aria-label="Filtrar SKUs"
+                autoFocus
+              />
+            </div>
+
+            <div className="sku-selector-list">
+              {skuStatusLoading && !skuStatusItems.length ? (
+                <p className="sku-status-empty">Carregando...</p>
+              ) : visibleSkuSelectorItems.length ? (
+                visibleSkuSelectorItems.map((item) => {
+                  const checked = draftSearchSkus.includes(item.sku);
+                  const disabled = !checked && draftSearchSkus.length >= 30;
+                  return (
+                    <label key={item.sku} className={disabled ? "sku-selector-row sku-selector-row--disabled" : "sku-selector-row"}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={disabled}
+                        onChange={() => toggleDraftSearchSku(item.sku)}
+                      />
+                      <span className="min-w-0 flex-1">
+                        <strong>{item.sku}</strong>
+                        <small>{item.offer_count} ofertas · {item.store_count} lojas · {formatDateTime(item.last_update)}</small>
+                      </span>
+                    </label>
+                  );
+                })
+              ) : (
+                <p className="sku-status-empty">Nenhum SKU encontrado.</p>
+              )}
+            </div>
+
+            {skuSelectorError && <p className="auth-error">{skuSelectorError}</p>}
+
+            <div className="sku-selector-footer">
+              <span>{draftSearchSkus.length} de 30 selecionados</span>
+              <div className="sku-selector-footer__actions">
+                {draftSearchSkus.length > 0 && (
+                  <button
+                    type="button"
+                    className="button-secondary"
+                    onClick={() => {
+                      setDraftSearchSkus([]);
+                      setSkuSelectorError("");
+                    }}
+                  >
+                    Desmarcar
+                  </button>
+                )}
+                <button type="button" className="button-primary" onClick={searchSelectedSkus} disabled={!draftSearchSkus.length || loading}>
+                  {loading ? <LoaderCircle size={15} className="animate-spin" /> : <Search size={15} />}
+                  Pesquisar
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
+
       {settingsOpen && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => setSettingsOpen(false)}>
           <section
@@ -734,49 +904,22 @@ export const HeroSection = () => {
 
               <section className="settings-section">
                 <div className="settings-section__head">
-                  <h3>Lojas padrão</h3>
-                  <div className="settings-inline-actions">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        updateInterfacePreferences((currentPreferences) => ({
-                          ...currentPreferences,
-                          defaultStores: STORE_OPTIONS.map((store) => store.label),
-                        }))
-                      }
-                    >
-                      Todas
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        updateInterfacePreferences((currentPreferences) => ({
-                          ...currentPreferences,
-                          defaultStores: [STORE_OPTIONS[0].label],
-                        }))
-                      }
-                    >
-                      Mínimo
-                    </button>
-                  </div>
+                  <h3>Logística</h3>
                 </div>
-
-                <div className="settings-store-grid">
-                  {STORE_OPTIONS.map((store) => {
-                    const active = interfacePreferences.defaultStores.includes(store.label);
-
-                    return (
-                      <button
-                        key={store.label}
-                        type="button"
-                        className={active ? "settings-store settings-store--active" : "settings-store"}
-                        onClick={() => toggleDefaultStore(store.label)}
-                      >
-                        <span>{store.label}</span>
-                        {active && <CheckCircle2 size={14} />}
-                      </button>
-                    );
-                  })}
+                <div className="settings-grid">
+                  <label className="settings-field">
+                    <span>CEP de referência</span>
+                    <input
+                      inputMode="numeric"
+                      value={interfacePreferences.logisticsPostalCode}
+                      onChange={(event) =>
+                        updateInterfacePreferences((currentPreferences) => ({
+                          ...currentPreferences,
+                          logisticsPostalCode: event.target.value.replace(/\D/g, "").slice(0, 8),
+                        }))
+                      }
+                    />
+                  </label>
                 </div>
               </section>
 
@@ -840,7 +983,7 @@ export const HeroSection = () => {
 
             {extractionTab === "extract" ? (
               <div className="extraction-panel" role="tabpanel">
-                <form onSubmit={runExtractions} className="extraction-form">
+                <form onSubmit={runExtractions} className="extraction-form extraction-form--fill">
                   <label className="textarea-field">
                     <span>SKUs</span>
                     <textarea
@@ -889,10 +1032,6 @@ export const HeroSection = () => {
               <div className="extraction-panel" role="tabpanel">
                 <div className="schedule-card">
                   <div className="schedule-card__head">
-                    <div>
-                      <h3>Atualização programada</h3>
-                      <p>{skuStatusItems.length} SKUs do banco local</p>
-                    </div>
                     <label className="schedule-toggle">
                       <input
                         type="checkbox"
@@ -904,12 +1043,15 @@ export const HeroSection = () => {
                           }))
                         }
                       />
+                      <span className="schedule-toggle__track" aria-hidden="true">
+                        <span className="schedule-toggle__thumb" />
+                      </span>
                       <span>{scheduleSettings.enabled ? "Ativo" : "Inativo"}</span>
                     </label>
                   </div>
 
                   <div className="schedule-grid">
-                    <label className="schedule-field">
+                    <label className="schedule-field schedule-field--frequency">
                       <span>Horário inicial</span>
                       <input
                         type="time"
@@ -940,21 +1082,24 @@ export const HeroSection = () => {
 
                     <label className="schedule-field">
                       <span>Frequência</span>
-                      <select
-                        value={scheduleSettings.repeatEveryHours}
-                        onChange={(event) =>
-                          setScheduleSettings((currentSettings) => ({
-                            ...currentSettings,
-                            repeatEveryHours: Number(event.target.value) || 0,
-                          }))
-                        }
-                      >
-                        {frequencyOptions.map((hour) => (
-                          <option key={hour} value={hour}>
-                            {hour === 0 ? "Não repetir" : `A cada ${hour} ${hour === 1 ? "hora" : "horas"}`}
-                          </option>
-                        ))}
-                      </select>
+                      <span className="schedule-frequency-input">
+                        <input
+                          type="number"
+                          min="0"
+                          max="12"
+                          step="1"
+                          value={scheduleSettings.repeatEveryHours}
+                          onChange={(event) => {
+                            const value = Math.trunc(Number(event.target.value) || 0);
+                            setScheduleSettings((currentSettings) => ({
+                              ...currentSettings,
+                              repeatEveryHours: Math.min(12, Math.max(0, value)),
+                            }));
+                          }}
+                        />
+                        <span>horas</span>
+                      </span>
+                      <small>{scheduleSettings.repeatEveryHours === 0 ? "Não repetir" : `Repetir a cada ${scheduleSettings.repeatEveryHours}h`}</small>
                     </label>
                   </div>
 
@@ -978,6 +1123,8 @@ export const HeroSection = () => {
                     </div>
                   </div>
 
+                  {scheduleStatus && <p className="schedule-status">{scheduleStatus}</p>}
+
                   <div className="schedule-row">
                     <label className="check-field">
                       <input
@@ -992,22 +1139,12 @@ export const HeroSection = () => {
                       />
                       <span>Atualizar via APIs</span>
                     </label>
-                    <button type="button" className="button-primary" onClick={saveSchedule}>
+                    <button type="button" className="button-primary" onClick={() => void saveSchedule()}>
                       <CheckCircle2 size={15} />
                       Salvar
                     </button>
                   </div>
 
-                  <div className="schedule-summary">
-                    <span>{scheduleSettings.days.length} dias selecionados</span>
-                    <strong>
-                      {scheduleSettings.repeatEveryHours === 0
-                        ? `${scheduleSettings.time} · uma vez`
-                        : `${scheduleSettings.time}-${scheduleSettings.endTime} · ${scheduleSettings.repeatEveryHours}h`}
-                    </strong>
-                  </div>
-
-                  {scheduleStatus && <p className="schedule-status">{scheduleStatus}</p>}
                 </div>
               </div>
             ) : (
@@ -1018,8 +1155,14 @@ export const HeroSection = () => {
                       <h3>Banco local</h3>
                       <p>{skuStatusItems.length} SKUs acompanhados</p>
                     </div>
-                    <button type="button" className="table-action" onClick={() => void loadSkuStatus()} aria-label="Atualizar SKUs">
-                      {skuStatusLoading ? <LoaderCircle size={16} className="animate-spin" /> : <CheckCircle2 size={16} />}
+                    <button
+                      type="button"
+                      className="button-secondary sku-refresh-all"
+                      onClick={() => void refreshAllSkus()}
+                      disabled={refreshingAllSkus || !skuStatusItems.length}
+                    >
+                      {refreshingAllSkus && <LoaderCircle size={15} className="animate-spin" />}
+                      Atualizar
                     </button>
                   </div>
                   <div className="sku-status-list">
@@ -1032,6 +1175,18 @@ export const HeroSection = () => {
                           <span>{item.offer_count} ofertas</span>
                           <span>{item.store_count} lojas</span>
                           <time>{formatDateTime(item.last_update)}</time>
+                          <button
+                            type="button"
+                            className="table-action"
+                            onClick={() => void refreshSingleSku(item.sku)}
+                            disabled={Boolean(refreshingSku)}
+                            aria-label={`Atualizar ${item.sku}`}
+                            title="Atualizar SKU"
+                          >
+                            {refreshingSku === item.sku
+                              ? <LoaderCircle size={15} className="animate-spin" />
+                              : <RefreshCw size={15} />}
+                          </button>
                         </div>
                       ))
                     ) : (
@@ -1039,6 +1194,7 @@ export const HeroSection = () => {
                     )}
                   </div>
                 </div>
+                {extractionError && <p className="auth-error">{extractionError}</p>}
               </div>
             )}
           </section>

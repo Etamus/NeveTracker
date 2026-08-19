@@ -31,12 +31,14 @@ export type InterfacePreferences = {
   currency: string;
   locale: string;
   defaultStores: string[];
+  logisticsPostalCode: string;
 };
 
 export const defaultInterfacePreferences: InterfacePreferences = {
   currency: "BRL",
   locale: "pt-BR",
   defaultStores: STORE_OPTIONS.map((store) => store.label),
+  logisticsPostalCode: "",
 };
 
 const validCurrencies = new Set(currencyOptions.map((option) => option.value));
@@ -57,6 +59,10 @@ export const getInterfacePreferences = (): InterfacePreferences => {
       currency: parsed.currency && validCurrencies.has(parsed.currency) ? parsed.currency : "BRL",
       locale: parsed.locale && validLocales.has(parsed.locale) ? parsed.locale : "pt-BR",
       defaultStores: defaultStores.length ? defaultStores : defaultInterfacePreferences.defaultStores,
+      logisticsPostalCode:
+        typeof parsed.logisticsPostalCode === "string"
+          ? parsed.logisticsPostalCode.replace(/\D/g, "").slice(0, 8)
+          : "",
     };
   } catch {
     return defaultInterfacePreferences;

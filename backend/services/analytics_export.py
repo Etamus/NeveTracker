@@ -91,6 +91,8 @@ def _write_stores_sheet(workbook, rows):
             "skus": set(),
             "products": set(),
             "last_update": None,
+            "shipping_costs": [],
+            "lead_times": [],
         }
     )
 
@@ -102,6 +104,10 @@ def _write_stores_sheet(workbook, rows):
             store["prices"].append(offer.current_price)
             store["skus"].add(row.sku or "")
             store["products"].add(row.name)
+            if offer.shipping_cost is not None:
+                store["shipping_costs"].append(offer.shipping_cost)
+            if offer.delivery_max_days is not None:
+                store["lead_times"].append(offer.delivery_max_days)
             if last_update and (
                 store["last_update"] is None or last_update > store["last_update"]
             ):
@@ -117,6 +123,8 @@ def _write_stores_sheet(workbook, rows):
             "SKUs",
             "Melhor preço",
             "Preço médio",
+            "Frete médio",
+            "Lead time médio (dias)",
             "Última atualização",
         ]
     )
@@ -136,15 +144,27 @@ def _write_stores_sheet(workbook, rows):
                 len({sku for sku in store["skus"] if sku}),
                 min(prices),
                 sum(prices) / len(prices),
+                (
+                    sum(store["shipping_costs"]) / len(store["shipping_costs"])
+                    if store["shipping_costs"]
+                    else None
+                ),
+                (
+                    sum(store["lead_times"]) / len(store["lead_times"])
+                    if store["lead_times"]
+                    else None
+                ),
                 store["last_update"],
             ]
         )
 
-    _style_sheet(sheet, [30, 22, 11, 12, 10, 17, 17, 21])
+    _style_sheet(sheet, [30, 22, 11, 12, 10, 17, 17, 17, 23, 21])
     for row_index in range(2, sheet.max_row + 1):
         sheet.cell(row_index, 6).number_format = CURRENCY_FORMAT
         sheet.cell(row_index, 7).number_format = CURRENCY_FORMAT
-        sheet.cell(row_index, 8).number_format = "dd/mm/yyyy hh:mm"
+        sheet.cell(row_index, 8).number_format = CURRENCY_FORMAT
+        sheet.cell(row_index, 9).number_format = '0.0 "dias"'
+        sheet.cell(row_index, 10).number_format = "dd/mm/yyyy hh:mm"
 
 
 def _write_offers_sheet(workbook, rows):
@@ -156,6 +176,21 @@ def _write_offers_sheet(workbook, rows):
             "Lojista",
             "Fonte",
             "Preço",
+            "À vista",
+            "A prazo",
+            "Parcelas",
+            "Valor da parcela",
+            "Diferença pagamento",
+            "Frete",
+            "Total com frete",
+            "Prazo mínimo (dias)",
+            "Prazo máximo (dias)",
+            "Método de envio",
+            "CEP",
+            "Disponibilidade",
+            "Origem logística",
+            "Descoberta por",
+            "Cache",
             "Atualizado em",
             "URL",
         ]
@@ -163,6 +198,12 @@ def _write_offers_sheet(workbook, rows):
 
     for row in rows:
         for offer in sorted(row.offers, key=lambda item: item.current_price):
+            cash_price = offer.cash_price or offer.current_price
+            total_with_shipping = (
+                cash_price + offer.shipping_cost
+                if offer.shipping_cost is not None
+                else None
+            )
             sheet.append(
                 [
                     row.sku or "",
@@ -170,19 +211,38 @@ def _write_offers_sheet(workbook, rows):
                     offer.store,
                     offer.source or offer.store,
                     offer.current_price,
+                    cash_price,
+                    offer.installment_price,
+                    offer.installment_count,
+                    offer.installment_value,
+                    offer.payment_difference,
+                    offer.shipping_cost,
+                    total_with_shipping,
+                    offer.delivery_min_days,
+                    offer.delivery_max_days,
+                    offer.shipping_method or "",
+                    offer.destination_zip or "",
+                    offer.availability or "",
+                    offer.logistics_source or "",
+                    offer.discovery_source or "",
+                    "Sim" if offer.is_cached else "Não",
                     _excel_datetime(offer.last_update),
                     offer.url,
                 ]
             )
-            link_cell = sheet.cell(sheet.max_row, 7)
+            link_cell = sheet.cell(sheet.max_row, 22)
             link_cell.hyperlink = offer.url
             link_cell.font = LINK_FONT
 
-    _style_sheet(sheet, [16, 52, 30, 22, 17, 21, 62])
+    _style_sheet(
+        sheet,
+        [16, 52, 30, 22, 17, 17, 17, 10, 18, 20, 15, 18, 20, 20, 24, 13, 18, 20, 18, 11, 21, 62],
+    )
     for row_index in range(2, sheet.max_row + 1):
-        sheet.cell(row_index, 5).number_format = CURRENCY_FORMAT
-        sheet.cell(row_index, 6).number_format = "dd/mm/yyyy hh:mm"
-        sheet.cell(row_index, 7).font = LINK_FONT
+        for column in (5, 6, 7, 9, 10, 11, 12):
+            sheet.cell(row_index, column).number_format = CURRENCY_FORMAT
+        sheet.cell(row_index, 21).number_format = "dd/mm/yyyy hh:mm"
+        sheet.cell(row_index, 22).font = LINK_FONT
 
 
 def build_analytics_workbook(payload):
