@@ -14,6 +14,7 @@ O foco atual do sistema é comparar ofertas por **lojistas reais** sempre que a 
 - Filtros por lojas/fontes: Mercado Livre, Magazine Luiza, Amazon Brasil, Shopee, Leroy Merlin, Dufrio, Friolar, Refrigeração Mota, MG Parts, Gold Service e ComClick.
 - Visualização "Design" em cards com imagem, preço e link de acesso ao produto.
 - Dashboard por item com gráfico de preços e tabela comparativa por fonte.
+- Exportação do Analytics em Excel, com abas de resumo, lojistas e ofertas.
 - Análises de dados e dashboards gerados através da IA **NeveAI**.
 - Banco SQLite local, sem depender de Docker, serviços pagos ou programas externos.
 - Scripts `.bat` para preparar e iniciar o projeto no Windows.
@@ -57,11 +58,12 @@ Backend:
 ## Como Funciona
 
 1. O usuário pesquisa um produto, nome ou SKU.
-2. O backend consulta fontes gratuitas e também usa dados já salvos no SQLite quando disponíveis.
-3. As ofertas são normalizadas, deduplicadas e agrupadas por similaridade de item, SKU e marca.
+2. O backend consulta as lojas diretas em paralelo e agrega Buscapé/Zoom uma única vez por pesquisa.
+3. As ofertas são validadas, normalizadas, deduplicadas e agrupadas por similaridade de item, SKU e marca.
 4. A comparação prioriza lojistas/ofertas, não apenas o nome do marketplace.
-5. O frontend renderiza ranking, cards e dashboards.
-6. A camada **NeveAI** organiza a análise visual, os indicadores e os dashboards comparativos exibidos na interface.
+5. Quando uma fonte sofre bloqueio temporário, a última oferta local daquela loja permanece disponível com sua data original.
+6. O frontend renderiza ranking, cards e dashboards.
+7. A camada **NeveAI** organiza a análise visual, os indicadores e os dashboards comparativos exibidos na interface.
 
 ## Lojas e Fontes
 
@@ -155,15 +157,18 @@ Backend:
 
 ```text
 DATABASE_URL=sqlite:///precos.db
+MERCADO_LIVRE_ACCESS_TOKEN=
 ```
 
 Se `DATABASE_URL` não for informado, o backend usa automaticamente `backend/precos.db`.
+O token do Mercado Livre é opcional; quando informado, habilita a API oficial autenticada antes dos fallbacks gratuitos.
 
 ## Endpoints Principais
 
 ```text
 GET /              # Status da API
 GET /products/search?q=SKU_OU_TERMO
+POST /products/export/analytics
 ```
 
 A busca retorna:

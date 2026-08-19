@@ -10,8 +10,10 @@ import {
   Check,
   ChevronDown,
   ExternalLink,
+  FileSpreadsheet,
   Funnel,
   ImageIcon,
+  LoaderCircle,
   PackageOpen,
   Search,
   Store,
@@ -20,6 +22,7 @@ import {
 } from "lucide-react";
 import type { ComparisonRow, Product } from "../models/product.model";
 import { PriceChart } from "./PriceChart";
+import { getApiBaseUrl } from "./HeroSection/viewModel";
 import {
   createCompactFormatter,
   createCurrencyFormatter,
@@ -814,6 +817,7 @@ export default function SlidingTabs({
               rows={filteredRows}
               stores={marketStoreRanking}
               searched={Boolean(lastQuery)}
+              query={lastQuery}
               onOpenProduct={openAnalytics}
             />
           )}
@@ -1066,72 +1070,127 @@ const MarketAnalytics = ({
   rows,
   stores,
   searched,
+  query,
   onOpenProduct,
 }: {
   products: Product[];
   rows: ComparisonRow[];
   stores: Array<{ name: string; offers: number; lowest: number }>;
   searched: boolean;
+  query: string;
   onOpenProduct: (row: ComparisonRow) => void;
 }) => {
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
+
   if (!products.length) return <section className="data-panel"><EmptyState searched={searched} /></section>;
 
   const maxOffers = Math.max(...stores.map((store) => store.offers), 1);
 
-  return (
-    <div className="analytics-layout">
-      <section className="data-panel analytics-chart-panel">
-        <div className="data-panel__header">
-          <div><h2>Preço mínimo por loja</h2><p>Melhor condição encontrada em cada fonte</p></div>
-        </div>
-        <div className="p-4 sm:p-5"><PriceChart products={products} /></div>
-      </section>
+  const exportAnalytics = async () => {
+    if (!rows.length || exporting) return;
 
-      <section className="data-panel">
-        <div className="data-panel__header">
-          <div><h2>Cobertura das lojas</h2><p>Participação nas ofertas encontradas</p></div>
-        </div>
-        <div className="store-ranking-list">
-          {stores.slice(0, 8).map((store, index) => (
-            <div key={store.name} className="store-ranking-row">
-              <span className="store-ranking-index">{String(index + 1).padStart(2, "0")}</span>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="truncate text-xs font-semibold text-[var(--foreground)]">{store.name}</span>
-                  <span className="text-xs font-medium text-[var(--muted)]">{store.offers} ofertas</span>
-                </div>
-                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--surface-muted)]">
-                  <div className="h-full rounded-full bg-[var(--accent)]" style={{ width: `${Math.max(8, store.offers / maxOffers * 100)}%` }} />
+    setExporting(true);
+    setExportError("");
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/products/export/analytics`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, rows }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => null);
+        throw new Error(error?.detail || "Não foi possível exportar os dados.");
+      }
+
+      const blob = await response.blob();
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || "neveprice-analytics.xlsx";
+      const downloadUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = downloadUrl;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(downloadUrl);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : "Não foi possível exportar os dados.");
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <div className="analytics-view">
+      <div className="analytics-layout">
+        <section className="data-panel analytics-chart-panel">
+          <div className="data-panel__header">
+            <div><h2>Preço mínimo por loja</h2><p>Melhor condição encontrada em cada fonte</p></div>
+            <div className="analytics-export-control">
+              {exportError && <span role="alert">{exportError}</span>}
+              <button
+                type="button"
+                className="icon-button analytics-export-button"
+                onClick={() => void exportAnalytics()}
+                disabled={exporting || !rows.length}
+                aria-label="Exportar analytics para Excel"
+                title="Exportar para Excel"
+              >
+                {exporting ? <LoaderCircle size={17} className="animate-spin" /> : <FileSpreadsheet size={17} />}
+              </button>
+            </div>
+          </div>
+          <div className="p-4 sm:p-5"><PriceChart products={products} /></div>
+        </section>
+
+        <section className="data-panel">
+          <div className="data-panel__header">
+            <div><h2>Cobertura das lojas</h2><p>Participação nas ofertas encontradas</p></div>
+          </div>
+          <div className="store-ranking-list">
+            {stores.slice(0, 8).map((store, index) => (
+              <div key={store.name} className="store-ranking-row">
+                <span className="store-ranking-index">{String(index + 1).padStart(2, "0")}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="truncate text-xs font-semibold text-[var(--foreground)]">{store.name}</span>
+                    <span className="text-xs font-medium text-[var(--muted)]">{store.offers} ofertas</span>
+                  </div>
+                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--surface-muted)]">
+                    <div className="h-full rounded-full bg-[var(--accent)]" style={{ width: `${Math.max(8, store.offers / maxOffers * 100)}%` }} />
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
-        </div>
-      </section>
+            ))}
+          </div>
+        </section>
 
-      <section className="data-panel analytics-products-panel">
-        <div className="data-panel__header">
-          <div><h2>Produtos em destaque</h2><p>Itens com maior cobertura entre lojas</p></div>
-        </div>
-        <div className="divide-y divide-[var(--border)]">
-          {rows.slice(0, 6).map((row) => (
-            <button key={`${row.id}-${row.name}`} type="button" className="analytics-product-row" onClick={() => onOpenProduct(row)}>
-              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-[var(--surface-muted)] text-[var(--muted)]">
-                <Store size={16} />
-              </span>
-              <span className="min-w-0 flex-1 text-left">
-                <strong className="block truncate text-xs font-semibold text-[var(--foreground)]">{row.name}</strong>
-                <small className="mt-0.5 block text-xs text-[var(--muted)]">{row.store_count} lojas · {row.offer_count} ofertas</small>
-              </span>
-              <span className="text-right">
-                <strong className="block text-xs font-semibold text-[var(--success)]">{formatCurrency(row.cheapest_price)}</strong>
-                <small className="mt-0.5 block text-xs text-[var(--muted)]">Melhor preço</small>
-              </span>
-              <ChevronDown size={15} className="-rotate-90 text-[var(--muted)]" />
-            </button>
-          ))}
-        </div>
-      </section>
+        <section className="data-panel analytics-products-panel">
+          <div className="data-panel__header">
+            <div><h2>Produtos em destaque</h2><p>Itens com maior cobertura entre lojas</p></div>
+          </div>
+          <div className="divide-y divide-[var(--border)]">
+            {rows.slice(0, 6).map((row) => (
+              <button key={`${row.id}-${row.name}`} type="button" className="analytics-product-row" onClick={() => onOpenProduct(row)}>
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-[var(--surface-muted)] text-[var(--muted)]">
+                  <Store size={16} />
+                </span>
+                <span className="min-w-0 flex-1 text-left">
+                  <strong className="block truncate text-xs font-semibold text-[var(--foreground)]">{row.name}</strong>
+                  <small className="mt-0.5 block text-xs text-[var(--muted)]">{row.store_count} lojas · {row.offer_count} ofertas</small>
+                </span>
+                <span className="text-right">
+                  <strong className="block text-xs font-semibold text-[var(--success)]">{formatCurrency(row.cheapest_price)}</strong>
+                  <small className="mt-0.5 block text-xs text-[var(--muted)]">Melhor preço</small>
+                </span>
+                <ChevronDown size={15} className="-rotate-90 text-[var(--muted)]" />
+              </button>
+            ))}
+          </div>
+        </section>
+      </div>
     </div>
   );
 };

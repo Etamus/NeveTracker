@@ -1,28 +1,18 @@
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
+from threading import RLock
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 from cachetools import TTLCache, cached
+from cachetools.keys import hashkey
 
 SOURCES = (
     ("Buscape", "https://www.buscape.com.br"),
     ("Zoom", "https://www.zoom.com.br"),
 )
-
-STORE_ALIASES = {
-    "amazon": ("amazon", "amazon.com.br"),
-    "comclick": ("comclick", "com click"),
-    "dufrio": ("dufrio",),
-    "friolar": ("friolar", "friolar pecas", "friolar peças"),
-    "gold_service": ("gold service", "goldservice"),
-    "magalu": ("magazine luiza", "magalu"),
-    "mercado_livre": ("mercado livre", "mercadolivre"),
-    "mg_parts": ("mg parts", "mgparts"),
-    "refrigeracao_mota": ("refrigeracao mota", "refrigeração mota"),
-    "shopee": ("shopee",),
-}
 
 TARGET_STORE_ALIASES = {
     "Amazon Brasil": ("amazon", "amazon.com.br"),
@@ -39,7 +29,8 @@ TARGET_STORE_ALIASES = {
 }
 
 cache = TTLCache(maxsize=100, ttl=900)
-DETAIL_OFFER_LIMIT = 6
+cache_lock = RLock()
+COMPARISON_STORE_LIMIT = 24
 LEAD_TIMEOUT = 8
 
 
@@ -105,7 +96,7 @@ def _pretty_seller(value, source_label):
     return seller
 
 
-@cached(cache)
+@cached(cache, key=lambda lead_url: hashkey("lead", lead_url), lock=cache_lock)
 def _lead_redirect_info(lead_url: str):
     try:
         response = requests.get(lead_url, headers=_headers(), timeout=LEAD_TIMEOUT)
@@ -154,11 +145,6 @@ def _normalize_store(value):
     return "".join(ch for ch in (value or "").lower() if ch.isalnum() or ch.isspace())
 
 
-def _matches_store(merchant_name, store_key):
-    normalized = _normalize_store(merchant_name)
-    return any(_normalize_store(alias) in normalized for alias in STORE_ALIASES[store_key])
-
-
 def _target_store_label(merchant_name):
     normalized = _normalize_store(merchant_name)
     for label, aliases in TARGET_STORE_ALIASES.items():
@@ -197,7 +183,7 @@ def _extract_offer_list(html):
     )
 
 
-@cached(cache)
+@cached(cache, key=lambda product_url: hashkey("offers", product_url), lock=cache_lock)
 def _product_offer_list(product_url: str):
     try:
         response = requests.get(product_url, headers=_headers(), timeout=8)
@@ -209,7 +195,7 @@ def _product_offer_list(product_url: str):
         return []
 
 
-@cached(cache)
+@cached(cache, key=lambda product_query: hashkey("search", product_query), lock=cache_lock)
 def _search_hits(product_query: str):
     hits = []
 
@@ -236,7 +222,11 @@ def _search_hits(product_query: str):
     return hits
 
 
-@cached(cache)
+@cached(
+    cache,
+    key=lambda product_query, limit=10: hashkey("catalog", product_query, limit),
+    lock=cache_lock,
+)
 def scrape_comparison_catalog(product_query: str, limit: int = 10):
     products = []
     seen = set()
@@ -282,7 +272,11 @@ def scrape_comparison_catalog(product_query: str, limit: int = 10):
     )
 
 
-@cached(cache)
+@cached(
+    cache,
+    key=lambda product_query, limit=30: hashkey("target_catalog", product_query, limit),
+    lock=cache_lock,
+)
 def scrape_target_catalog(product_query: str, limit: int = 30):
     products = []
 
@@ -346,133 +340,77 @@ def scrape_target_catalog(product_query: str, limit: int = 30):
     )
 
 
-@cached(cache)
-def scrape_comparison_store(product_query: str, store_key: str, store_label: str):
-    products = []
+def _comparison_candidate(item, product_query):
+    best_offer = item.get("bestOffer") or {}
+    merchant_name = best_offer.get("merchantName") or item.get("merchantName") or ""
+    store_label = _target_store_label(merchant_name)
+    name = item.get("name") or item.get("shortName") or item.get("title")
+    price = _as_float(item.get("price"))
+    relative_url = item.get("url")
+
+    if not store_label or not name or not price or not relative_url:
+        return None
+
+    return {
+        "name": name.strip(),
+        "price": price,
+        "store": merchant_name.strip() or store_label,
+        "source": store_label,
+        "seller": merchant_name.strip() or store_label,
+        "url": urljoin(item["_base_url"], relative_url),
+        "brand": store_label,
+        "category": item.get("categoryName") or product_query,
+        "image_url": item.get("image"),
+    }
+
+
+def _resolve_comparison_candidate(candidate):
+    final_url, seller = _enrich_offer_url(
+        candidate["url"],
+        candidate["source"],
+        candidate["seller"],
+    )
+    return {**candidate, "url": final_url, "store": seller, "seller": seller}
+
+
+@cached(
+    cache,
+    key=lambda product_query: hashkey("comparison", product_query),
+    lock=cache_lock,
+)
+def scrape_comparison_offers(product_query: str):
+    """Collect comparator offers once and distribute them by source later."""
+    candidates = []
+    counts_by_source = {}
     seen = set()
 
     for item in _search_hits(product_query):
-        try:
-            best_offer = item.get("bestOffer") or {}
-            merchant_name = (
-                best_offer.get("merchantName")
-                or item.get("merchantName")
-                or ""
-            )
-            if not _matches_store(merchant_name, store_key):
-                continue
+        candidate = _comparison_candidate(item, product_query)
+        if not candidate:
+            continue
 
-            name = item.get("name") or item.get("shortName") or item.get("title")
-            price = _as_float(item.get("price"))
-            relative_url = item.get("url")
-            if not name or not price or not relative_url:
-                continue
+        source = candidate["source"]
+        if counts_by_source.get(source, 0) >= COMPARISON_STORE_LIMIT:
+            continue
 
-            product_url = urljoin(item["_base_url"], relative_url)
-            final_url, seller = _enrich_offer_url(
-                product_url,
-                store_label,
-                merchant_name.strip() or store_label,
-            )
-            seen_key = (seller, name.strip().lower(), round(price, 2))
-            if seen_key in seen:
-                continue
-            seen.add(seen_key)
+        key = (
+            source,
+            candidate["name"].lower(),
+            round(candidate["price"], 2),
+            candidate["url"],
+        )
+        if key in seen:
+            continue
 
-            products.append(
-                {
-                    "name": name.strip(),
-                    "price": price,
-                    "store": seller,
-                    "source": store_label,
-                    "seller": seller,
-                    "url": final_url,
-                    "brand": store_label,
-                    "category": item.get("categoryName") or product_query,
-                    "image_url": item.get("image"),
-                }
-            )
-        except Exception as e:
-            print(f"Erro ao processar comparador para {store_label}: {e}")
+        seen.add(key)
+        counts_by_source[source] = counts_by_source.get(source, 0) + 1
+        candidates.append(candidate)
 
-    for item in scrape_comparison_catalog(product_query, limit=DETAIL_OFFER_LIMIT):
-        product_url = item["url"]
-        for offer in _product_offer_list(product_url):
-            seller_name = offer.get("sellerName") or ""
-            if not _matches_store(seller_name, store_key):
-                continue
+    if not candidates:
+        return []
 
-            name = offer.get("name") or item["name"]
-            price = _as_float(offer.get("price"))
-            if not name or not price:
-                continue
+    worker_count = min(8, len(candidates))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        resolved = list(executor.map(_resolve_comparison_candidate, candidates))
 
-            final_url, seller = _enrich_offer_url(
-                product_url,
-                store_label,
-                seller_name.strip() or store_label,
-            )
-            seen_key = (seller, name.strip().lower(), round(price, 2))
-            if seen_key in seen:
-                continue
-            seen.add(seen_key)
-
-            products.append(
-                {
-                    "name": name.strip(),
-                    "price": price,
-                    "store": seller,
-                    "source": store_label,
-                    "seller": seller,
-                    "url": final_url,
-                    "brand": store_label,
-                    "category": item.get("category") or product_query,
-                    "image_url": offer.get("imageUrl") or item.get("image_url"),
-                }
-            )
-
-    return products
-
-
-def scrape_amazon_comparison(product_query: str):
-    return scrape_comparison_store(product_query, "amazon", "Amazon Brasil")
-
-
-def scrape_magalu_comparison(product_query: str):
-    return scrape_comparison_store(product_query, "magalu", "Magazine Luiza")
-
-
-def scrape_mercado_livre_comparison(product_query: str):
-    return scrape_comparison_store(product_query, "mercado_livre", "Mercado Livre")
-
-
-def scrape_shopee_comparison(product_query: str):
-    return scrape_comparison_store(product_query, "shopee", "Shopee")
-
-
-def scrape_dufrio_comparison(product_query: str):
-    return scrape_comparison_store(product_query, "dufrio", "Dufrio")
-
-
-def scrape_friolar_comparison(product_query: str):
-    return scrape_comparison_store(product_query, "friolar", "Friolar")
-
-
-def scrape_refrigeracao_mota_comparison(product_query: str):
-    return scrape_comparison_store(
-        product_query,
-        "refrigeracao_mota",
-        "Refrigeração Mota",
-    )
-
-
-def scrape_mg_parts_comparison(product_query: str):
-    return scrape_comparison_store(product_query, "mg_parts", "MG Parts")
-
-
-def scrape_gold_service_comparison(product_query: str):
-    return scrape_comparison_store(product_query, "gold_service", "Gold Service")
-
-
-def scrape_comclick_comparison(product_query: str):
-    return scrape_comparison_store(product_query, "comclick", "ComClick")
+    return sorted(resolved, key=lambda item: (item["source"], item["price"]))

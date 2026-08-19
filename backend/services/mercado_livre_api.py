@@ -1,3 +1,5 @@
+import os
+
 import requests
 from cachetools import TTLCache, cached
 
@@ -32,12 +34,21 @@ def search_mercado_livre(product_query: str):
             "Accept": "application/json",
             "Accept-Language": "pt-BR,pt;q=0.9",
         }
+        access_token = os.getenv("MERCADO_LIVRE_ACCESS_TOKEN", "").strip()
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
 
         response = requests.get(BASE_URL, params=params, headers=headers, timeout=10)
-        print("Status ML:", response.status_code)
-
         if response.status_code != 200:
-            print(f"API do Mercado Livre indisponivel ou bloqueada: HTTP {response.status_code}")
+            token_hint = (
+                " Configure MERCADO_LIVRE_ACCESS_TOKEN para usar a API oficial."
+                if response.status_code in {401, 403} and not access_token
+                else ""
+            )
+            print(
+                "API do Mercado Livre indisponivel ou bloqueada: "
+                f"HTTP {response.status_code}.{token_hint}"
+            )
             return []
 
         data = response.json()

@@ -1,14 +1,16 @@
+from datetime import datetime
 from typing import Optional
 import re
 from urllib.parse import parse_qs, unquote, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from database import get_db
 from models.product import KnownSku, PriceHistory, Product
-from schemas.product import ProductCreate, SkuBatchRequest
+from schemas.product import AnalyticsExportRequest, ProductCreate, SkuBatchRequest
 from scrapers.comparison import _lead_redirect_info
 from services.scraper_service import (
     TARGET_STORES,
@@ -16,6 +18,7 @@ from services.scraper_service import (
     build_summary_from_cached_results,
     run_all_scrapers,
 )
+from services.analytics_export import build_analytics_workbook
 
 product_router = APIRouter()
 BATCH_SKU_LIMIT = 30
@@ -356,6 +359,23 @@ def batch_search_products(payload: SkuBatchRequest, db: Session = Depends(get_db
             )
 
     return {"items": items}
+
+
+@product_router.post("/export/analytics")
+def export_analytics(payload: AnalyticsExportRequest):
+    if not payload.rows:
+        raise HTTPException(status_code=400, detail="Nao ha dados para exportar.")
+
+    workbook = build_analytics_workbook(payload)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M")
+    filename = f"neveprice-analytics-{timestamp}.xlsx"
+    return StreamingResponse(
+        workbook,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @product_router.post("/", status_code=201)

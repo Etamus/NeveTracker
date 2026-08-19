@@ -9,6 +9,8 @@ set "RUN_BACKEND_SCRIPT=%ROOT%scripts\run_backend.bat"
 set "RUN_FRONTEND_SCRIPT=%ROOT%scripts\run_frontend.bat"
 set "VENV_PY=%BACKEND_DIR%.venv\Scripts\python.exe"
 set "NODE_ENV_FILE=%ROOT%.tools\node\env.bat"
+set "BACKEND_ENV=%BACKEND_DIR%.env"
+set "FRONTEND_ENV=%FRONTEND_DIR%.env.local"
 set "BACKEND_URL=http://127.0.0.1:8000"
 set "FRONTEND_URL=http://127.0.0.1:5173"
 set "LOCK_DIR=%ROOT%.iniciar.lock"
@@ -126,6 +128,30 @@ if not exist "%NPM_CMD%" (
   goto :cleanup
 )
 
+echo Conferindo arquivos de ambiente locais...
+set "DB_PATH_URL=%BACKEND_DIR%precos.db"
+set "DB_PATH_URL=%DB_PATH_URL:\=/%"
+call :set_env_key "%BACKEND_ENV%" "DATABASE_URL" "DATABASE_URL=sqlite:///%DB_PATH_URL%"
+if errorlevel 1 (
+  echo ERRO: Falha ao preparar o arquivo "%BACKEND_ENV%".
+  set "EXIT_CODE=1"
+  goto :cleanup
+)
+
+call :set_env_key "%FRONTEND_ENV%" "VITE_API_URL" "VITE_API_URL=http://127.0.0.1:8000"
+if errorlevel 1 (
+  echo ERRO: Falha ao preparar o arquivo "%FRONTEND_ENV%".
+  set "EXIT_CODE=1"
+  goto :cleanup
+)
+
+call :set_env_key "%FRONTEND_ENV%" "VITE_BASE_PATH" "VITE_BASE_PATH=/"
+if errorlevel 1 (
+  echo ERRO: Falha ao preparar o arquivo "%FRONTEND_ENV%".
+  set "EXIT_CODE=1"
+  goto :cleanup
+)
+
 call :url_ok "%BACKEND_URL%/"
 if errorlevel 1 (
   echo Iniciando backend neste CMD...
@@ -214,6 +240,14 @@ echo Ja existe uma inicializacao em andamento.
 echo Se nenhuma janela estiver abrindo, apague a pasta "%LOCK_DIR%" e tente novamente.
 if not defined NEVEPRICE_NO_PAUSE pause
 exit /b 1
+
+:set_env_key
+set "ENV_FILE=%~1"
+set "ENV_KEY=%~2"
+set "ENV_LINE=%~3"
+
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $file='%ENV_FILE%'; $key='%ENV_KEY%'; $line='%ENV_LINE%'; $dir=Split-Path -Parent $file; if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }; $lines=@(); if (Test-Path -LiteralPath $file) { $lines=Get-Content -LiteralPath $file }; $updated=$false; $out=@(); foreach ($item in $lines) { if ($item.StartsWith($key + '=', [System.StringComparison]::OrdinalIgnoreCase)) { $out += $line; $updated=$true } else { $out += $item } }; if (-not $updated) { $out += $line }; Set-Content -LiteralPath $file -Value $out -Encoding ASCII"
+exit /b %errorlevel%
 
 :url_ok
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$u=[Uri]'%~1'; $port=$u.Port; if ($port -lt 0) { if ($u.Scheme -eq 'https') { $port=443 } else { $port=80 } }; $c=New-Object Net.Sockets.TcpClient; try { $t=$c.ConnectAsync($u.Host,$port); if (-not $t.Wait(1200)) { exit 1 }; if ($c.Connected) { exit 0 }; exit 1 } catch { exit 1 } finally { $c.Close() }" >nul 2>nul

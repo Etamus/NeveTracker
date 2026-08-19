@@ -14,7 +14,9 @@ load_dotenv(BACKEND_DIR.parent / ".env")
 
 
 def _sqlite_url(path: Path) -> str:
-    return f"sqlite:///{path.as_posix()}"
+    resolved = path.expanduser().resolve()
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    return f"sqlite:///{resolved.as_posix()}"
 
 
 def _normalize_database_url(database_url):
@@ -23,14 +25,29 @@ def _normalize_database_url(database_url):
         return _sqlite_url(DEFAULT_DB_PATH)
 
     if database_url.startswith("sqlite:///"):
-        raw_path = database_url[len("sqlite:///"):]
+        raw_path = database_url[len("sqlite:///"):].strip().strip('"').replace("\\", "/")
+        if raw_path == ":memory:":
+            return database_url
+
         if raw_path.startswith("./"):
             raw_path = raw_path[2:]
 
         is_windows_absolute = re.match(r"^[A-Za-z]:/", raw_path) is not None
         is_posix_absolute = raw_path.startswith("/")
-        if raw_path and not is_windows_absolute and not is_posix_absolute:
-            return _sqlite_url((BACKEND_DIR / raw_path).resolve())
+        if raw_path:
+            db_path = (
+                Path(raw_path)
+                if is_windows_absolute or is_posix_absolute
+                else BACKEND_DIR / raw_path
+            )
+            try:
+                return _sqlite_url(db_path)
+            except OSError:
+                print(
+                    "ATENCAO: DATABASE_URL invalido. "
+                    f"Usando SQLite local em {DEFAULT_DB_PATH}"
+                )
+                return _sqlite_url(DEFAULT_DB_PATH)
 
     return database_url
 

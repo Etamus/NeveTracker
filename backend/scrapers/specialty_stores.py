@@ -1,6 +1,7 @@
 import json
 import re
 from html import unescape
+from threading import RLock
 from urllib.parse import quote_plus, urljoin
 
 import requests
@@ -8,6 +9,7 @@ from bs4 import BeautifulSoup
 from cachetools import TTLCache, cached
 
 cache = TTLCache(maxsize=100, ttl=900)
+cache_lock = RLock()
 
 STORE_LIMIT = 50
 PRODUCT_STOP_WORDS = {
@@ -289,15 +291,21 @@ def _scrape_jsonld_products(url, label, product_query):
         if not is_product:
             continue
 
-        price = _offer_price(item.get("offers"))
+        offers = item.get("offers")
+        offer_url = offers.get("url") if isinstance(offers, dict) else None
+        image = item.get("image")
+        if isinstance(image, list):
+            image = next((value for value in image if value), None)
+
+        price = _offer_price(offers)
         product = _product(
             url,
             label,
             product_query,
             item.get("name"),
             price,
-            item.get("url"),
-            item.get("image"),
+            item.get("url") or offer_url or url,
+            image,
         )
         if product:
             products.append(product)
@@ -451,7 +459,7 @@ def _scrape_tray(url, base_url, label, product_query):
     return _deduplicate(products)
 
 
-@cached(cache, key=_cache_key("dufrio"))
+@cached(cache, key=_cache_key("dufrio"), lock=cache_lock)
 def scrape_dufrio(product_query: str):
     url = f"https://www.dufrio.com.br/catalogsearch/result/?q={quote_plus(product_query)}"
     try:
@@ -461,7 +469,7 @@ def scrape_dufrio(product_query: str):
         return []
 
 
-@cached(cache, key=_cache_key("friolar"))
+@cached(cache, key=_cache_key("friolar"), lock=cache_lock)
 def scrape_friolar(product_query: str):
     urls = (
         "https://www.friolarpecas.com.br/buscar?q={query}",
@@ -480,7 +488,7 @@ def scrape_friolar(product_query: str):
     return _deduplicate(products)
 
 
-@cached(cache, key=_cache_key("refrigeracao_mota"))
+@cached(cache, key=_cache_key("refrigeracao_mota"), lock=cache_lock)
 def scrape_refrigeracao_mota(product_query: str):
     url = (
         "https://www.refrigeracaomota.com.br/"
@@ -498,7 +506,7 @@ def scrape_refrigeracao_mota(product_query: str):
         return []
 
 
-@cached(cache, key=_cache_key("mg_parts"))
+@cached(cache, key=_cache_key("mg_parts"), lock=cache_lock)
 def scrape_mg_parts(product_query: str):
     url = f"https://www.mgparts.com.br/search?type=product&q={quote_plus(product_query)}"
     try:
@@ -508,7 +516,7 @@ def scrape_mg_parts(product_query: str):
         return []
 
 
-@cached(cache, key=_cache_key("gold_service"))
+@cached(cache, key=_cache_key("gold_service"), lock=cache_lock)
 def scrape_gold_service(product_query: str):
     url = f"https://www.goldservice.com.br/buscar?q={quote_plus(product_query)}"
     try:
@@ -523,7 +531,7 @@ def scrape_gold_service(product_query: str):
         return []
 
 
-@cached(cache, key=_cache_key("comclick"))
+@cached(cache, key=_cache_key("comclick"), lock=cache_lock)
 def scrape_comclick(product_query: str):
     url = (
         "https://www.comclick.com.br/loja/busca.php"

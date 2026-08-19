@@ -1,188 +1,19 @@
-import random
 import re
-import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy.orm import Session
 
 from models.product import PriceHistory, Product
-from services.mercado_livre_api import search_mercado_livre
-from scrapers.amazon import scrape_amazon
 from scrapers.comparison import (
-    scrape_comparison_catalog,
+    scrape_comparison_offers,
     scrape_target_catalog,
-    scrape_amazon_comparison,
-    scrape_comclick_comparison,
-    scrape_dufrio_comparison,
-    scrape_friolar_comparison,
-    scrape_gold_service_comparison,
-    scrape_magalu_comparison,
-    scrape_mercado_livre_comparison,
-    scrape_mg_parts_comparison,
-    scrape_refrigeracao_mota_comparison,
-    scrape_shopee_comparison,
 )
-from scrapers.leroy import scrape_leroy
-from scrapers.shopee import scrape_shopee
-from scrapers.search_bridge import (
-    scrape_comclick_bridge,
-    scrape_dufrio_bridge,
-    scrape_friolar_bridge,
-    scrape_gold_service_bridge,
-    scrape_mercado_livre_bridge,
-    scrape_mg_parts_bridge,
-    scrape_refrigeracao_mota_bridge,
-)
-from scrapers.specialty_stores import (
-    scrape_comclick,
-    scrape_dufrio,
-    scrape_friolar,
-    scrape_gold_service,
-    scrape_mg_parts,
-    scrape_refrigeracao_mota,
-)
-
-TARGET_STORES = [
-    {
-        "key": "mercado_livre",
-        "label": "Mercado Livre",
-        "scrapers": [
-            search_mercado_livre,
-            scrape_mercado_livre_comparison,
-            scrape_mercado_livre_bridge,
-        ],
-        "focused_scrapers": [
-            search_mercado_livre,
-            scrape_mercado_livre_bridge,
-        ],
-    },
-    {
-        "key": "shopee",
-        "label": "Shopee",
-        "scrapers": [
-            scrape_shopee,
-            scrape_shopee_comparison,
-        ],
-        "focused_scrapers": [
-            scrape_shopee,
-            scrape_shopee_comparison,
-        ],
-    },
-    {
-        "key": "leroy_merlin",
-        "label": "Leroy Merlin",
-        "scrapers": [
-            scrape_leroy,
-        ],
-        "focused_scrapers": [
-            scrape_leroy,
-        ],
-    },
-    {
-        "key": "amazon",
-        "label": "Amazon Brasil",
-        "aliases": ["Amazon"],
-        "scrapers": [
-            scrape_amazon,
-            scrape_amazon_comparison,
-        ],
-        "focused_scrapers": [
-            scrape_amazon,
-        ],
-    },
-    {
-        "key": "magalu",
-        "label": "Magazine Luiza",
-        "scrapers": [
-            scrape_magalu_comparison,
-        ],
-        "focused_scrapers": [
-            scrape_magalu_comparison,
-        ],
-    },
-    {
-        "key": "dufrio",
-        "label": "Dufrio",
-        "scrapers": [
-            scrape_dufrio,
-            scrape_dufrio_comparison,
-            scrape_dufrio_bridge,
-        ],
-        "focused_scrapers": [
-            scrape_dufrio,
-            scrape_dufrio_bridge,
-        ],
-    },
-    {
-        "key": "friolar",
-        "label": "Friolar",
-        "scrapers": [
-            scrape_friolar,
-            scrape_friolar_comparison,
-            scrape_friolar_bridge,
-        ],
-        "focused_scrapers": [
-            scrape_friolar,
-            scrape_friolar_bridge,
-        ],
-    },
-    {
-        "key": "refrigeracao_mota",
-        "label": "Refrigeração Mota",
-        "scrapers": [
-            scrape_refrigeracao_mota,
-            scrape_refrigeracao_mota_comparison,
-            scrape_refrigeracao_mota_bridge,
-        ],
-        "focused_scrapers": [
-            scrape_refrigeracao_mota,
-            scrape_refrigeracao_mota_bridge,
-        ],
-    },
-    {
-        "key": "mg_parts",
-        "label": "MG Parts",
-        "scrapers": [
-            scrape_mg_parts,
-            scrape_mg_parts_comparison,
-            scrape_mg_parts_bridge,
-        ],
-        "focused_scrapers": [
-            scrape_mg_parts,
-            scrape_mg_parts_bridge,
-        ],
-    },
-    {
-        "key": "gold_service",
-        "label": "Gold Service",
-        "scrapers": [
-            scrape_gold_service,
-            scrape_gold_service_comparison,
-            scrape_gold_service_bridge,
-        ],
-        "focused_scrapers": [
-            scrape_gold_service,
-            scrape_gold_service_bridge,
-        ],
-    },
-    {
-        "key": "comclick",
-        "label": "ComClick",
-        "scrapers": [
-            scrape_comclick,
-            scrape_comclick_comparison,
-            scrape_comclick_bridge,
-        ],
-        "focused_scrapers": [
-            scrape_comclick,
-            scrape_comclick_bridge,
-        ],
-    },
-]
+from services.store_registry import STORE_BY_LABEL, TARGET_STORES
 
 STORE_ITEM_LIMIT = 50
-TARGETED_CANDIDATE_LIMIT = 3
 CATALOG_ROW_LIMIT = 30
 
 KNOWN_SKUS = {
@@ -405,31 +236,7 @@ KNOWN_BRANDS = {
     "shop",
 }
 
-VARIANT_SCRAPERS = {
-    "scrape_amazon_comparison",
-    "scrape_leroy",
-    "scrape_leroy_bridge",
-    "scrape_magalu_comparison",
-    "scrape_magalu_bridge",
-    "scrape_mercado_livre_bridge",
-    "scrape_mercado_livre_comparison",
-    "scrape_search_bridge",
-    "scrape_shopee_bridge",
-    "scrape_shopee_comparison",
-    "scrape_amazon_bridge",
-    "scrape_comclick_bridge",
-    "scrape_comclick_comparison",
-    "scrape_dufrio_bridge",
-    "scrape_dufrio_comparison",
-    "scrape_friolar_bridge",
-    "scrape_friolar_comparison",
-    "scrape_gold_service_bridge",
-    "scrape_gold_service_comparison",
-    "scrape_mg_parts_bridge",
-    "scrape_mg_parts_comparison",
-    "scrape_refrigeracao_mota_bridge",
-    "scrape_refrigeracao_mota_comparison",
-}
+VARIANT_SCRAPERS = {"scrape_amazon", "scrape_leroy", "scrape_shopee"}
 
 
 def _normalize_text(value):
@@ -567,7 +374,8 @@ def _normalize_result(item, product_query, store_label=None):
     store = store_label or (item.get("store") or "").strip() or "Loja"
     seller = (item.get("seller") or item.get("store") or store).strip()
     source = (item.get("source") or store_label or store).strip()
-    sku = _item_sku(item, product_query)
+    query_sku = _primary_sku(product_query)
+    sku = _item_sku(item)
 
     try:
         price = float(item.get("price"))
@@ -576,6 +384,25 @@ def _normalize_result(item, product_query, store_label=None):
 
     if not name or not url or price <= 0:
         return None
+
+    if query_sku and sku != query_sku:
+        return None
+
+    if not query_sku:
+        query_tokens = _product_tokens(product_query)
+        name_tokens = _product_tokens(name)
+        shared_tokens = query_tokens.intersection(name_tokens)
+        required_numeric = _numeric_tokens(query_tokens)
+        required_brands = _brand_tokens(query_tokens)
+
+        if query_tokens and not shared_tokens:
+            return None
+        if required_numeric and not required_numeric.issubset(name_tokens):
+            return None
+        if required_brands and not required_brands.issubset(name_tokens):
+            return None
+        if len(query_tokens) >= 3 and len(shared_tokens) / len(query_tokens) < 0.5:
+            return None
 
     if price < _minimum_expected_price(product_query):
         return None
@@ -596,13 +423,32 @@ def _normalize_result(item, product_query, store_label=None):
     }
 
 
+def _offer_url_identity(url):
+    parsed_url = urlsplit(url)
+    identity_params = [
+        (key, value)
+        for key, value in parse_qsl(parsed_url.query, keep_blank_values=False)
+        if key.lower()
+        in {"item_id", "offer_id", "oid", "seller", "seller_id", "shop_id"}
+    ]
+    return urlunsplit(
+        (
+            parsed_url.scheme.lower(),
+            parsed_url.netloc.lower(),
+            parsed_url.path.rstrip("/"),
+            urlencode(sorted(identity_params)),
+            "",
+        )
+    )
+
+
 def _deduplicate(items):
     unique = []
     seen_urls = set()
     seen_listings = set()
 
     for item in items:
-        url_key = item["url"].split("?")[0].rstrip("/")
+        url_key = _offer_url_identity(item["url"])
         listing_key = (
             _normalize_text(item.get("source") or item["store"]),
             _normalize_text(item["store"]),
@@ -631,7 +477,7 @@ def _product_response(item, fallback_id):
         "source": item.get("source") or item["store"],
         "url": item["url"],
         "sku": item.get("sku"),
-        "last_update": datetime.utcnow().isoformat(),
+        "last_update": item.get("last_update") or datetime.utcnow().isoformat(),
     }
 
 
@@ -1008,131 +854,6 @@ def _merge_catalog_rows(actual_rows, catalog_rows, product_query):
     )
 
 
-def _candidate_query_from_name(name):
-    normalized = _normalize_text(name)
-    normalized = normalized.replace("frostfree", "frost free")
-    normalized = re.sub(r"(\d+)\s*(btus?|btu)\b", r"\1btu", normalized)
-    normalized = re.sub(r"(\d+)\s*(litros?|lts?|lt|l)\b", r"\1l", normalized)
-    normalized = re.sub(r"(\d+)\s*(volts?|volt|v)\b", r"\1v", normalized)
-    normalized = re.sub(r"(\d+)\s*(polegadas?|pol)\b", r"\1pol", normalized)
-    normalized = re.sub(r"(\d+)\s*(quilos?|kg)\b", r"\1kg", normalized)
-    normalized = re.sub(r"(\d+)\s*(gb|tb|ml|w)\b", r"\1\2", normalized)
-
-    tokens = []
-    seen = set()
-    for token in re.findall(r"[a-z0-9]+", normalized):
-        if (
-            token in PRODUCT_STOP_WORDS
-            or token in STORE_WORDS
-            or len(token) <= 1
-            or token in seen
-        ):
-            continue
-        seen.add(token)
-        tokens.append(token)
-
-    return " ".join(tokens[:9])
-
-
-def _is_specific_candidate(candidate):
-    tokens = _product_tokens(candidate)
-    has_spec = any(any(character.isdigit() for character in token) for token in tokens)
-    has_brand = bool(tokens.intersection(KNOWN_BRANDS))
-    has_model = any(re.search(r"[a-z]+\d|\d+[a-z]+", token) for token in tokens)
-
-    return len(tokens) >= 4 and (has_spec or has_brand or has_model)
-
-
-def _matches_candidate_product(item, candidate_query):
-    candidate_tokens = _product_tokens(candidate_query)
-    item_tokens = _product_tokens(item["name"])
-
-    if not candidate_tokens or not item_tokens:
-        return False
-
-    return _same_product(candidate_tokens, item_tokens, candidate_tokens)
-
-
-def _catalog_candidate_queries(product_query):
-    if _primary_sku(product_query):
-        return []
-
-    candidates = []
-
-    for item in scrape_comparison_catalog(product_query, limit=10):
-        item_name = item.get("name") or ""
-        normalized = _normalize_result(
-            {
-                "name": item_name,
-                "price": item.get("price"),
-                "store": "Comparador",
-                "url": item.get("url"),
-                "brand": item.get("brand"),
-                "category": item.get("category"),
-                "image_url": item.get("image_url"),
-            },
-            product_query,
-            "Comparador",
-        )
-        if not normalized or _is_accessory_mismatch(normalized, product_query):
-            continue
-
-        candidate = _candidate_query_from_name(item_name)
-        if not _is_specific_candidate(candidate):
-            continue
-        if candidate not in candidates:
-            candidates.append(candidate)
-
-        if len(candidates) >= TARGETED_CANDIDATE_LIMIT:
-            break
-
-    return candidates
-
-
-def _candidate_queries(products, product_query):
-    if _primary_sku(product_query):
-        return []
-
-    rows = _build_comparison_rows(products, product_query)
-    normalized_original = _normalize_text(product_query)
-    query_tokens = _tokens(product_query)
-    query_is_main_product = bool(
-        query_tokens.intersection(ELECTRONICS_TERMS | APPLIANCE_TERMS)
-        and not query_tokens.intersection(ACCESSORY_TERMS)
-    )
-    prioritized_rows = sorted(
-        rows,
-        key=lambda row: (
-            row["store_count"] <= 1,
-            -row["store_count"],
-            -row["offer_count"],
-            row["cheapest_price"],
-            row["name"],
-        ),
-    )
-    candidates = []
-
-    for row in prioritized_rows:
-        if query_is_main_product and _has_accessory_token(_product_tokens(row["name"])):
-            continue
-
-        candidate = _candidate_query_from_name(row["name"])
-        if len(candidate.split()) < 3:
-            continue
-        if not _is_specific_candidate(candidate):
-            continue
-        if _normalize_text(candidate) == normalized_original:
-            continue
-        if candidate in candidates:
-            continue
-
-        candidates.append(candidate)
-        if len(candidates) >= TARGETED_CANDIDATE_LIMIT:
-            break
-
-    return candidates
-
-
 def _build_payloads(raw_by_store, product_query):
     store_payloads = []
     available_results = []
@@ -1227,6 +948,7 @@ def build_summary_from_cached_results(available_results, product_query):
 
 
 def _save_result(item, db: Session):
+    item = {**item, "url": _offer_url_identity(item["url"])}
     existing_price = (
         db.query(PriceHistory)
         .filter(PriceHistory.url == item["url"])
@@ -1243,8 +965,7 @@ def _save_result(item, db: Session):
             sku=item.get("sku"),
         )
         db.add(new_product)
-        db.commit()
-        db.refresh(new_product)
+        db.flush()
 
         new_price = PriceHistory(
             product_id=new_product.id,
@@ -1280,17 +1001,58 @@ def _save_result(item, db: Session):
         db.add(new_price)
         return 1
 
+    existing_price.timestamp = datetime.utcnow()
     return 0
 
 
-def _run_store_scrapers(store_config, product_query, focused=False):
+def _cached_sku_items_by_store(db: Session, sku: str):
+    cached = {store["key"]: [] for store in TARGET_STORES}
+    store_by_name = {}
+    for store in TARGET_STORES:
+        for name in (store["label"], *store.get("aliases", ())):
+            store_by_name[_normalize_text(name)] = store
+
+    products = db.query(Product).filter(Product.sku == sku).all()
+    for product in products:
+        latest_price = max(
+            product.prices,
+            key=lambda price: price.timestamp or datetime.min,
+            default=None,
+        )
+        if not latest_price:
+            continue
+
+        source = latest_price.source or latest_price.store
+        store = store_by_name.get(_normalize_text(source))
+        if not store:
+            continue
+
+        cached[store["key"]].append(
+            {
+                "name": product.name,
+                "price": latest_price.price,
+                "store": latest_price.store,
+                "source": source,
+                "url": latest_price.url,
+                "brand": product.brand,
+                "category": product.category,
+                "image_url": product.image_url,
+                "sku": product.sku,
+                "last_update": (
+                    latest_price.timestamp.isoformat()
+                    if latest_price.timestamp
+                    else None
+                ),
+            }
+        )
+
+    return cached
+
+
+def _run_store_scrapers(store_config, product_query):
     store_results = []
     query_variants = _query_variants(product_query)
-    scraper_functions = (
-        store_config.get("focused_scrapers")
-        if focused and store_config.get("focused_scrapers")
-        else store_config["scrapers"]
-    )
+    scraper_functions = store_config.get("direct_scrapers", ())
 
     for scraper_func in scraper_functions:
         normalized_results = []
@@ -1337,8 +1099,6 @@ def _run_store_scrapers(store_config, product_query, focused=False):
                 "retornou lista vazia."
             )
 
-        time.sleep(random.uniform(0.05, 0.15))
-
     return sorted(
         _deduplicate(store_results),
         key=lambda item: _sort_key(item, product_query),
@@ -1347,47 +1107,51 @@ def _run_store_scrapers(store_config, product_query, focused=False):
 
 def run_all_scrapers(product_query: str, db: Session):
     print(f" LOG: Iniciando buscas gratuitas para '{product_query}'")
-    raw_by_store = {}
+    raw_by_store = {store["key"]: [] for store in TARGET_STORES}
+    worker_count = min(8, len(TARGET_STORES) + 1)
 
-    for store_config in TARGET_STORES:
-        raw_by_store[store_config["key"]] = _run_store_scrapers(
-            store_config,
-            product_query,
-        )
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        store_futures = {
+            executor.submit(_run_store_scrapers, store, product_query): store
+            for store in TARGET_STORES
+            if store.get("direct_scrapers")
+        }
+        comparison_future = executor.submit(scrape_comparison_offers, product_query)
+
+        for future in as_completed(store_futures):
+            store = store_futures[future]
+            try:
+                raw_by_store[store["key"]] = future.result()
+            except Exception as exc:
+                print(f" WARNING: Extracao de {store['label']} falhou: {exc}")
+
+        try:
+            comparison_items = comparison_future.result()
+        except Exception as exc:
+            print(f" WARNING: Comparadores falharam: {exc}")
+            comparison_items = []
+
+    for item in comparison_items:
+        store = STORE_BY_LABEL.get(item.get("source"))
+        if not store:
+            continue
+        normalized = _normalize_result(item, product_query, store["label"])
+        if normalized and not _is_accessory_mismatch(normalized, product_query):
+            raw_by_store[store["key"]].append(normalized)
+
+    fresh_results, _fresh_store_payloads = _build_payloads(raw_by_store, product_query)
+    query_sku = _primary_sku(product_query)
+    if query_sku:
+        cached_by_store = _cached_sku_items_by_store(db, query_sku)
+        for store in TARGET_STORES:
+            if not raw_by_store[store["key"]]:
+                raw_by_store[store["key"]] = cached_by_store[store["key"]]
 
     available_results, store_payloads = _build_payloads(raw_by_store, product_query)
-    targeted_queries = _catalog_candidate_queries(product_query)
-
-    for candidate_query in _candidate_queries(available_results, product_query):
-        if len(targeted_queries) >= TARGETED_CANDIDATE_LIMIT:
-            break
-        if candidate_query not in targeted_queries:
-            targeted_queries.append(candidate_query)
-
-    for candidate_query in targeted_queries:
-        print(f" LOG: Busca focada por produto similar: '{candidate_query}'")
-        for store_config in TARGET_STORES:
-            extra_items = [
-                item
-                for item in _run_store_scrapers(
-                    store_config,
-                    candidate_query,
-                    focused=True,
-                )
-                if _matches_candidate_product(item, candidate_query)
-            ]
-            if extra_items:
-                raw_by_store.setdefault(store_config["key"], []).extend(extra_items)
-
-    if targeted_queries:
-        available_results, store_payloads = _build_payloads(
-            raw_by_store,
-            product_query,
-        )
 
     processed_count = 0
     storage_limit = STORE_ITEM_LIMIT * len(TARGET_STORES)
-    for index, item in enumerate(available_results[:storage_limit]):
+    for index, item in enumerate(fresh_results[:storage_limit]):
         storage_item = {
             "name": item["name"],
             "price": item["current_price"],

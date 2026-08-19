@@ -132,19 +132,19 @@ if errorlevel 1 (
 
 set "DB_PATH_URL=%BACKEND_DIR%precos.db"
 set "DB_PATH_URL=%DB_PATH_URL:\=/%"
-call :ensure_env_key "%BACKEND_ENV%" "DATABASE_URL" "DATABASE_URL=sqlite:///%DB_PATH_URL%"
+call :set_env_key "%BACKEND_ENV%" "DATABASE_URL" "DATABASE_URL=sqlite:///%DB_PATH_URL%"
 if errorlevel 1 (
   echo ERRO: Falha ao preparar o arquivo "%BACKEND_ENV%".
   exit /b 1
 )
 
-call :ensure_env_key "%FRONTEND_ENV%" "VITE_API_URL" "VITE_API_URL=http://127.0.0.1:8000"
+call :set_env_key "%FRONTEND_ENV%" "VITE_API_URL" "VITE_API_URL=http://127.0.0.1:8000"
 if errorlevel 1 (
   echo ERRO: Falha ao preparar o arquivo "%FRONTEND_ENV%".
   exit /b 1
 )
 
-call :ensure_env_key "%FRONTEND_ENV%" "VITE_BASE_PATH" "VITE_BASE_PATH=/"
+call :set_env_key "%FRONTEND_ENV%" "VITE_BASE_PATH" "VITE_BASE_PATH=/"
 if errorlevel 1 (
   echo ERRO: Falha ao preparar o arquivo "%FRONTEND_ENV%".
   exit /b 1
@@ -187,19 +187,10 @@ exit /b 0
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$target=(Resolve-Path -LiteralPath '%~1' -ErrorAction Stop).Path; $parent=(Resolve-Path -LiteralPath '%~2' -ErrorAction Stop).Path; if ($target -eq $parent) { exit 3 }; if (-not $target.StartsWith($parent, [System.StringComparison]::OrdinalIgnoreCase)) { exit 2 }; Remove-Item -LiteralPath $target -Recurse -Force"
 exit /b %errorlevel%
 
-:ensure_env_key
+:set_env_key
 set "ENV_FILE=%~1"
 set "ENV_KEY=%~2"
 set "ENV_LINE=%~3"
 
-if not exist "%ENV_FILE%" (
-  >"%ENV_FILE%" echo(%ENV_LINE%
-  exit /b 0
-)
-
-findstr /B /I /C:"%ENV_KEY%=" "%ENV_FILE%" >nul 2>nul
-if errorlevel 1 (
-  >>"%ENV_FILE%" echo(
-  >>"%ENV_FILE%" echo(%ENV_LINE%
-)
-exit /b 0
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $file='%ENV_FILE%'; $key='%ENV_KEY%'; $line='%ENV_LINE%'; $dir=Split-Path -Parent $file; if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }; $lines=@(); if (Test-Path -LiteralPath $file) { $lines=Get-Content -LiteralPath $file }; $updated=$false; $out=@(); foreach ($item in $lines) { if ($item.StartsWith($key + '=', [System.StringComparison]::OrdinalIgnoreCase)) { $out += $line; $updated=$true } else { $out += $item } }; if (-not $updated) { $out += $line }; Set-Content -LiteralPath $file -Value $out -Encoding ASCII"
+exit /b %errorlevel%
