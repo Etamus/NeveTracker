@@ -9,6 +9,8 @@ import {
   Building2,
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ExternalLink,
   FileSpreadsheet,
   Funnel,
@@ -42,10 +44,11 @@ interface SlidingTabsProps {
 }
 
 type SortOrder = "stores_desc" | "price_asc" | "price_desc";
+type DateRange = "all" | "today" | "7d" | "30d" | "90d";
 type StoreRankingState = { row: ComparisonRow; left: number; top: number };
 
-const PAGE_SIZE = 12;
-const CARD_PAGE_SIZE = 12;
+const OFFER_PAGE_SIZE = 5;
+const CATALOG_PAGE_SIZE = 12;
 const BRAND_FILTERS = ["Consul", "Brastemp", "Whirlpool"];
 const STORE_FILTERS = STORE_OPTIONS;
 const PRODUCT_STOP_WORDS = new Set([
@@ -70,6 +73,21 @@ const sortOptions: Array<{ value: SortOrder; label: string }> = [
   { value: "stores_desc", label: "Mais lojas" },
   { value: "price_asc", label: "Menor preço" },
   { value: "price_desc", label: "Maior preço" },
+];
+
+const dateOptions: Array<{ value: DateRange; label: string }> = [
+  { value: "all", label: "Qualquer data" },
+  { value: "today", label: "Hoje" },
+  { value: "7d", label: "Últimos 7 dias" },
+  { value: "30d", label: "Últimos 30 dias" },
+  { value: "90d", label: "Últimos 90 dias" },
+];
+
+const offerDataOptions = [
+  "Frete grátis",
+  "Frete informado",
+  "Lead time informado",
+  "Pagamento a prazo",
 ];
 
 const formatCurrency = (value: number) => createCurrencyFormatter(getInterfacePreferences()).format(value || 0);
@@ -234,6 +252,11 @@ const rebuildRowWithOffers = (
     ...row,
     name: cheapest.name,
     sku: row.sku || cheapest.sku,
+    description: row.description || cheapest.description,
+    subfamily: row.subfamily || cheapest.subfamily,
+    sku_category: row.sku_category || cheapest.sku_category,
+    cluster: row.cluster || cheapest.cluster,
+    market_type: row.market_type || cheapest.market_type,
     store_count: storeOffers.length,
     offer_count: validOffers.length,
     pma: roundCurrency(pma),
@@ -326,6 +349,47 @@ const formatDate = (value?: string) => {
     minute: "2-digit",
   }).format(date);
 };
+
+const productMatchesDate = (product: Product, dateRange: DateRange) => {
+  if (dateRange === "all") return true;
+  const updatedAt = new Date(product.last_update);
+  if (Number.isNaN(updatedAt.getTime())) return false;
+
+  const now = new Date();
+  if (dateRange === "today") {
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    return updatedAt >= startOfToday;
+  }
+  const days = dateRange === "7d" ? 7 : dateRange === "30d" ? 30 : 90;
+  return updatedAt.getTime() >= now.getTime() - days * 24 * 60 * 60 * 1000;
+};
+
+const productMatchesMetadata = (
+  product: Product,
+  selectedSubfamilies: string[],
+  selectedCategories: string[],
+  selectedClusters: string[],
+  selectedMarkets: string[],
+) => (
+  (selectedSubfamilies.length === 0 || selectedSubfamilies.includes(product.subfamily || "")) &&
+  (selectedCategories.length === 0 || selectedCategories.includes(product.sku_category || "")) &&
+  (selectedClusters.length === 0 || selectedClusters.includes(product.cluster || "")) &&
+  (selectedMarkets.length === 0 || selectedMarkets.includes(product.market_type || ""))
+);
+
+const productMatchesOfferData = (product: Product, selectedData: string[]) =>
+  selectedData.every((filter) => {
+    if (filter === "Frete grátis") return Number(product.shipping_cost) === 0;
+    if (filter === "Frete informado") return product.shipping_cost !== null && product.shipping_cost !== undefined;
+    if (filter === "Lead time informado") {
+      return (
+        (product.delivery_min_days !== null && product.delivery_min_days !== undefined) ||
+        (product.delivery_max_days !== null && product.delivery_max_days !== undefined)
+      );
+    }
+    if (filter === "Pagamento a prazo") return Number(product.installment_price) > 0;
+    return true;
+  });
 
 const paymentLabel = (offer: Product) => {
   const cash = offer.cash_price || offer.current_price;
@@ -485,11 +549,28 @@ export default function SlidingTabs({
   const [sortOrder, setSortOrder] = useState<SortOrder>("stores_desc");
   const [selectedBrands, setSelectedBrands] = useState<string[]>([]);
   const [selectedStores, setSelectedStores] = useState<string[]>([]);
+  const [selectedSubfamilies, setSelectedSubfamilies] = useState<string[]>([]);
+  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+  const [selectedClusters, setSelectedClusters] = useState<string[]>([]);
+  const [selectedMarkets, setSelectedMarkets] = useState<string[]>([]);
+  const [selectedOfferData, setSelectedOfferData] = useState<string[]>([]);
+  const [dateRange, setDateRange] = useState<DateRange>("all");
+  const [priceRange, setPriceRange] = useState<[number, number]>([0, 0]);
   const [filterOpen, setFilterOpen] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
-  const [openFilterGroups, setOpenFilterGroups] = useState({ brands: true, stores: true });
-  const [visibleRows, setVisibleRows] = useState(PAGE_SIZE);
-  const [visibleCards, setVisibleCards] = useState(CARD_PAGE_SIZE);
+  const [openFilterGroups, setOpenFilterGroups] = useState({
+    price: true,
+    date: false,
+    brands: true,
+    stores: true,
+    subfamilies: false,
+    categories: false,
+    clusters: false,
+    markets: false,
+    offerData: false,
+  });
+  const [offerPage, setOfferPage] = useState(1);
+  const [catalogPage, setCatalogPage] = useState(1);
   const [selectedRow, setSelectedRow] = useState<ComparisonRow | null>(null);
   const [hoveredStoreRanking, setHoveredStoreRanking] = useState<StoreRankingState | null>(null);
   const [interfacePreferences, setInterfacePreferences] = useState<InterfacePreferences>(getInterfacePreferences);
@@ -515,6 +596,30 @@ export default function SlidingTabs({
     const labels = new Set(STORE_FILTERS.map((store) => store.label));
     marketProducts.forEach((product) => labels.add(product.source || product.store));
     return [...labels];
+  }, [marketProducts]);
+  const metadataOptions = useMemo(() => {
+    const unique = (field: keyof Product) => [...new Set(
+      marketProducts
+        .map((product) => product[field])
+        .filter((value): value is string => typeof value === "string" && Boolean(value.trim())),
+    )].sort((left, right) => left.localeCompare(right, "pt-BR"));
+
+    return {
+      subfamilies: unique("subfamily"),
+      categories: unique("sku_category"),
+      clusters: unique("cluster"),
+      markets: ["Cativo", "Competitivo"],
+    };
+  }, [marketProducts]);
+  const priceBounds = useMemo(() => {
+    const prices = marketProducts
+      .map((product) => Number(product.current_price))
+      .filter((price) => Number.isFinite(price) && price > 0);
+    if (!prices.length) return { min: 0, max: 0 };
+    return {
+      min: Math.floor(Math.min(...prices)),
+      max: Math.ceil(Math.max(...prices)),
+    };
   }, [marketProducts]);
   const compactFormatter = useMemo(() => createCompactFormatter(interfacePreferences), [interfacePreferences]);
   const defaultStoreSelection = useMemo(
@@ -552,14 +657,37 @@ export default function SlidingTabs({
   }, [stores]);
 
   useEffect(() => {
-    setVisibleRows(PAGE_SIZE);
-    setVisibleCards(CARD_PAGE_SIZE);
-  }, [resultSearch, selectedBrands, selectedStores, sortOrder, lastQuery]);
+    setPriceRange([priceBounds.min, priceBounds.max]);
+  }, [lastQuery, priceBounds.min, priceBounds.max]);
+
+  useEffect(() => {
+    setOfferPage(1);
+    setCatalogPage(1);
+  }, [
+    resultSearch,
+    selectedBrands,
+    selectedStores,
+    selectedSubfamilies,
+    selectedCategories,
+    selectedClusters,
+    selectedMarkets,
+    selectedOfferData,
+    dateRange,
+    priceRange,
+    sortOrder,
+    lastQuery,
+  ]);
 
   useEffect(() => {
     setResultSearch("");
     setSelectedBrands([]);
     setSelectedStores(defaultStoreSelection);
+    setSelectedSubfamilies([]);
+    setSelectedCategories([]);
+    setSelectedClusters([]);
+    setSelectedMarkets([]);
+    setSelectedOfferData([]);
+    setDateRange("all");
     setSortOrder("stores_desc");
     setHoveredStoreRanking(null);
   }, [defaultStoreSelection, lastQuery]);
@@ -571,17 +699,27 @@ export default function SlidingTabs({
 
   const filteredRows = useMemo(() => {
     const query = normalize(resultSearch);
-    const rowsWithOfferFilters =
-      selectedBrands.length === 0 && selectedStores.length === 0
-        ? rows
-        : rows
-            .map((row) => {
-              const offers = (row.offers || [])
-                .filter((offer) => productMatchesBrand(offer, selectedBrands))
-                .filter((offer) => productMatchesStore(offer, selectedStores));
-              return offers.length ? rebuildRowWithOffers(row, offers) : null;
-            })
-            .filter((row): row is ComparisonRow => Boolean(row));
+    const rowsWithOfferFilters = rows
+      .map((row) => {
+        const offers = (row.offers || [])
+          .filter((offer) => productMatchesBrand(offer, selectedBrands))
+          .filter((offer) => productMatchesStore(offer, selectedStores))
+          .filter((offer) => productMatchesMetadata(
+            offer,
+            selectedSubfamilies,
+            selectedCategories,
+            selectedClusters,
+            selectedMarkets,
+          ))
+          .filter((offer) => productMatchesDate(offer, dateRange))
+          .filter((offer) => productMatchesOfferData(offer, selectedOfferData))
+          .filter((offer) => {
+            const price = Number(offer.current_price);
+            return price >= priceRange[0] && price <= priceRange[1];
+          });
+        return offers.length ? rebuildRowWithOffers(row, offers) : null;
+      })
+      .filter((row): row is ComparisonRow => Boolean(row));
 
     const filtered = query
       ? rowsWithOfferFilters.filter((row) =>
@@ -601,7 +739,20 @@ export default function SlidingTabs({
         a.name.localeCompare(b.name, "pt-BR")
       );
     });
-  }, [rows, resultSearch, selectedBrands, selectedStores, sortOrder]);
+  }, [
+    rows,
+    resultSearch,
+    selectedBrands,
+    selectedStores,
+    selectedSubfamilies,
+    selectedCategories,
+    selectedClusters,
+    selectedMarkets,
+    selectedOfferData,
+    dateRange,
+    priceRange,
+    sortOrder,
+  ]);
 
   const filteredProducts = useMemo(() => {
     const query = normalize(resultSearch);
@@ -611,7 +762,18 @@ export default function SlidingTabs({
         normalize(`${product.name} ${product.brand} ${product.sku || ""} ${product.store}`).includes(query);
       const matchesBrand = productMatchesBrand(product, selectedBrands);
       const matchesStore = productMatchesStore(product, selectedStores);
-      return matchesQuery && matchesBrand && matchesStore;
+      const matchesMetadata = productMatchesMetadata(
+        product,
+        selectedSubfamilies,
+        selectedCategories,
+        selectedClusters,
+        selectedMarkets,
+      );
+      const matchesDate = productMatchesDate(product, dateRange);
+      const matchesOfferData = productMatchesOfferData(product, selectedOfferData);
+      const price = Number(product.current_price);
+      const matchesPrice = price >= priceRange[0] && price <= priceRange[1];
+      return matchesQuery && matchesBrand && matchesStore && matchesMetadata && matchesDate && matchesOfferData && matchesPrice;
     });
 
     return [...filtered].sort((a, b) => {
@@ -619,22 +781,55 @@ export default function SlidingTabs({
       if (sortOrder === "stores_desc") return a.store.localeCompare(b.store, "pt-BR");
       return a.current_price - b.current_price;
     });
-  }, [marketProducts, resultSearch, selectedBrands, selectedStores, sortOrder]);
+  }, [
+    marketProducts,
+    resultSearch,
+    selectedBrands,
+    selectedStores,
+    selectedSubfamilies,
+    selectedCategories,
+    selectedClusters,
+    selectedMarkets,
+    selectedOfferData,
+    dateRange,
+    priceRange,
+    sortOrder,
+  ]);
 
-  const allPrices = marketProducts
+  useEffect(() => {
+    const totalPages = Math.max(1, Math.ceil(filteredRows.length / OFFER_PAGE_SIZE));
+    setOfferPage((currentPage) => Math.min(currentPage, totalPages));
+  }, [filteredRows.length]);
+
+  useEffect(() => {
+    const totalPages = Math.max(1, Math.ceil(filteredProducts.length / CATALOG_PAGE_SIZE));
+    setCatalogPage((currentPage) => Math.min(currentPage, totalPages));
+  }, [filteredProducts.length]);
+
+  const allPrices = filteredProducts
     .map((product) => Number(product.current_price))
     .filter((price) => Number.isFinite(price) && price > 0);
   const lowestPrice = allPrices.length ? Math.min(...allPrices) : 0;
   const averagePrice = allPrices.length
     ? allPrices.reduce((sum, price) => sum + price, 0) / allPrices.length
     : 0;
-  const activeFilterCount = selectedBrands.length + selectedStores.length;
-  const availableStores = new Set(marketProducts.map((product) => product.store)).size;
+  const priceFilterActive = priceRange[0] > priceBounds.min || priceRange[1] < priceBounds.max;
+  const activeFilterCount =
+    selectedBrands.length +
+    selectedStores.length +
+    selectedSubfamilies.length +
+    selectedCategories.length +
+    selectedClusters.length +
+    selectedMarkets.length +
+    selectedOfferData.length +
+    (dateRange === "all" ? 0 : 1) +
+    (priceFilterActive ? 1 : 0);
+  const availableStores = new Set(filteredProducts.map((product) => product.store)).size;
   const sortLabel = sortOptions.find((option) => option.value === sortOrder)?.label;
 
   const marketStoreRanking = useMemo(() => {
     const ranked = new Map<string, { name: string; offers: number; lowest: number }>();
-    marketProducts.forEach((product) => {
+    filteredProducts.forEach((product) => {
       const current = ranked.get(product.store);
       ranked.set(product.store, {
         name: product.store,
@@ -643,7 +838,7 @@ export default function SlidingTabs({
       });
     });
     return [...ranked.values()].sort((a, b) => b.offers - a.offers || a.lowest - b.lowest);
-  }, [marketProducts]);
+  }, [filteredProducts]);
 
   const toggleFilter = (
     value: string,
@@ -661,6 +856,13 @@ export default function SlidingTabs({
   const clearFilters = () => {
     setSelectedBrands([]);
     setSelectedStores(defaultStoreSelection);
+    setSelectedSubfamilies([]);
+    setSelectedCategories([]);
+    setSelectedClusters([]);
+    setSelectedMarkets([]);
+    setSelectedOfferData([]);
+    setDateRange("all");
+    setPriceRange([priceBounds.min, priceBounds.max]);
   };
 
   const showStoreRanking = (
@@ -683,8 +885,8 @@ export default function SlidingTabs({
   const metricCards = [
     {
       label: "Ofertas",
-      value: compactFormatter.format(marketProducts.length),
-      helper: `${rows.length} produtos comparáveis`,
+      value: compactFormatter.format(filteredProducts.length),
+      helper: `${filteredRows.length} produtos comparáveis`,
       icon: Boxes,
       tone: "blue",
     },
@@ -783,6 +985,34 @@ export default function SlidingTabs({
                     )}
                   </div>
                   <div className="filter-sections">
+                    <PriceRangeFilter
+                      min={priceBounds.min}
+                      max={priceBounds.max}
+                      value={priceRange}
+                      open={openFilterGroups.price}
+                      onOpenChange={() =>
+                        setOpenFilterGroups((groups) => ({ ...groups, price: !groups.price }))
+                      }
+                      onChange={setPriceRange}
+                    />
+                    <DateFilterColumn
+                      value={dateRange}
+                      open={openFilterGroups.date}
+                      onOpenChange={() =>
+                        setOpenFilterGroups((groups) => ({ ...groups, date: !groups.date }))
+                      }
+                      onChange={setDateRange}
+                    />
+                    <FilterColumn
+                      title="Dados da oferta"
+                      items={offerDataOptions}
+                      selected={selectedOfferData}
+                      open={openFilterGroups.offerData}
+                      onOpenChange={() =>
+                        setOpenFilterGroups((groups) => ({ ...groups, offerData: !groups.offerData }))
+                      }
+                      onToggle={(value) => toggleFilter(value, selectedOfferData, setSelectedOfferData)}
+                    />
                     <FilterColumn
                       title="Marcas"
                       items={brands}
@@ -802,6 +1032,46 @@ export default function SlidingTabs({
                         setOpenFilterGroups((groups) => ({ ...groups, stores: !groups.stores }))
                       }
                       onToggle={(value) => toggleFilter(value, selectedStores, setSelectedStores)}
+                    />
+                    <FilterColumn
+                      title="Subfamília"
+                      items={metadataOptions.subfamilies}
+                      selected={selectedSubfamilies}
+                      open={openFilterGroups.subfamilies}
+                      onOpenChange={() =>
+                        setOpenFilterGroups((groups) => ({ ...groups, subfamilies: !groups.subfamilies }))
+                      }
+                      onToggle={(value) => toggleFilter(value, selectedSubfamilies, setSelectedSubfamilies)}
+                    />
+                    <FilterColumn
+                      title="Categoria"
+                      items={metadataOptions.categories}
+                      selected={selectedCategories}
+                      open={openFilterGroups.categories}
+                      onOpenChange={() =>
+                        setOpenFilterGroups((groups) => ({ ...groups, categories: !groups.categories }))
+                      }
+                      onToggle={(value) => toggleFilter(value, selectedCategories, setSelectedCategories)}
+                    />
+                    <FilterColumn
+                      title="Cluster"
+                      items={metadataOptions.clusters}
+                      selected={selectedClusters}
+                      open={openFilterGroups.clusters}
+                      onOpenChange={() =>
+                        setOpenFilterGroups((groups) => ({ ...groups, clusters: !groups.clusters }))
+                      }
+                      onToggle={(value) => toggleFilter(value, selectedClusters, setSelectedClusters)}
+                    />
+                    <FilterColumn
+                      title="Mercado"
+                      items={metadataOptions.markets}
+                      selected={selectedMarkets}
+                      open={openFilterGroups.markets}
+                      onOpenChange={() =>
+                        setOpenFilterGroups((groups) => ({ ...groups, markets: !groups.markets }))
+                      }
+                      onToggle={(value) => toggleFilter(value, selectedMarkets, setSelectedMarkets)}
                     />
                   </div>
                 </div>
@@ -846,30 +1116,38 @@ export default function SlidingTabs({
 
           {activeTab === 0 && (
             <OffersTable
-              rows={filteredRows.slice(0, visibleRows)}
+              rows={filteredRows.slice(
+                (offerPage - 1) * OFFER_PAGE_SIZE,
+                offerPage * OFFER_PAGE_SIZE,
+              )}
               total={filteredRows.length}
+              page={offerPage}
+              pageSize={OFFER_PAGE_SIZE}
               searched={Boolean(lastQuery)}
               onAnalytics={openAnalytics}
               onStoreEnter={showStoreRanking}
               onStoreLeave={() => setHoveredStoreRanking(null)}
-              hasMore={visibleRows < filteredRows.length}
-              onLoadMore={() => setVisibleRows((value) => value + PAGE_SIZE)}
+              onPageChange={setOfferPage}
             />
           )}
 
           {activeTab === 1 && (
             <CatalogGrid
-              products={filteredProducts.slice(0, visibleCards)}
+              products={filteredProducts.slice(
+                (catalogPage - 1) * CATALOG_PAGE_SIZE,
+                catalogPage * CATALOG_PAGE_SIZE,
+              )}
               total={filteredProducts.length}
+              page={catalogPage}
+              pageSize={CATALOG_PAGE_SIZE}
               searched={Boolean(lastQuery)}
-              hasMore={visibleCards < filteredProducts.length}
-              onLoadMore={() => setVisibleCards((value) => value + CARD_PAGE_SIZE)}
+              onPageChange={setCatalogPage}
             />
           )}
 
           {activeTab === 2 && (
             <MarketAnalytics
-              products={marketProducts}
+              products={filteredProducts}
               rows={filteredRows}
               stores={marketStoreRanking}
               searched={Boolean(lastQuery)}
@@ -884,6 +1162,109 @@ export default function SlidingTabs({
     </div>
   );
 }
+
+const PriceRangeFilter = ({
+  min,
+  max,
+  value,
+  open,
+  onOpenChange,
+  onChange,
+}: {
+  min: number;
+  max: number;
+  value: [number, number];
+  open: boolean;
+  onOpenChange: () => void;
+  onChange: React.Dispatch<React.SetStateAction<[number, number]>>;
+}) => {
+  const active = value[0] > min || value[1] < max;
+
+  return (
+    <div className="filter-section">
+      <button type="button" className="filter-section__trigger" onClick={onOpenChange}>
+        <span>Faixa de preço</span>
+        <span className="flex items-center gap-2">
+          {active && <span className="filter-section__count">1</span>}
+          <ChevronDown size={15} className={`transition-transform duration-200 ${open ? "rotate-180" : ""}`} />
+        </span>
+      </button>
+      {open && (
+        <div className="price-range-filter">
+          <div className="price-range-filter__values">
+            <span>{formatCurrency(value[0])}</span>
+            <span>{formatCurrency(value[1])}</span>
+          </div>
+          <div className="price-range-filter__sliders">
+            <input
+              type="range"
+              min={min}
+              max={Math.max(min, max)}
+              step="1"
+              value={value[0]}
+              disabled={max <= min}
+              aria-label="Preço mínimo"
+              onChange={(event) => {
+                const next = Math.min(Number(event.target.value), value[1]);
+                onChange([next, value[1]]);
+              }}
+            />
+            <input
+              type="range"
+              min={min}
+              max={Math.max(min, max)}
+              step="1"
+              value={value[1]}
+              disabled={max <= min}
+              aria-label="Preço máximo"
+              onChange={(event) => {
+                const next = Math.max(Number(event.target.value), value[0]);
+                onChange([value[0], next]);
+              }}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const DateFilterColumn = ({
+  value,
+  open,
+  onOpenChange,
+  onChange,
+}: {
+  value: DateRange;
+  open: boolean;
+  onOpenChange: () => void;
+  onChange: (value: DateRange) => void;
+}) => (
+  <div className="filter-section">
+    <button type="button" className="filter-section__trigger" onClick={onOpenChange}>
+      <span>Data de atualização</span>
+      <span className="flex items-center gap-2">
+        {value !== "all" && <span className="filter-section__count">1</span>}
+        <ChevronDown size={15} className={`transition-transform duration-200 ${open ? "rotate-180" : ""}`} />
+      </span>
+    </button>
+    {open && (
+      <div className="filter-section__content">
+        {dateOptions.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            className="filter-option"
+            onClick={() => onChange(option.value)}
+          >
+            <span className={`filter-radio ${value === option.value ? "filter-radio--active" : ""}`} />
+            <span>{option.label}</span>
+          </button>
+        ))}
+      </div>
+    )}
+  </div>
+);
 
 const FilterColumn = ({
   title,
@@ -938,17 +1319,19 @@ const OffersTable = ({
   onAnalytics,
   onStoreEnter,
   onStoreLeave,
-  hasMore,
-  onLoadMore,
+  page,
+  pageSize,
+  onPageChange,
 }: {
   rows: ComparisonRow[];
   total: number;
+  page: number;
+  pageSize: number;
   searched: boolean;
   onAnalytics: (row: ComparisonRow) => void;
   onStoreEnter: (row: ComparisonRow, event: ReactMouseEvent<HTMLDivElement>) => void;
   onStoreLeave: () => void;
-  hasMore: boolean;
-  onLoadMore: () => void;
+  onPageChange: (page: number) => void;
 }) => (
   <section className="data-panel">
     <div className="data-panel__header">
@@ -1060,7 +1443,12 @@ const OffersTable = ({
             </tbody>
           </table>
         </div>
-        <PanelFooter shown={rows.length} total={total} hasMore={hasMore} onLoadMore={onLoadMore} />
+        <PaginationFooter
+          page={page}
+          pageSize={pageSize}
+          total={total}
+          onPageChange={onPageChange}
+        />
       </>
     ) : (
       <EmptyState searched={searched} />
@@ -1068,35 +1456,74 @@ const OffersTable = ({
   </section>
 );
 
-const PanelFooter = ({
-  shown,
+const PaginationFooter = ({
+  page,
+  pageSize,
   total,
-  hasMore,
-  onLoadMore,
+  onPageChange,
 }: {
-  shown: number;
+  page: number;
+  pageSize: number;
   total: number;
-  hasMore: boolean;
-  onLoadMore: () => void;
-}) => (
-  <div className="panel-footer">
-    <p>Exibindo <strong>{shown}</strong> de <strong>{total}</strong></p>
-    {hasMore && <button type="button" onClick={onLoadMore}>Mais</button>}
-  </div>
-);
+  onPageChange: (page: number) => void;
+}) => {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const visibleCount = Math.min(5, totalPages);
+  const firstPage = Math.max(1, Math.min(page - 2, totalPages - visibleCount + 1));
+  const pages = Array.from({ length: visibleCount }, (_, index) => firstPage + index);
+  const rangeStart = total ? (page - 1) * pageSize + 1 : 0;
+  const rangeEnd = Math.min(page * pageSize, total);
+
+  return (
+    <div className="panel-footer panel-footer--pagination">
+      <p>Exibindo <strong>{rangeStart}-{rangeEnd}</strong> de <strong>{total}</strong></p>
+      <nav className="pagination" aria-label="Paginação de produtos">
+        <button
+          type="button"
+          onClick={() => onPageChange(page - 1)}
+          disabled={page <= 1}
+          aria-label="Página anterior"
+        >
+          <ChevronLeft size={15} />
+        </button>
+        {pages.map((pageNumber) => (
+          <button
+            key={pageNumber}
+            type="button"
+            className={pageNumber === page ? "pagination__page pagination__page--active" : "pagination__page"}
+            onClick={() => onPageChange(pageNumber)}
+            aria-current={pageNumber === page ? "page" : undefined}
+          >
+            {pageNumber}
+          </button>
+        ))}
+        <button
+          type="button"
+          onClick={() => onPageChange(page + 1)}
+          disabled={page >= totalPages}
+          aria-label="Próxima página"
+        >
+          <ChevronRight size={15} />
+        </button>
+      </nav>
+    </div>
+  );
+};
 
 const CatalogGrid = ({
   products,
   total,
+  page,
+  pageSize,
   searched,
-  hasMore,
-  onLoadMore,
+  onPageChange,
 }: {
   products: Product[];
   total: number;
+  page: number;
+  pageSize: number;
   searched: boolean;
-  hasMore: boolean;
-  onLoadMore: () => void;
+  onPageChange: (page: number) => void;
 }) => (
   <section className="data-panel">
     <div className="data-panel__header">
@@ -1140,7 +1567,12 @@ const CatalogGrid = ({
             </article>
           ))}
         </div>
-        <PanelFooter shown={products.length} total={total} hasMore={hasMore} onLoadMore={onLoadMore} />
+        <PaginationFooter
+          page={page}
+          pageSize={pageSize}
+          total={total}
+          onPageChange={onPageChange}
+        />
       </>
     ) : (
       <EmptyState searched={searched} />
@@ -1189,7 +1621,7 @@ const MarketAnalytics = ({
 
       const blob = await response.blob();
       const disposition = response.headers.get("Content-Disposition") || "";
-      const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || "neveprice-analytics.xlsx";
+      const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || "nevetrack-analytics.xlsx";
       const downloadUrl = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = downloadUrl;

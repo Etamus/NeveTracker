@@ -51,6 +51,11 @@ def _write_analytics_sheet(workbook, rows):
         [
             "SKU",
             "Produto",
+            "Descrição",
+            "Subfamília",
+            "Categoria",
+            "Cluster",
+            "Mercado",
             "Lojas",
             "Ofertas",
             "Preço médio",
@@ -66,6 +71,11 @@ def _write_analytics_sheet(workbook, rows):
             [
                 row.sku or "",
                 row.name,
+                row.description or "",
+                row.subfamily or "",
+                row.sku_category or "",
+                row.cluster or "",
+                row.market_type or "",
                 row.store_count,
                 row.offer_count,
                 row.pma,
@@ -76,11 +86,11 @@ def _write_analytics_sheet(workbook, rows):
             ]
         )
 
-    _style_sheet(sheet, [16, 52, 11, 11, 17, 17, 28, 17, 18])
+    _style_sheet(sheet, [16, 45, 38, 22, 22, 16, 16, 11, 11, 17, 17, 28, 17, 18])
     for row_index in range(2, sheet.max_row + 1):
-        for column in (5, 6, 8):
+        for column in (10, 11, 13):
             sheet.cell(row_index, column).number_format = CURRENCY_FORMAT
-        sheet.cell(row_index, 9).number_format = PERCENT_FORMAT
+        sheet.cell(row_index, 14).number_format = PERCENT_FORMAT
 
 
 def _write_stores_sheet(workbook, rows):
@@ -173,6 +183,11 @@ def _write_offers_sheet(workbook, rows):
         [
             "SKU",
             "Produto",
+            "Descrição",
+            "Subfamília",
+            "Categoria",
+            "Cluster",
+            "Mercado",
             "Lojista",
             "Fonte",
             "Preço",
@@ -208,6 +223,11 @@ def _write_offers_sheet(workbook, rows):
                 [
                     row.sku or "",
                     row.name,
+                    row.description or "",
+                    row.subfamily or "",
+                    row.sku_category or "",
+                    row.cluster or "",
+                    row.market_type or "",
                     offer.store,
                     offer.source or offer.store,
                     offer.current_price,
@@ -230,19 +250,19 @@ def _write_offers_sheet(workbook, rows):
                     offer.url,
                 ]
             )
-            link_cell = sheet.cell(sheet.max_row, 22)
+            link_cell = sheet.cell(sheet.max_row, 27)
             link_cell.hyperlink = offer.url
             link_cell.font = LINK_FONT
 
     _style_sheet(
         sheet,
-        [16, 52, 30, 22, 17, 17, 17, 10, 18, 20, 15, 18, 20, 20, 24, 13, 18, 20, 18, 11, 21, 62],
+        [16, 45, 38, 22, 22, 16, 16, 30, 22, 17, 17, 17, 10, 18, 20, 15, 18, 20, 20, 24, 13, 18, 20, 18, 11, 21, 62],
     )
     for row_index in range(2, sheet.max_row + 1):
-        for column in (5, 6, 7, 9, 10, 11, 12):
+        for column in (10, 11, 12, 14, 15, 16, 17):
             sheet.cell(row_index, column).number_format = CURRENCY_FORMAT
-        sheet.cell(row_index, 21).number_format = "dd/mm/yyyy hh:mm"
-        sheet.cell(row_index, 22).font = LINK_FONT
+        sheet.cell(row_index, 26).number_format = "dd/mm/yyyy hh:mm"
+        sheet.cell(row_index, 27).font = LINK_FONT
 
 
 def build_analytics_workbook(payload):
@@ -251,9 +271,9 @@ def build_analytics_workbook(payload):
     _write_stores_sheet(workbook, payload.rows)
     _write_offers_sheet(workbook, payload.rows)
 
-    workbook.properties.title = "NevePrice Analytics"
+    workbook.properties.title = "NeveTrack Analytics"
     workbook.properties.subject = payload.query or "Dados de analytics e lojistas"
-    workbook.properties.creator = "NevePrice"
+    workbook.properties.creator = "NeveTrack"
     workbook.properties.created = datetime.now()
 
     buffer = BytesIO()

@@ -10,8 +10,8 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 from cachetools import TTLCache, cached
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+
+from services.http_client import create_resilient_session
 
 
 DETAIL_CACHE = TTLCache(maxsize=600, ttl=3600)
@@ -25,19 +25,7 @@ def normalize_postal_code(value):
 
 
 def _session():
-    session = requests.Session()
-    retry = Retry(
-        total=2,
-        connect=2,
-        read=2,
-        backoff_factor=0.35,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset(("GET", "POST")),
-    )
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    return session
+    return create_resilient_session(pool_size=10)
 
 
 def _headers(url, accept="text/html"):

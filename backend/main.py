@@ -4,9 +4,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import models.product  # noqa: F401
-from database import Base, engine
+import models.auth  # noqa: F401
+from database import Base, SessionLocal, engine
 from models.product import KnownSku
-from routes.products import product_router
+from routes.auth import auth_router
+from routes.products import process_extraction_queue_item, product_router
+from services.auth_service import ensure_owner_user
+from services.extraction_queue import (
+    configure_extraction_processor,
+    start_extraction_queue,
+)
 from services.extraction_scheduler import start_extraction_scheduler
 from services.scraper_service import KNOWN_SKUS
 
@@ -66,6 +73,27 @@ def _ensure_sqlite_columns():
             "ON price_history (discovery_source)"
         )
 
+        known_sku_columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(known_skus)")
+        }
+        known_sku_additive_columns = {
+            "subfamily": "VARCHAR",
+            "category": "VARCHAR",
+            "cluster": "VARCHAR",
+            "market_type": "VARCHAR",
+            "updated_at": "DATETIME",
+        }
+        for column_name, column_type in known_sku_additive_columns.items():
+            if column_name not in known_sku_columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE known_skus ADD COLUMN {column_name} {column_type}"
+                )
+        for column_name in ("subfamily", "category", "cluster", "market_type"):
+            connection.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS ix_known_skus_{column_name} "
+                f"ON known_skus ({column_name})"
+            )
+
         schedule_columns = {
             row[1]
             for row in connection.exec_driver_sql(
@@ -115,7 +143,11 @@ def _seed_known_skus():
 
 
 _seed_known_skus()
-app = FastAPI(title="Comparador de Precos")
+
+with SessionLocal() as auth_db:
+    ensure_owner_user(auth_db)
+
+app = FastAPI(title="NeveTrack")
 
 origins = [
     "https://hudok139.github.io",
@@ -133,10 +165,13 @@ app.add_middleware(
 )
 
 app.include_router(product_router, prefix="/products", tags=["Products"])
+app.include_router(auth_router, prefix="/auth", tags=["Auth"])
 
 
 @app.on_event("startup")
 def start_background_services():
+    configure_extraction_processor(process_extraction_queue_item)
+    start_extraction_queue()
     start_extraction_scheduler()
 
 

@@ -1,9 +1,9 @@
 import time
 from urllib.parse import quote_plus
 
-import requests
+from services.http_client import create_resilient_session
 
-session = requests.Session()
+session = create_resilient_session()
 
 MARKETPLACE_CONFIGS = {
     "mercado_livre": {

@@ -4,14 +4,16 @@ from html import unescape
 from threading import RLock
 from urllib.parse import quote_plus, urljoin
 
-import requests
 from bs4 import BeautifulSoup
 from cachetools import TTLCache, cached
+
+from services.http_client import create_resilient_session
 
 cache = TTLCache(maxsize=100, ttl=900)
 cache_lock = RLock()
 
 STORE_LIMIT = 50
+session = create_resilient_session()
 PRODUCT_STOP_WORDS = {
     "a",
     "as",
@@ -227,7 +229,7 @@ def _deduplicate(products):
 
 
 def _get(url):
-    response = requests.get(url, headers=_headers(), timeout=15)
+    response = session.get(url, headers=_headers(), timeout=15)
     if response.status_code != 200:
         return None
     return response.text

@@ -1,17 +1,31 @@
+import csv
 from datetime import datetime, timedelta
+from io import BytesIO, StringIO
 from typing import Optional
 import re
+import unicodedata
 from urllib.parse import parse_qs, unquote, urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, PatternFill
+from openpyxl.worksheet.datavalidation import DataValidation
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
-from database import get_db
-from models.product import ExtractionSchedule, KnownSku, PriceHistory, Product
+from database import SessionLocal, get_db
+from models.product import (
+    ExtractionJob,
+    ExtractionJobItem,
+    ExtractionSchedule,
+    KnownSku,
+    PriceHistory,
+    Product,
+)
 from schemas.product import (
     AnalyticsExportRequest,
+    ExtractionDatabaseJobRequest,
     ExtractionScheduleRequest,
     ProductCreate,
     SkuBatchRequest,
@@ -26,9 +40,35 @@ from services.scraper_service import (
 )
 from services.analytics_export import build_analytics_workbook
 from services.offer_enrichment import normalize_postal_code
+from services.extraction_queue import (
+    MAX_JOB_SKUS,
+    cancel_extraction_job,
+    enqueue_extraction_job,
+    get_active_extraction_job,
+    get_extraction_job,
+)
 
 product_router = APIRouter()
 BATCH_SKU_LIMIT = 30
+SKU_IMPORT_LIMIT = 5000
+SKU_IMPORT_MAX_BYTES = 8 * 1024 * 1024
+DB_QUERY_CHUNK_SIZE = 500
+SKU_METADATA_FIELDS = ("description", "subfamily", "sku_category", "cluster", "market_type")
+
+SKU_IMPORT_HEADERS = {
+    "sku": "sku",
+    "codigo": "sku",
+    "codigo sku": "sku",
+    "descricao": "description",
+    "produto": "description",
+    "nome": "description",
+    "subfamilia": "subfamily",
+    "sub familia": "subfamily",
+    "categoria": "category",
+    "cluster": "cluster",
+    "mercado": "market_type",
+    "tipo de mercado": "market_type",
+}
 
 
 def _seller_from_url(store, source, url):
@@ -123,6 +163,12 @@ def _normalize_sku_list(values):
     return normalized
 
 
+def _chunked(values, size=DB_QUERY_CHUNK_SIZE):
+    values = list(values)
+    for index in range(0, len(values), size):
+        yield values[index:index + size]
+
+
 def _apply_search_filter(query, search_text: str, match_all: bool):
     terms = _query_terms(search_text)
     if not terms:
@@ -132,10 +178,78 @@ def _apply_search_filter(query, search_text: str, match_all: bool):
     return query.filter(and_(*clauses) if match_all else or_(*clauses))
 
 
-def _serialize_results(results):
+def _known_sku_metadata_map(db: Session, skus=None):
+    normalized_skus = set(_normalize_sku_list(skus or []))
+    if normalized_skus:
+        items = []
+        for sku_batch in _chunked(normalized_skus):
+            items.extend(
+                db.query(KnownSku).filter(KnownSku.sku.in_(sku_batch)).all()
+            )
+    else:
+        items = db.query(KnownSku).all()
+
+    return {
+        _normalize_sku(item.sku): {
+            "description": item.description,
+            "subfamily": item.subfamily,
+            "sku_category": item.category,
+            "cluster": item.cluster,
+            "market_type": item.market_type,
+        }
+        for item in items
+    }
+
+
+def _apply_item_metadata(item, metadata_map, fallback_sku=None):
+    sku = _normalize_sku(item.get("sku") or fallback_sku or "")
+    metadata = metadata_map.get(sku, {})
+    for field in SKU_METADATA_FIELDS:
+        value = metadata.get(field)
+        if value is not None:
+            item[field] = value
+    return item
+
+
+def _apply_summary_metadata(summary, db: Session, fallback_sku=None):
+    skus = set()
+    if fallback_sku:
+        skus.add(_normalize_sku(fallback_sku))
+    for item in summary.get("results") or []:
+        if item.get("sku"):
+            skus.add(_normalize_sku(item["sku"]))
+    for row in summary.get("comparison") or []:
+        if row.get("sku"):
+            skus.add(_normalize_sku(row["sku"]))
+
+    metadata_map = _known_sku_metadata_map(db, skus)
+    for item in summary.get("results") or []:
+        _apply_item_metadata(item, metadata_map, fallback_sku)
+    for row in summary.get("comparison") or []:
+        _apply_item_metadata(row, metadata_map, fallback_sku)
+        for offer in row.get("offers") or []:
+            _apply_item_metadata(offer, metadata_map, row.get("sku") or fallback_sku)
+    for store in summary.get("stores") or []:
+        if store.get("product"):
+            _apply_item_metadata(store["product"], metadata_map, fallback_sku)
+        for product in store.get("products") or []:
+            _apply_item_metadata(product, metadata_map, fallback_sku)
+    return summary
+
+
+def _serialize_results(results, db: Session = None):
+    metadata_map = _known_sku_metadata_map(
+        db,
+        [
+            product.sku or _primary_sku(product.name or "")
+            for product, _price in results
+            if product.sku or _primary_sku(product.name or "")
+        ],
+    ) if db else {}
     serialized = []
 
     for product, price in results:
+        product_sku = product.sku or _primary_sku(product.name or "")
         source = price.source or price.store
         resolved = _resolve_cached_offer(price.store, source, price.url)
         item = {
@@ -143,7 +257,7 @@ def _serialize_results(results):
                 "name": product.name,
                 "brand": product.brand,
                 "category": product.category,
-                "sku": product.sku,
+                "sku": product_sku,
                 "image_url": product.image_url,
                 "current_price": price.price,
                 "store": resolved["store"],
@@ -157,6 +271,7 @@ def _serialize_results(results):
             value = getattr(price, field, None)
             if value is not None and field not in {"cash_price", "is_cached"}:
                 item[field] = value
+        _apply_item_metadata(item, metadata_map)
         serialized.append(item)
 
     return serialized
@@ -164,8 +279,9 @@ def _serialize_results(results):
 
 def _sku_status_map(db: Session, skus=None):
     requested_skus = set(_normalize_sku_list(skus))
+    metadata_map = _known_sku_metadata_map(db, requested_skus or None)
 
-    if requested_skus:
+    if requested_skus and len(requested_skus) <= 20:
         statuses = {}
         for sku in requested_skus:
             results = _find_sku_products(db, sku)
@@ -180,23 +296,27 @@ def _sku_status_map(db: Session, skus=None):
                 "offer_count": len(urls),
                 "store_count": len(stores),
                 "last_update": last_update,
+                **metadata_map.get(sku, {}),
             }
         return statuses
 
-    known_skus = {
-        _normalize_sku(row[0])
-        for row in db.query(KnownSku.sku).all()
-        if row[0]
-    }
-    product_skus = {
-        _normalize_sku(row[0])
-        for row in db.query(Product.sku).filter(Product.sku.isnot(None)).distinct().all()
-        if row[0]
-    }
-    name_skus = set()
-    for row in db.query(Product.name).all():
-        name_skus.update(_extract_skus(row[0] or ""))
-    all_skus = known_skus | product_skus | name_skus
+    if requested_skus:
+        all_skus = requested_skus
+    else:
+        known_skus = {
+            _normalize_sku(row[0])
+            for row in db.query(KnownSku.sku).all()
+            if row[0]
+        }
+        product_skus = {
+            _normalize_sku(row[0])
+            for row in db.query(Product.sku).filter(Product.sku.isnot(None)).distinct().all()
+            if row[0]
+        }
+        name_skus = set()
+        for row in db.query(Product.name).all():
+            name_skus.update(_extract_skus(row[0] or ""))
+        all_skus = known_skus | product_skus | name_skus
     statuses = {
         sku: {
             "sku": sku,
@@ -205,6 +325,7 @@ def _sku_status_map(db: Session, skus=None):
             "offer_count": 0,
             "store_count": 0,
             "last_update": None,
+            **metadata_map.get(sku, {}),
         }
         for sku in all_skus
     }
@@ -238,6 +359,7 @@ def _sku_status_map(db: Session, skus=None):
             "offer_count": len(aggregate["urls"]),
             "store_count": len(aggregate["stores"]),
             "last_update": aggregate["last_update"],
+            **metadata_map.get(sku, {}),
         }
 
     return statuses
@@ -288,6 +410,283 @@ def list_sku_status(
         ),
     )
     return {"items": items}
+
+
+def _product_belongs_to_sku(product, sku):
+    if _normalize_sku(product.sku or "") == sku:
+        return True
+    return bool(
+        re.search(
+            rf"(?<![A-Z0-9]){re.escape(sku)}(?![A-Z0-9])",
+            (product.name or "").upper(),
+        )
+    )
+
+
+@product_router.delete("/skus/{sku:path}")
+def delete_local_sku(sku: str, db: Session = Depends(get_db)):
+    normalized_sku = _normalize_sku(sku)
+    if not normalized_sku:
+        raise HTTPException(status_code=400, detail="SKU invalido.")
+
+    active_item = (
+        db.query(ExtractionJobItem)
+        .join(ExtractionJob, ExtractionJob.id == ExtractionJobItem.job_id)
+        .filter(
+            ExtractionJobItem.sku == normalized_sku,
+            ExtractionJobItem.status.in_(("queued", "running")),
+            ExtractionJob.status.in_(("queued", "running")),
+        )
+        .first()
+    )
+    if active_item:
+        raise HTTPException(
+            status_code=409,
+            detail="Este SKU esta em uma fila ativa. Aguarde ou cancele a extracao antes de excluir.",
+        )
+
+    candidates = (
+        db.query(Product)
+        .filter(
+            or_(
+                Product.sku == normalized_sku,
+                Product.name.ilike(f"%{normalized_sku}%"),
+            )
+        )
+        .all()
+    )
+    products = [
+        product for product in candidates if _product_belongs_to_sku(product, normalized_sku)
+    ]
+    product_ids = [product.id for product in products]
+    deleted_prices = 0
+    if product_ids:
+        deleted_prices = (
+            db.query(PriceHistory)
+            .filter(PriceHistory.product_id.in_(product_ids))
+            .delete(synchronize_session=False)
+        )
+        db.query(Product).filter(Product.id.in_(product_ids)).delete(
+            synchronize_session=False
+        )
+
+    deleted_known = (
+        db.query(KnownSku)
+        .filter(KnownSku.sku == normalized_sku)
+        .delete(synchronize_session=False)
+    )
+    if not products and not deleted_known:
+        db.rollback()
+        raise HTTPException(status_code=404, detail="SKU nao encontrado no banco local.")
+
+    db.commit()
+    return {
+        "sku": normalized_sku,
+        "deleted_products": len(products),
+        "deleted_prices": deleted_prices,
+    }
+
+
+def _normalize_header(value):
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    text = "".join(character for character in text if not unicodedata.combining(character))
+    return re.sub(r"\s+", " ", text.strip().lower().replace("_", " "))
+
+
+def _cell_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+def _tabular_import_rows(filename, content):
+    extension = (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
+    if extension in {"xlsx", "xlsm"}:
+        workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
+        worksheet = workbook.active
+        raw_rows = [list(row) for row in worksheet.iter_rows(values_only=True)]
+        workbook.close()
+    elif extension == "csv":
+        decoded = None
+        for encoding in ("utf-8-sig", "cp1252", "latin-1"):
+            try:
+                decoded = content.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        if decoded is None:
+            raise HTTPException(status_code=400, detail="Nao foi possivel ler o CSV.")
+        try:
+            dialect = csv.Sniffer().sniff(decoded[:4096], delimiters=",;\t|")
+        except csv.Error:
+            dialect = csv.excel
+        raw_rows = [list(row) for row in csv.reader(StringIO(decoded), dialect)]
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Formato nao suportado. Use XLSX, XLSM ou CSV.",
+        )
+
+    while raw_rows and not any(_cell_text(value) for value in raw_rows[0]):
+        raw_rows.pop(0)
+    if not raw_rows:
+        raise HTTPException(status_code=400, detail="O arquivo esta vazio.")
+
+    mapped_headers = [SKU_IMPORT_HEADERS.get(_normalize_header(value)) for value in raw_rows[0]]
+    if "sku" not in mapped_headers:
+        raise HTTPException(
+            status_code=400,
+            detail="A planilha precisa ter uma coluna chamada SKU.",
+        )
+
+    rows = []
+    for spreadsheet_row, values in enumerate(raw_rows[1:], start=2):
+        mapped = {
+            header: _cell_text(values[index])
+            for index, header in enumerate(mapped_headers)
+            if header and index < len(values)
+        }
+        if any(mapped.values()):
+            rows.append((spreadsheet_row, mapped))
+    return rows
+
+
+def _normalize_market_type(value):
+    normalized = _normalize_header(value)
+    if normalized == "cativo":
+        return "Cativo"
+    if normalized == "competitivo":
+        return "Competitivo"
+    return None
+
+
+@product_router.get("/import/skus/template")
+def download_sku_import_template():
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "SKUs"
+    headers = ["SKU", "Descricao", "Subfamilia", "Categoria", "Cluster", "Mercado"]
+    worksheet.append(headers)
+    worksheet.freeze_panes = "A2"
+    worksheet.auto_filter.ref = "A1:F1"
+
+    for cell in worksheet[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="0F7180")
+    for column, width in zip("ABCDEF", (20, 42, 24, 24, 20, 18)):
+        worksheet.column_dimensions[column].width = width
+
+    market_validation = DataValidation(
+        type="list",
+        formula1='"Cativo,Competitivo"',
+        allow_blank=True,
+    )
+    worksheet.add_data_validation(market_validation)
+    market_validation.add("F2:F5000")
+
+    output = BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="modelo-importacao-skus.xlsx"'},
+    )
+
+
+@product_router.post("/import/skus")
+async def import_skus_file(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    filename = (file.filename or "").strip()
+    content = await file.read(SKU_IMPORT_MAX_BYTES + 1)
+    await file.close()
+    if not content:
+        raise HTTPException(status_code=400, detail="O arquivo esta vazio.")
+    if len(content) > SKU_IMPORT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="O arquivo excede o limite de 8 MB.")
+
+    rows = _tabular_import_rows(filename, content)
+    if len(rows) > SKU_IMPORT_LIMIT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Limite de {SKU_IMPORT_LIMIT} linhas por arquivo.",
+        )
+
+    imported_skus = []
+    seen = set()
+    errors = []
+    valid_rows = []
+
+    for spreadsheet_row, values in rows:
+        sku = _normalize_sku(values.get("sku", ""))
+        if not sku or len(sku) > 80 or not re.fullmatch(r"[A-Z0-9._/-]+", sku):
+            errors.append({"row": spreadsheet_row, "message": "SKU invalido."})
+            continue
+        if sku in seen:
+            continue
+
+        market_value = values.get("market_type", "")
+        market_type = _normalize_market_type(market_value) if market_value else None
+        if market_value and not market_type:
+            errors.append(
+                {
+                    "row": spreadsheet_row,
+                    "message": "Mercado deve ser Cativo ou Competitivo.",
+                }
+            )
+            continue
+
+        seen.add(sku)
+        valid_rows.append((sku, values, market_type))
+        imported_skus.append(sku)
+
+    if not imported_skus:
+        raise HTTPException(
+            status_code=400,
+            detail=errors[0]["message"] if errors else "Nenhum SKU valido foi encontrado.",
+        )
+
+    existing_by_sku = {}
+    for sku_batch in _chunked(imported_skus):
+        for item in db.query(KnownSku).filter(KnownSku.sku.in_(sku_batch)).all():
+            existing_by_sku[item.sku] = item
+
+    created_count = 0
+    updated_count = 0
+    for sku, values, market_type in valid_rows:
+        known_sku = existing_by_sku.get(sku)
+        if not known_sku:
+            known_sku = KnownSku(sku=sku)
+            db.add(known_sku)
+            existing_by_sku[sku] = known_sku
+            created_count += 1
+        else:
+            updated_count += 1
+
+        for field in ("description", "subfamily", "category", "cluster"):
+            value = values.get(field, "").strip()
+            if value:
+                setattr(known_sku, field, value[:250])
+        if market_type:
+            known_sku.market_type = market_type
+        known_sku.updated_at = datetime.utcnow()
+
+    db.commit()
+    status_map = _sku_status_map(db, imported_skus)
+    return {
+        "filename": filename,
+        "imported_count": len(imported_skus),
+        "created_count": created_count,
+        "updated_count": updated_count,
+        "skipped_count": len(rows) - len(imported_skus),
+        "errors": errors[:100],
+        "skus": imported_skus,
+        "items": [status_map[sku] for sku in imported_skus if sku in status_map],
+    }
 
 
 def _schedule_response(schedule):
@@ -364,61 +763,30 @@ def batch_search_products(payload: SkuBatchRequest, db: Session = Depends(get_db
     for sku in skus:
         try:
             summary, status = _search_sku_summary(sku, payload, db)
-
-            sku_status = _sku_status_map(db, [sku]).get(sku, {})
-            items.append(
-                {
-                    "sku": sku,
-                    "status": status,
-                    "message": (
-                        f"{len(summary['results'])} ofertas analisadas em "
-                        f"{len(summary['comparison'])} linhas comparativas."
-                    ),
-                    "results_count": len(summary["results"]),
-                    "stores_count": len(
-                        [store for store in summary["stores"] if store["available"]]
-                    ),
-                    "comparison_count": len(summary["comparison"]),
-                    "in_database": sku_status.get("in_database", False),
-                    "offer_count": sku_status.get("offer_count", 0),
-                    "store_count": sku_status.get("store_count", 0),
-                    "last_update": sku_status.get("last_update"),
-                }
-            )
+            items.append(_sku_batch_result(db, sku, summary, status))
         except Exception as exc:
             db.rollback()
-            sku_status = _sku_status_map(db, [sku]).get(sku, {})
-            items.append(
-                {
-                    "sku": sku,
-                    "status": "error",
-                    "message": str(exc),
-                    "results_count": 0,
-                    "stores_count": 0,
-                    "comparison_count": 0,
-                    "in_database": sku_status.get("in_database", False),
-                    "offer_count": sku_status.get("offer_count", 0),
-                    "store_count": sku_status.get("store_count", 0),
-                    "last_update": sku_status.get("last_update"),
-                }
-            )
+            items.append(_sku_error_result(db, sku, exc))
 
     return {"items": items}
 
 
 def _register_skus(db: Session, skus):
-    existing = {
-        row[0]
-        for row in db.query(KnownSku.sku).filter(KnownSku.sku.in_(skus)).all()
-    }
+    skus = list(dict.fromkeys(skus))
+    existing = set()
+    for sku_batch in _chunked(skus):
+        existing.update(
+            row[0]
+            for row in db.query(KnownSku.sku).filter(KnownSku.sku.in_(sku_batch)).all()
+        )
     for sku in skus:
         if sku not in existing:
             db.add(KnownSku(sku=sku))
     db.commit()
 
 
-def _search_sku_summary(sku, payload, db):
-    cached_results = _serialize_results(_find_sku_products(db, sku))
+def _search_sku_summary(sku, payload, db, refreshed_after=None):
+    cached_results = _serialize_results(_find_sku_products(db, sku), db)
     latest = max(
         (item.get("last_update") for item in cached_results if item.get("last_update")),
         default=None,
@@ -426,21 +794,151 @@ def _search_sku_summary(sku, payload, db):
     stale_hours = 1 if payload.scope == "sites" else 8
     stale = not latest or latest < datetime.utcnow() - timedelta(hours=stale_hours)
     should_refresh = (
-        payload.force_refresh
-        or not cached_results
-        or (payload.refresh_if_stale and stale)
+        not (latest and refreshed_after and latest >= refreshed_after)
+        and (
+            payload.force_refresh
+            or not cached_results
+            or (payload.refresh_if_stale and stale)
+        )
     )
     if not should_refresh:
-        return build_summary_from_cached_results(cached_results, sku), "cached"
-    return (
-        run_all_scrapers(
-            sku,
-            db,
-            postal_code=payload.postal_code,
-            scope=payload.scope,
-        ),
-        "updated",
+        summary = build_summary_from_cached_results(cached_results, sku)
+        return _apply_summary_metadata(summary, db, sku), "cached"
+    summary = run_all_scrapers(
+        sku,
+        db,
+        postal_code=payload.postal_code,
+        scope=payload.scope,
     )
+    return _apply_summary_metadata(summary, db, sku), "updated"
+
+
+def _sku_batch_result(db, sku, summary, status):
+    sku_status = _sku_status_map(db, [sku]).get(sku, {})
+    return {
+        "sku": sku,
+        "status": status,
+        "message": (
+            f"{len(summary['results'])} ofertas analisadas em "
+            f"{len(summary['comparison'])} linhas comparativas."
+        ),
+        "results_count": len(summary["results"]),
+        "stores_count": len(
+            [store for store in summary["stores"] if store["available"]]
+        ),
+        "comparison_count": len(summary["comparison"]),
+        "in_database": sku_status.get("in_database", False),
+        "offer_count": sku_status.get("offer_count", 0),
+        "store_count": sku_status.get("store_count", 0),
+        "last_update": sku_status.get("last_update"),
+        **{field: sku_status.get(field) for field in SKU_METADATA_FIELDS},
+    }
+
+
+def _sku_error_result(db, sku, exc):
+    sku_status = _sku_status_map(db, [sku]).get(sku, {})
+    return {
+        "sku": sku,
+        "status": "error",
+        "message": str(exc) or exc.__class__.__name__,
+        "results_count": 0,
+        "stores_count": 0,
+        "comparison_count": 0,
+        "in_database": sku_status.get("in_database", False),
+        "offer_count": sku_status.get("offer_count", 0),
+        "store_count": sku_status.get("store_count", 0),
+        "last_update": sku_status.get("last_update"),
+        **{field: sku_status.get(field) for field in SKU_METADATA_FIELDS},
+    }
+
+
+def process_extraction_queue_item(sku, options):
+    db = SessionLocal()
+    try:
+        payload = SkuBatchRequest(
+            skus=[sku],
+            force_refresh=bool(options.get("force_refresh")),
+            refresh_if_stale=bool(options.get("refresh_if_stale")),
+            postal_code=options.get("postal_code"),
+            scope=options.get("scope") or "all",
+        )
+        summary, status = _search_sku_summary(
+            sku,
+            payload,
+            db,
+            refreshed_after=options.get("job_created_at"),
+        )
+        return _sku_batch_result(db, sku, summary, status)
+    except Exception as exc:
+        db.rollback()
+        print(f" ERROR: Fila falhou ao processar {sku}: {exc}")
+        return _sku_error_result(db, sku, exc)
+    finally:
+        db.close()
+
+
+@product_router.post("/extraction-jobs")
+def create_extraction_job(payload: SkuBatchRequest, db: Session = Depends(get_db)):
+    skus = _normalize_sku_list(payload.skus)
+    if not skus:
+        raise HTTPException(status_code=400, detail="Informe ao menos um SKU valido.")
+    if len(skus) > MAX_JOB_SKUS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Limite de {MAX_JOB_SKUS} SKUs por fila.",
+        )
+
+    _register_skus(db, skus)
+    return enqueue_extraction_job(
+        skus,
+        kind="single" if len(skus) == 1 else "manual",
+        force_refresh=payload.force_refresh,
+        refresh_if_stale=payload.refresh_if_stale,
+        postal_code=normalize_postal_code(payload.postal_code),
+        scope=payload.scope,
+    )
+
+
+@product_router.post("/extraction-jobs/database")
+def create_database_extraction_job(
+    payload: ExtractionDatabaseJobRequest,
+    db: Session = Depends(get_db),
+):
+    skus = _normalize_sku_list(
+        row[0]
+        for row in db.query(KnownSku.sku).order_by(KnownSku.sku.asc()).all()
+    )
+    if not skus:
+        raise HTTPException(status_code=400, detail="O banco local nao possui SKUs.")
+    return enqueue_extraction_job(
+        skus,
+        kind="database",
+        force_refresh=payload.force_refresh,
+        refresh_if_stale=payload.refresh_if_stale,
+        postal_code=normalize_postal_code(payload.postal_code),
+        scope=payload.scope,
+    )
+
+
+@product_router.get("/extraction-jobs/active")
+def active_extraction_job():
+    return {"job": get_active_extraction_job()}
+
+
+@product_router.get("/extraction-jobs/{job_id}")
+def extraction_job_status(job_id: str, include_items: bool = False):
+    job = get_extraction_job(job_id, include_items=include_items)
+    if not job:
+        raise HTTPException(status_code=404, detail="Fila de extracao nao encontrada.")
+    return job
+
+
+@product_router.post("/extraction-jobs/{job_id}/cancel")
+def request_extraction_job_cancel(job_id: str):
+    job = cancel_extraction_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Fila de extracao nao encontrada.")
+    return job
 
 
 def _combine_summaries(summaries, skus):
@@ -448,6 +946,7 @@ def _combine_summaries(summaries, skus):
     seen_results = set()
     comparison = []
     stores = {}
+    source_health = {}
 
     for summary in summaries:
         for item in summary["results"]:
@@ -482,6 +981,17 @@ def _combine_summaries(summaries, skus):
             )
             aggregate["message"] = None if aggregate["available"] else "Nao disponivel"
 
+        for source in summary.get("source_health") or []:
+            aggregate_source = source_health.setdefault(
+                source["key"],
+                {**source, "offer_count": 0},
+            )
+            aggregate_source["offer_count"] = (
+                aggregate_source.get("offer_count", 0) + source.get("offer_count", 0)
+            )
+            if source.get("status") == "available":
+                aggregate_source["status"] = "available"
+
     return {
         "message": (
             f"Busca conjunta concluida para {len(skus)} SKUs: "
@@ -491,6 +1001,7 @@ def _combine_summaries(summaries, skus):
         "stores": list(stores.values()),
         "comparison": comparison,
         "skus": skus,
+        "source_health": list(source_health.values()),
     }
 
 
@@ -514,7 +1025,7 @@ def search_sku_batch(payload: SkuBatchRequest, db: Session = Depends(get_db)):
         except Exception as exc:
             db.rollback()
             print(f" ERROR: Pesquisa de {sku} falhou: {exc}")
-            cached = _serialize_results(_find_sku_products(db, sku))
+            cached = _serialize_results(_find_sku_products(db, sku), db)
             if cached:
                 summaries.append(build_summary_from_cached_results(cached, sku))
 
@@ -528,7 +1039,7 @@ def export_analytics(payload: AnalyticsExportRequest):
 
     workbook = build_analytics_workbook(payload)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M")
-    filename = f"neveprice-analytics-{timestamp}.xlsx"
+    filename = f"nevetrack-analytics-{timestamp}.xlsx"
     return StreamingResponse(
         workbook,
         media_type=(
@@ -581,7 +1092,7 @@ def create_product(product_data: ProductCreate, db: Session = Depends(get_db)):
 def search_products(
     q: Optional[str] = Query(None, min_length=2), db: Session = Depends(get_db)
 ):
-    return _serialize_results(_find_products(db, q))
+    return _serialize_results(_find_products(db, q), db)
 
 
 @product_router.post("/refresh")
@@ -591,7 +1102,11 @@ def refresh_prices(
     scope: str = "all",
     db: Session = Depends(get_db),
 ):
-    summary = run_all_scrapers(q, db, postal_code=postal_code, scope=scope)
+    summary = _apply_summary_metadata(
+        run_all_scrapers(q, db, postal_code=postal_code, scope=scope),
+        db,
+        _primary_sku(q),
+    )
     return {
         "message": (
             "Busca finalizada. "
@@ -600,6 +1115,7 @@ def refresh_prices(
         "results": summary["results"],
         "stores": summary["stores"],
         "comparison": summary["comparison"],
+        "source_health": summary.get("source_health", []),
     }
 
 
@@ -609,9 +1125,11 @@ def search_and_update(q: str = Query(..., min_length=2), db: Session = Depends(g
     sku = _primary_sku(search_text)
 
     if sku:
-        cached_results = _serialize_results(_find_sku_products(db, sku))
+        cached_results = _serialize_results(_find_sku_products(db, sku), db)
         if cached_results:
-            summary = build_summary_from_cached_results(cached_results, sku)
+            summary = _apply_summary_metadata(
+                build_summary_from_cached_results(cached_results, sku), db, sku
+            )
             unavailable_count = len(
                 [store for store in summary["stores"] if not store["available"]]
             )
@@ -624,9 +1142,12 @@ def search_and_update(q: str = Query(..., min_length=2), db: Session = Depends(g
                 "results": summary["results"],
                 "stores": summary["stores"],
                 "comparison": summary["comparison"],
+                "source_health": summary.get("source_health", []),
             }
 
-    summary = run_all_scrapers(search_text, db)
+    summary = _apply_summary_metadata(
+        run_all_scrapers(search_text, db), db, _primary_sku(search_text)
+    )
     results = summary["results"]
     comparison = summary["comparison"]
     unavailable_count = len(
@@ -650,4 +1171,5 @@ def search_and_update(q: str = Query(..., min_length=2), db: Session = Depends(g
         "results": results,
         "stores": summary["stores"],
         "comparison": comparison,
+        "source_health": summary.get("source_health", []),
     }

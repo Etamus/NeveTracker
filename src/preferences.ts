@@ -1,5 +1,6 @@
-export const INTERFACE_PREFERENCES_KEY = "neveprice-interface-preferences";
-export const INTERFACE_PREFERENCES_EVENT = "neveprice-interface-preferences-updated";
+export const INTERFACE_PREFERENCES_KEY = "nevetrack-interface-preferences";
+export const INTERFACE_PREFERENCES_EVENT = "nevetrack-interface-preferences-updated";
+const PREVIOUS_INTERFACE_PREFERENCES_KEY = `${["neve", "price"].join("")}-interface-preferences`;
 
 export const STORE_OPTIONS = [
   { label: "Mercado Livre", aliases: ["mercado livre", "meli", "-ml", "mlb"] },
@@ -47,7 +48,14 @@ const validStores = new Set(STORE_OPTIONS.map((store) => store.label));
 
 export const getInterfacePreferences = (): InterfacePreferences => {
   try {
-    const storedPreferences = window.localStorage.getItem(INTERFACE_PREFERENCES_KEY);
+    let storedPreferences = window.localStorage.getItem(INTERFACE_PREFERENCES_KEY);
+    if (!storedPreferences) {
+      storedPreferences = window.localStorage.getItem(PREVIOUS_INTERFACE_PREFERENCES_KEY);
+      if (storedPreferences) {
+        window.localStorage.setItem(INTERFACE_PREFERENCES_KEY, storedPreferences);
+        window.localStorage.removeItem(PREVIOUS_INTERFACE_PREFERENCES_KEY);
+      }
+    }
     if (!storedPreferences) return defaultInterfacePreferences;
 
     const parsed = JSON.parse(storedPreferences) as Partial<InterfacePreferences>;

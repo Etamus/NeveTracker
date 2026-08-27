@@ -62,6 +62,18 @@ def _write_env(root: Path, node_exe: Path, npm_cmd: Path) -> None:
     ]
     encoding = "mbcs" if sys.platform == "win32" else "utf-8"
     env_file.write_text("\r\n".join(lines), encoding=encoding)
+    (env_file.parent / "env.json").write_text(
+        json.dumps(
+            {
+                "node_exe": str(node_exe),
+                "npm_cmd": str(npm_cmd),
+                "npx_cmd": str(npx_cmd),
+            },
+            ensure_ascii=True,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def _global_node() -> Optional[Tuple[Path, Path]]:

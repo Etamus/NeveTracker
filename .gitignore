@@ -10,6 +10,9 @@ __pycache__/
 backend/.venv/
 backend/precos.db
 backend/*.db
+backend/*.db-wal
+backend/*.db-shm
+backend/*.db-journal
 backend/.env
 
 # Node/Vite na raiz
@@ -23,6 +26,8 @@ dist/
 .env.local
 .tools/
 .iniciar.lock/
+.install.lock/
+.logs/
 *.log
 
 # Editors and OS

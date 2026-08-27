@@ -15,6 +15,10 @@ class AnalyticsExportTests(unittest.TestCase):
                     {
                         "sku": "W10531315",
                         "name": "Sensor",
+                        "subfamily": "Refrigeração",
+                        "sku_category": "Peças",
+                        "cluster": "Linha branca",
+                        "market_type": "Competitivo",
                         "store_count": 1,
                         "offer_count": 1,
                         "pma": 11.61,
@@ -43,6 +47,10 @@ class AnalyticsExportTests(unittest.TestCase):
         self.assertIn("À vista", headers)
         self.assertIn("Frete", headers)
         self.assertIn("Prazo máximo (dias)", headers)
+        self.assertIn("Subfamília", headers)
+        self.assertIn("Mercado", headers)
+        self.assertEqual(workbook["Analytics"]["D2"].value, "Refrigeração")
+        self.assertEqual(workbook["Analytics"]["G2"].value, "Competitivo")
         self.assertEqual(workbook.sheetnames, ["Analytics", "Lojistas", "Ofertas"])
 
 

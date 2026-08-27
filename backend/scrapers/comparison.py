@@ -4,34 +4,23 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import RLock
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
-import requests
 from bs4 import BeautifulSoup
 from cachetools import TTLCache, cached
 from cachetools.keys import hashkey
+
+from services.http_client import create_resilient_session
+from services.store_registry import target_store_label
 
 SOURCES = (
     ("Buscape", "https://www.buscape.com.br"),
     ("Zoom", "https://www.zoom.com.br"),
 )
 
-TARGET_STORE_ALIASES = {
-    "Amazon Brasil": ("amazon", "amazon.com.br"),
-    "ComClick": ("comclick", "com click"),
-    "Dufrio": ("dufrio",),
-    "Friolar": ("friolar", "friolar pecas", "friolar peças"),
-    "Gold Service": ("gold service", "goldservice"),
-    "Magazine Luiza": ("magazine luiza", "magalu"),
-    "Mercado Livre": ("mercado livre", "mercadolivre"),
-    "MG Parts": ("mg parts", "mgparts"),
-    "Refrigeração Mota": ("refrigeracao mota", "refrigeração mota"),
-    "Shopee": ("shopee",),
-    "Leroy Merlin": ("leroy", "leroy merlin"),
-}
-
 cache = TTLCache(maxsize=100, ttl=900)
 cache_lock = RLock()
 COMPARISON_STORE_LIMIT = 60
 LEAD_TIMEOUT = 8
+session = create_resilient_session()
 
 
 def _headers():
@@ -99,7 +88,7 @@ def _pretty_seller(value, source_label):
 @cached(cache, key=lambda lead_url: hashkey("lead", lead_url), lock=cache_lock)
 def _lead_redirect_info(lead_url: str):
     try:
-        response = requests.get(lead_url, headers=_headers(), timeout=LEAD_TIMEOUT)
+        response = session.get(lead_url, headers=_headers(), timeout=LEAD_TIMEOUT)
         if response.status_code != 200:
             return {}
 
@@ -114,7 +103,7 @@ def _lead_redirect_info(lead_url: str):
         if not redirect_url:
             return {}
 
-        redirect_response = requests.get(
+        redirect_response = session.get(
             redirect_url,
             headers=_headers(),
             timeout=LEAD_TIMEOUT,
@@ -141,16 +130,8 @@ def _enrich_offer_url(product_url, source_label, seller_name):
     return final_url, _pretty_seller(seller, source_label)
 
 
-def _normalize_store(value):
-    return "".join(ch for ch in (value or "").lower() if ch.isalnum() or ch.isspace())
-
-
 def _target_store_label(merchant_name):
-    normalized = _normalize_store(merchant_name)
-    for label, aliases in TARGET_STORE_ALIASES.items():
-        if any(_normalize_store(alias) in normalized for alias in aliases):
-            return label
-    return None
+    return target_store_label(merchant_name)
 
 
 def _extract_hits(html):
@@ -186,7 +167,7 @@ def _extract_offer_list(html):
 @cached(cache, key=lambda product_url: hashkey("offers", product_url), lock=cache_lock)
 def _product_offer_list(product_url: str):
     try:
-        response = requests.get(product_url, headers=_headers(), timeout=8)
+        response = session.get(product_url, headers=_headers(), timeout=8)
         if response.status_code != 200:
             return []
         return _extract_offer_list(response.text)
@@ -203,7 +184,7 @@ def _search_hits(product_query: str):
         url = f"{base_url}/search?q={quote_plus(product_query)}"
 
         try:
-            response = requests.get(url, headers=_headers(), timeout=8)
+            response = session.get(url, headers=_headers(), timeout=8)
             if response.status_code != 200:
                 print(f"{source_name} retornou HTTP {response.status_code}")
                 continue
@@ -352,6 +333,16 @@ def _comparison_candidate(item, product_query):
         return None
 
     source_label = store_label or merchant_name.strip() or item.get("_source_name") or "Comparador"
+    installments = item.get("installments") or {}
+    installment_count = installments.get("amount_months")
+    installment_value = _as_float(installments.get("price"))
+    installment_price = _as_float(installments.get("total_value"))
+    if not installment_price and installment_count and installment_value:
+        installment_price = round(int(installment_count) * installment_value, 2)
+    if installment_price and installment_price < price:
+        installment_price = None
+        installment_count = None
+        installment_value = None
 
     return {
         "name": name.strip(),
@@ -360,6 +351,15 @@ def _comparison_candidate(item, product_query):
         "source": source_label,
         "seller": merchant_name.strip() or source_label,
         "discovery_source": item.get("_source_name") or "Comparador",
+        "cash_price": price,
+        "installment_price": installment_price,
+        "installment_count": int(installment_count) if installment_count else None,
+        "installment_value": installment_value,
+        "payment_difference": (
+            round(max(0, installment_price - price), 2)
+            if installment_price
+            else None
+        ),
         "url": urljoin(item["_base_url"], relative_url),
         "brand": store_label,
         "category": item.get("categoryName") or product_query,

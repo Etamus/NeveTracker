@@ -35,6 +35,13 @@ class SkuBatchRequest(BaseModel):
     scope: Literal["all", "sites", "retail"] = "all"
 
 
+class ExtractionDatabaseJobRequest(BaseModel):
+    force_refresh: bool = True
+    refresh_if_stale: bool = False
+    postal_code: Optional[str] = None
+    scope: Literal["all", "sites", "retail"] = "all"
+
+
 class ExtractionScheduleRequest(BaseModel):
     enabled: bool = False
     start_time: str = "09:00"
@@ -87,6 +94,11 @@ class AnalyticsOfferExport(BaseModel):
 class AnalyticsRowExport(BaseModel):
     sku: Optional[str] = None
     name: str
+    description: Optional[str] = None
+    subfamily: Optional[str] = None
+    sku_category: Optional[str] = None
+    cluster: Optional[str] = None
+    market_type: Optional[str] = None
     store_count: int
     offer_count: int
     pma: float

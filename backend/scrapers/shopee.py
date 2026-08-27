@@ -1,7 +1,8 @@
 from urllib.parse import quote_plus
 
-import requests
 from cachetools import TTLCache, cached
+
+from services.http_client import create_resilient_session
 
 BASE_URL = "https://shopee.com.br"
 SEARCH_URL = f"{BASE_URL}/api/v4/search/search_items"
@@ -45,7 +46,7 @@ def _image_url(image_id):
 
 @cached(cache)
 def scrape_shopee(product_query: str):
-    session = requests.Session()
+    session = create_resilient_session()
     params = {
         "by": "relevancy",
         "keyword": product_query,

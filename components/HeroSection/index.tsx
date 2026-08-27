@@ -4,27 +4,38 @@ import {
   BarChart3,
   CalendarClock,
   CheckCircle2,
+  ChevronDown,
   Database,
   Download,
+  Eye,
+  EyeOff,
+  FileDown,
   Grid2X2,
   ListChecks,
   LoaderCircle,
   LogOut,
-  Moon,
   PackageSearch,
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
   Search,
   Settings,
-  Sun,
+  ShieldCheck,
+  Trash2,
+  Upload,
+  UserPlus,
   UserRound,
   X,
 } from "lucide-react";
 import SlidingTabs from "../SlidingTabs";
 import type {
-  SkuBatchResponse,
+  ActiveExtractionJobResponse,
+  AuthLoginResponse,
+  AuthUser,
+  AuthUsersResponse,
+  ExtractionJob,
   SkuBatchResult,
+  SkuImportResponse,
   SkuStatusItem,
   SkuStatusResponse,
 } from "../../models/product.model";
@@ -39,10 +50,25 @@ import {
   type InterfacePreferences,
 } from "../../src/preferences";
 
-const AUTH_USERS = [{ username: "DEUSM2", password: "1234" }];
-const AUTH_STORAGE_KEY = "neveprice-auth-user";
-const THEME_STORAGE_KEY = "neveprice-theme";
-const SCHEDULE_STORAGE_KEY = "neveprice-extraction-schedule";
+const AUTH_TOKEN_STORAGE_KEY = "nevetrack-auth-token";
+const THEME_STORAGE_KEY = "nevetrack-theme";
+const SCHEDULE_STORAGE_KEY = "nevetrack-extraction-schedule";
+const EXTRACTION_JOB_STORAGE_KEY = "nevetrack-active-extraction-job";
+const PREVIOUS_STORAGE_PREFIX = ["neve", "price"].join("");
+const PREVIOUS_AUTH_TOKEN_STORAGE_KEY = `${PREVIOUS_STORAGE_PREFIX}-auth-token`;
+const PREVIOUS_AUTH_USER_STORAGE_KEY = `${PREVIOUS_STORAGE_PREFIX}-auth-user`;
+const PREVIOUS_THEME_STORAGE_KEY = `${PREVIOUS_STORAGE_PREFIX}-theme`;
+const PREVIOUS_SCHEDULE_STORAGE_KEY = `${PREVIOUS_STORAGE_PREFIX}-extraction-schedule`;
+
+const readMigratedStorageValue = (key: string, previousKey: string) => {
+  const currentValue = window.localStorage.getItem(key);
+  if (currentValue !== null) return currentValue;
+  const previousValue = window.localStorage.getItem(previousKey);
+  if (previousValue === null) return null;
+  window.localStorage.setItem(key, previousValue);
+  window.localStorage.removeItem(previousKey);
+  return previousValue;
+};
 
 const navigation = [
   { label: "Ofertas", description: "Comparação de preços", icon: PackageSearch },
@@ -52,6 +78,26 @@ const navigation = [
 
 type ThemeMode = "light" | "dark";
 type ExtractionTab = "extract" | "database" | "schedule";
+
+const TERMINAL_EXTRACTION_STATUSES = new Set([
+  "completed",
+  "completed_with_errors",
+  "cancelled",
+  "failed",
+]);
+
+const isExtractionJobActive = (job?: ExtractionJob | null) =>
+  Boolean(job && !TERMINAL_EXTRACTION_STATUSES.has(job.status));
+
+const extractionJobTitle = (job: ExtractionJob) => {
+  if (job.cancel_requested && isExtractionJobActive(job)) return "Cancelando fila";
+  if (job.status === "queued") return "Fila aguardando processamento";
+  if (job.status === "running") return "Extração em andamento";
+  if (job.status === "completed") return "Extração concluída";
+  if (job.status === "completed_with_errors") return "Concluída com ocorrências";
+  if (job.status === "cancelled") return "Fila cancelada";
+  return "Falha na extração";
+};
 
 type ScheduledExtractionSettings = {
   enabled: boolean;
@@ -73,6 +119,43 @@ const weekDays = [
   { value: 0, label: "Dom" },
 ];
 
+const weekDayNames = new Map([
+  [1, "segunda-feira"],
+  [2, "terça-feira"],
+  [3, "quarta-feira"],
+  [4, "quinta-feira"],
+  [5, "sexta-feira"],
+  [6, "sábado"],
+  [0, "domingo"],
+]);
+
+const formatScheduleDays = (days: number[]) => {
+  const orderedDays = weekDays.map((day) => day.value).filter((day) => days.includes(day));
+  if (orderedDays.length === 7) return "Todos os dias";
+  if ([1, 2, 3, 4, 5].every((day) => orderedDays.includes(day)) && orderedDays.length === 5) {
+    return "Segunda a sexta";
+  }
+  if ([6, 0].every((day) => orderedDays.includes(day)) && orderedDays.length === 2) {
+    return "Fins de semana";
+  }
+
+  const labels = orderedDays.map((day) => weekDayNames.get(day) || "");
+  if (labels.length === 1) return `Toda ${labels[0]}`;
+  const lastLabel = labels.pop();
+  const joinedLabels = `${labels.join(", ")} e ${lastLabel}`;
+  return joinedLabels.charAt(0).toUpperCase() + joinedLabels.slice(1);
+};
+
+const getScheduleSummary = (settings: ScheduledExtractionSettings) => {
+  const repeats = settings.repeatEveryHours > 0;
+  return {
+    primary: repeats ? `${settings.time} às ${settings.endTime}` : `Às ${settings.time}`,
+    secondary: repeats
+      ? `A cada ${settings.repeatEveryHours} ${settings.repeatEveryHours === 1 ? "hora" : "horas"} · ${formatScheduleDays(settings.days)}`
+      : `Uma vez ao dia · ${formatScheduleDays(settings.days)}`,
+  };
+};
+
 const defaultScheduleSettings: ScheduledExtractionSettings = {
   enabled: false,
   time: "09:00",
@@ -83,14 +166,22 @@ const defaultScheduleSettings: ScheduledExtractionSettings = {
 };
 
 const getInitialTheme = (): ThemeMode => {
-  const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
-  if (storedTheme === "light" || storedTheme === "dark") return storedTheme;
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  const storedTheme = readMigratedStorageValue(THEME_STORAGE_KEY, PREVIOUS_THEME_STORAGE_KEY);
+  const initialTheme = storedTheme === "light" || storedTheme === "dark"
+    ? storedTheme
+    : window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+
+  document.documentElement.dataset.theme = initialTheme;
+  window.localStorage.setItem(THEME_STORAGE_KEY, initialTheme);
+  return initialTheme;
 };
 
 const getInitialScheduleSettings = (): ScheduledExtractionSettings => {
   try {
-    const storedSettings = window.localStorage.getItem(SCHEDULE_STORAGE_KEY);
+    const storedSettings = readMigratedStorageValue(
+      SCHEDULE_STORAGE_KEY,
+      PREVIOUS_SCHEDULE_STORAGE_KEY,
+    );
     if (!storedSettings) return defaultScheduleSettings;
 
     const parsed = JSON.parse(storedSettings) as Partial<ScheduledExtractionSettings>;
@@ -116,13 +207,13 @@ const getInitialScheduleSettings = (): ScheduledExtractionSettings => {
 };
 
 const parseSkuInput = (value: string) => {
-  const matches = value.toUpperCase().match(/\bW\d{6,}\b|\b\d{8,}\b/g) || [];
-  const fallback = value
+  const candidates = value
+    .normalize("NFKC")
     .toUpperCase()
     .split(/[\s,;]+/)
     .map((item) => item.trim())
-    .filter((item) => item.length >= 2);
-  return [...new Set(matches.length ? matches : fallback)];
+    .filter((item) => /^[A-Z0-9._/-]{2,80}$/.test(item));
+  return [...new Set(candidates)];
 };
 
 const formatDateTime = (value?: string | null) => {
@@ -138,6 +229,28 @@ const formatDateTime = (value?: string | null) => {
   }).format(date);
 };
 
+const getAuthToken = () =>
+  readMigratedStorageValue(AUTH_TOKEN_STORAGE_KEY, PREVIOUS_AUTH_TOKEN_STORAGE_KEY) || "";
+
+const authorizedHeaders = (initial?: HeadersInit) => {
+  const headers = new Headers(initial);
+  const token = getAuthToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  return headers;
+};
+
+const apiErrorMessage = (data: unknown, fallback: string) => {
+  if (
+    data &&
+    typeof data === "object" &&
+    "detail" in data &&
+    typeof data.detail === "string"
+  ) {
+    return data.detail;
+  }
+  return fallback;
+};
+
 export const HeroSection = () => {
   const [activeTab, setActiveTab] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -145,24 +258,47 @@ export const HeroSection = () => {
   const [loginOpen, setLoginOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [extractionsOpen, setExtractionsOpen] = useState(false);
+  const [administrationOpen, setAdministrationOpen] = useState(false);
+  const [adminEditorOpen, setAdminEditorOpen] = useState(false);
   const [skuSelectorOpen, setSkuSelectorOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [loginUser, setLoginUser] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [authError, setAuthError] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [adminUsers, setAdminUsers] = useState<AuthUser[]>([]);
+  const [selectedAdminUser, setSelectedAdminUser] = useState<AuthUser | null>(null);
+  const [adminUsername, setAdminUsername] = useState("");
+  const [adminPassword, setAdminPassword] = useState("");
+  const [adminIsAdmin, setAdminIsAdmin] = useState(false);
+  const [adminLoading, setAdminLoading] = useState(false);
+  const [adminSaving, setAdminSaving] = useState(false);
+  const [adminError, setAdminError] = useState("");
+  const [adminSearch, setAdminSearch] = useState("");
+  const [showAdminPassword, setShowAdminPassword] = useState(false);
+  const [adminDeleteTarget, setAdminDeleteTarget] = useState<AuthUser | null>(null);
+  const [adminDeleteError, setAdminDeleteError] = useState("");
   const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
   const [extractionTab, setExtractionTab] = useState<ExtractionTab>("extract");
   const [scheduleSettings, setScheduleSettings] = useState<ScheduledExtractionSettings>(getInitialScheduleSettings);
   const [scheduleStatus, setScheduleStatus] = useState("");
+  const [scheduleSaving, setScheduleSaving] = useState(false);
   const [interfacePreferences, setInterfacePreferences] = useState<InterfacePreferences>(getInterfacePreferences);
-  const [settingsStatus, setSettingsStatus] = useState("");
   const [skuInput, setSkuInput] = useState("");
   const [forceExtraction, setForceExtraction] = useState(true);
   const [skuStatusItems, setSkuStatusItems] = useState<SkuStatusItem[]>([]);
   const [skuStatusLoading, setSkuStatusLoading] = useState(false);
+  const [skuDatabaseFilter, setSkuDatabaseFilter] = useState("");
+  const [deletingSku, setDeletingSku] = useState<string | null>(null);
   const [extractionRunning, setExtractionRunning] = useState(false);
+  const [extractionProgress, setExtractionProgress] = useState("");
+  const [activeExtractionJob, setActiveExtractionJob] = useState<ExtractionJob | null>(null);
   const [extractionResults, setExtractionResults] = useState<SkuBatchResult[]>([]);
   const [extractionError, setExtractionError] = useState("");
+  const [skuImporting, setSkuImporting] = useState(false);
+  const [skuImportSummary, setSkuImportSummary] = useState<SkuImportResponse | null>(null);
   const [refreshingSku, setRefreshingSku] = useState<string | null>(null);
   const [refreshingAllSkus, setRefreshingAllSkus] = useState(false);
   const [selectedSearchSkus, setSelectedSearchSkus] = useState<string[]>([]);
@@ -170,10 +306,8 @@ export const HeroSection = () => {
   const [skuSelectorFilter, setSkuSelectorFilter] = useState("");
   const [skuSelectorError, setSkuSelectorError] = useState("");
   const accountRef = useRef<HTMLDivElement>(null);
-  const [currentUser, setCurrentUser] = useState<string | null>(() => {
-    const storedUser = window.localStorage.getItem(AUTH_STORAGE_KEY);
-    return AUTH_USERS.find((user) => user.username === storedUser)?.username || null;
-  });
+  const skuFileInputRef = useRef<HTMLInputElement>(null);
+  const themeTransitionTimerRef = useRef<number | null>(null);
   const {
     productName,
     products,
@@ -185,11 +319,39 @@ export const HeroSection = () => {
   } = useHeroSection();
 
   useEffect(() => {
+    window.localStorage.removeItem(PREVIOUS_AUTH_USER_STORAGE_KEY);
+    const token = getAuthToken();
+    if (!token) return;
+
+    let active = true;
+    void fetch(`${getApiBaseUrl()}/auth/me`, { headers: authorizedHeaders() })
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json() as Promise<AuthUser>;
+      })
+      .then((user) => {
+        if (active) setCurrentUser(user);
+      })
+      .catch(() => {
+        window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+        if (active) setCurrentUser(null);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
     const closeMenus = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setLoginOpen(false);
         setSettingsOpen(false);
         setExtractionsOpen(false);
+        setAdminDeleteTarget(null);
+        setAdminDeleteError("");
+        setAdminEditorOpen(false);
+        setAdministrationOpen(false);
         setSkuSelectorOpen(false);
         setAccountOpen(false);
         setSidebarOpen(false);
@@ -200,10 +362,12 @@ export const HeroSection = () => {
     return () => window.removeEventListener("keydown", closeMenus);
   }, []);
 
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
-  }, [theme]);
+  useEffect(() => () => {
+    if (themeTransitionTimerRef.current !== null) {
+      window.clearTimeout(themeTransitionTimerRef.current);
+    }
+    document.documentElement.classList.remove("theme-transition");
+  }, []);
 
   useEffect(() => {
     window.localStorage.setItem(SCHEDULE_STORAGE_KEY, JSON.stringify(scheduleSettings));
@@ -233,6 +397,7 @@ export const HeroSection = () => {
 
   const openLogin = () => {
     setAccountOpen(false);
+    setSidebarOpen(false);
     setAuthError("");
     setLoginOpen(true);
   };
@@ -241,45 +406,78 @@ export const HeroSection = () => {
     setLoginOpen(false);
     setAuthError("");
     setLoginPassword("");
+    setShowLoginPassword(false);
   };
 
-  const handleLogin = (event: FormEvent<HTMLFormElement>) => {
+  const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const normalizedUser = loginUser.trim().toUpperCase();
-    const user = AUTH_USERS.find(
-      (candidate) =>
-        candidate.username === normalizedUser &&
-        candidate.password === loginPassword,
-    );
-
-    if (!user) {
-      setAuthError("Login ou senha inválidos.");
-      return;
-    }
-
-    setCurrentUser(user.username);
-    window.localStorage.setItem(AUTH_STORAGE_KEY, user.username);
-    setLoginUser("");
-    setLoginPassword("");
+    if (authLoading) return;
+    setAuthLoading(true);
     setAuthError("");
-    setLoginOpen(false);
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: loginUser.trim().toUpperCase(),
+          password: loginPassword,
+        }),
+      });
+      const data = await response.json().catch(() => null) as AuthLoginResponse | { detail?: string } | null;
+      if (!response.ok || !data || !("access_token" in data)) {
+        throw new Error(apiErrorMessage(data, "Login ou senha inválidos."));
+      }
+
+      window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, data.access_token);
+      setCurrentUser(data.user);
+      setLoginUser("");
+      setLoginPassword("");
+      setShowLoginPassword(false);
+      setLoginOpen(false);
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : "Login ou senha inválidos.");
+    } finally {
+      setAuthLoading(false);
+    }
   };
 
   const handleLogout = () => {
+    const token = getAuthToken();
+    if (token) {
+      void fetch(`${getApiBaseUrl()}/auth/logout`, {
+        method: "POST",
+        headers: authorizedHeaders(),
+      }).catch(() => undefined);
+    }
     setCurrentUser(null);
     setAccountOpen(false);
-    window.localStorage.removeItem(AUTH_STORAGE_KEY);
+    setAdminEditorOpen(false);
+    setAdministrationOpen(false);
+    window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
   };
 
-  const toggleTheme = () => {
-    setTheme((currentTheme) => (currentTheme === "dark" ? "light" : "dark"));
+  const updateTheme = (nextTheme: ThemeMode) => {
+    if (nextTheme === theme) return;
+
+    const root = document.documentElement;
+    root.classList.add("theme-transition");
+    root.dataset.theme = nextTheme;
+    window.localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+    setTheme(nextTheme);
+
+    if (themeTransitionTimerRef.current !== null) {
+      window.clearTimeout(themeTransitionTimerRef.current);
+    }
+    themeTransitionTimerRef.current = window.setTimeout(() => {
+      root.classList.remove("theme-transition");
+      themeTransitionTimerRef.current = null;
+    }, 220);
   };
 
   const updateInterfacePreferences = (updater: (currentPreferences: InterfacePreferences) => InterfacePreferences) => {
     setInterfacePreferences((currentPreferences) => {
       const nextPreferences = updater(currentPreferences);
       saveInterfacePreferences(nextPreferences);
-      setSettingsStatus("Configuração salva.");
       return nextPreferences;
     });
   };
@@ -303,13 +501,17 @@ export const HeroSection = () => {
 
   const openSettings = () => {
     setAccountOpen(false);
+    setSidebarOpen(false);
     setSettingsOpen(true);
   };
 
   const openExtractions = () => {
     setAccountOpen(false);
+    setSidebarOpen(false);
     setExtractionError("");
-    setExtractionResults([]);
+    if (!activeExtractionJob) setExtractionResults([]);
+    setSkuImportSummary(null);
+    setSkuDatabaseFilter("");
     setExtractionTab("extract");
     setExtractionsOpen(true);
     void loadSkuStatus();
@@ -331,6 +533,169 @@ export const HeroSection = () => {
       .catch(() => undefined);
   };
 
+  const loadAdminUsers = async (preferredUserId?: number) => {
+    setAdminLoading(true);
+    setAdminError("");
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/auth/users`, {
+        headers: authorizedHeaders(),
+      });
+      const data = await response.json().catch(() => null) as AuthUsersResponse | { detail?: string } | null;
+      if (!response.ok || !data || !("items" in data)) {
+        throw new Error(apiErrorMessage(data, "Não foi possível carregar os usuários."));
+      }
+      setAdminUsers(data.items);
+      if (preferredUserId) {
+        setSelectedAdminUser(data.items.find((user) => user.id === preferredUserId) || null);
+      }
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : "Não foi possível carregar os usuários.");
+    } finally {
+      setAdminLoading(false);
+    }
+  };
+
+  const resetAdminEditor = () => {
+    setSelectedAdminUser(null);
+    setAdminUsername("");
+    setAdminPassword("");
+    setAdminIsAdmin(false);
+    setAdminError("");
+    setShowAdminPassword(false);
+    setAdminDeleteTarget(null);
+    setAdminDeleteError("");
+  };
+
+  const openAdministration = () => {
+    if (!currentUser?.is_admin) return;
+    setAccountOpen(false);
+    setSidebarOpen(false);
+    resetAdminEditor();
+    setAdminEditorOpen(false);
+    setAdminSearch("");
+    setAdministrationOpen(true);
+    void loadAdminUsers();
+  };
+
+  const closeAdministration = () => {
+    setAdminEditorOpen(false);
+    setAdministrationOpen(false);
+    resetAdminEditor();
+  };
+
+  const openAdminCreate = () => {
+    resetAdminEditor();
+    setAdminEditorOpen(true);
+  };
+
+  const closeAdminEditor = () => {
+    setAdminEditorOpen(false);
+    resetAdminEditor();
+  };
+
+  const selectAdminUser = (user: AuthUser) => {
+    setSelectedAdminUser(user);
+    setAdminUsername(user.username);
+    setAdminPassword("");
+    setAdminIsAdmin(user.is_admin);
+    setAdminError("");
+    setShowAdminPassword(false);
+    setAdminDeleteTarget(null);
+    setAdminDeleteError("");
+    setAdminEditorOpen(true);
+  };
+
+  const saveAdminUser = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (adminSaving) return;
+
+    const editingUser = selectedAdminUser;
+    const payload: { username?: string; password?: string; is_admin?: boolean } = {};
+    if (editingUser) {
+      if (adminPassword) payload.password = adminPassword;
+      if (currentUser?.is_owner && !editingUser.is_owner && adminIsAdmin !== editingUser.is_admin) {
+        payload.is_admin = adminIsAdmin;
+      }
+      if (!Object.keys(payload).length) {
+        setAdminError("Informe uma nova senha ou altere o perfil administrativo.");
+        return;
+      }
+    } else {
+      payload.username = adminUsername.trim().toUpperCase();
+      payload.password = adminPassword;
+      payload.is_admin = currentUser?.is_owner ? adminIsAdmin : false;
+    }
+
+    setAdminSaving(true);
+    setAdminError("");
+    try {
+      const response = await fetch(
+        editingUser
+          ? `${getApiBaseUrl()}/auth/users/${editingUser.id}`
+          : `${getApiBaseUrl()}/auth/users`,
+        {
+          method: editingUser ? "PATCH" : "POST",
+          headers: authorizedHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify(payload),
+        },
+      );
+      const data = await response.json().catch(() => null) as AuthUser | { detail?: string } | null;
+      if (!response.ok || !data || !("username" in data)) {
+        throw new Error(apiErrorMessage(data, "Não foi possível salvar o usuário."));
+      }
+
+      if (editingUser?.id === currentUser?.id && adminPassword) {
+        handleLogout();
+        return;
+      }
+
+      setAdminPassword("");
+      await loadAdminUsers();
+      setSelectedAdminUser(null);
+      setAdminEditorOpen(false);
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : "Não foi possível salvar o usuário.");
+    } finally {
+      setAdminSaving(false);
+    }
+  };
+
+  const deleteAdminUser = async (user: AuthUser) => {
+    if (adminSaving) return;
+
+    setAdminSaving(true);
+    setAdminDeleteError("");
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/auth/users/${user.id}`, {
+        method: "DELETE",
+        headers: authorizedHeaders(),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => null) as { detail?: string } | null;
+        throw new Error(apiErrorMessage(data, "Não foi possível remover o usuário."));
+      }
+      setAdminDeleteTarget(null);
+      resetAdminEditor();
+      setAdminEditorOpen(false);
+      await loadAdminUsers();
+    } catch (error) {
+      setAdminDeleteError(error instanceof Error ? error.message : "Não foi possível remover o usuário.");
+    } finally {
+      setAdminSaving(false);
+    }
+  };
+
+  const generateAdminPassword = () => {
+    const characters = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%";
+    const randomValues = new Uint32Array(14);
+    window.crypto.getRandomValues(randomValues);
+    setAdminPassword(
+      Array.from(randomValues, (value) => characters[value % characters.length]).join(""),
+    );
+    setShowAdminPassword(true);
+    setAdminError("");
+  };
+
   const toggleScheduleDay = (day: number) => {
     setScheduleSettings((currentSettings) => {
       const days = currentSettings.days.includes(day)
@@ -344,6 +709,8 @@ export const HeroSection = () => {
   };
 
   const saveSchedule = async () => {
+    if (scheduleSaving) return;
+    setScheduleSaving(true);
     setScheduleStatus("Salvando...");
     try {
       const response = await fetch(`${getApiBaseUrl()}/products/schedule`, {
@@ -364,6 +731,8 @@ export const HeroSection = () => {
     } catch (error) {
       console.error("Erro ao salvar programação:", error);
       setScheduleStatus("Não foi possível salvar a programação.");
+    } finally {
+      setScheduleSaving(false);
     }
   };
 
@@ -376,44 +745,85 @@ export const HeroSection = () => {
       return;
     }
 
+    if (extractionRunning) {
+      setExtractionError("Ja existe uma fila de extracao em andamento.");
+      return;
+    }
+
     setExtractionRunning(true);
+    setExtractionProgress(`0 de ${skus.length}`);
     setExtractionError("");
     setExtractionResults([]);
 
     try {
-      const response = await fetch(`${getApiBaseUrl()}/products/batch-search`, {
+      const response = await fetch(`${getApiBaseUrl()}/products/extraction-jobs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           skus,
           force_refresh: forceExtraction,
+          refresh_if_stale: false,
           postal_code: interfacePreferences.logisticsPostalCode || null,
           scope: "all",
         }),
       });
+      const data = await response.json().catch(() => null) as ExtractionJob | { detail?: string } | null;
+      if (!response.ok || !data || !("id" in data)) {
+        throw new Error(apiErrorMessage(data, `HTTP ${response.status}`));
+      }
+      setActiveExtractionJob(data);
+      setExtractionProgress(`${data.processed_skus} de ${data.total_skus}`);
+      window.localStorage.setItem(EXTRACTION_JOB_STORAGE_KEY, data.id);
+    } catch (error) {
+      console.error("Erro ao extrair SKUs:", error);
+      setExtractionError(error instanceof Error ? error.message : "Falha ao extrair SKUs.");
+      setExtractionRunning(false);
+      setExtractionProgress("");
+    }
+  };
 
+  const importSkuFile = async (file?: File) => {
+    if (!file || skuImporting) return;
+    setSkuImporting(true);
+    setExtractionError("");
+    setSkuImportSummary(null);
+
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const response = await fetch(`${getApiBaseUrl()}/products/import/skus`, {
+        method: "POST",
+        body,
+      });
       if (!response.ok) {
         const errorData = await response.json().catch(() => null);
         throw new Error(errorData?.detail || `HTTP ${response.status}`);
       }
 
-      const data = (await response.json()) as SkuBatchResponse;
-      setExtractionResults(data.items || []);
+      const data = (await response.json()) as SkuImportResponse;
+      setSkuImportSummary(data);
+      setSkuInput(data.skus.join("\n"));
       await loadSkuStatus();
     } catch (error) {
-      console.error("Erro ao extrair SKUs:", error);
-      setExtractionError(error instanceof Error ? error.message : "Falha ao extrair SKUs.");
+      setExtractionError(error instanceof Error ? error.message : "Falha ao importar a planilha.");
     } finally {
-      setExtractionRunning(false);
+      setSkuImporting(false);
+      if (skuFileInputRef.current) skuFileInputRef.current.value = "";
     }
   };
 
+  const downloadSkuTemplate = () => {
+    window.open(`${getApiBaseUrl()}/products/import/skus/template`, "_blank", "noopener,noreferrer");
+  };
+
   const refreshSingleSku = async (sku: string) => {
-    if (refreshingSku) return;
+    if (refreshingSku || extractionRunning) return;
     setRefreshingSku(sku);
+    setExtractionRunning(true);
+    setExtractionProgress("0 de 1");
     setExtractionError("");
     try {
-      const response = await fetch(`${getApiBaseUrl()}/products/batch-search`, {
+      const response = await fetch(`${getApiBaseUrl()}/products/extraction-jobs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -423,59 +833,196 @@ export const HeroSection = () => {
           scope: "all",
         }),
       });
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => null);
-        throw new Error(errorData?.detail || `HTTP ${response.status}`);
+      const data = await response.json().catch(() => null) as ExtractionJob | { detail?: string } | null;
+      if (!response.ok || !data || !("id" in data)) {
+        throw new Error(apiErrorMessage(data, `HTTP ${response.status}`));
       }
-      const data = (await response.json()) as SkuBatchResponse;
-      setExtractionResults(data.items || []);
-      await loadSkuStatus();
+      setActiveExtractionJob(data);
+      window.localStorage.setItem(EXTRACTION_JOB_STORAGE_KEY, data.id);
     } catch (error) {
       setExtractionError(error instanceof Error ? error.message : "Falha ao atualizar o SKU.");
-    } finally {
       setRefreshingSku(null);
+      setExtractionRunning(false);
+      setExtractionProgress("");
+    }
+  };
+
+  const deleteLocalSku = async (sku: string) => {
+    if (deletingSku || extractionRunning) return;
+    setDeletingSku(sku);
+    setExtractionError("");
+    try {
+      const response = await fetch(
+        `${getApiBaseUrl()}/products/skus/${encodeURIComponent(sku)}`,
+        { method: "DELETE" },
+      );
+      const data = await response.json().catch(() => null) as { detail?: string } | null;
+      if (!response.ok) {
+        throw new Error(apiErrorMessage(data, "Não foi possível excluir o SKU."));
+      }
+      setSkuStatusItems((items) => items.filter((item) => item.sku !== sku));
+      setSelectedSearchSkus((items) => items.filter((item) => item !== sku));
+      setDraftSearchSkus((items) => items.filter((item) => item !== sku));
+      setExtractionResults((items) => items.filter((item) => item.sku !== sku));
+    } catch (error) {
+      setExtractionError(error instanceof Error ? error.message : "Não foi possível excluir o SKU.");
+    } finally {
+      setDeletingSku(null);
     }
   };
 
   const refreshAllSkus = async () => {
     const skus = skuStatusItems.map((item) => item.sku).filter(Boolean);
-    if (!skus.length || refreshingAllSkus) return;
+    if (!skus.length || refreshingAllSkus || extractionRunning) return;
 
     setRefreshingAllSkus(true);
+    setExtractionRunning(true);
+    setExtractionProgress(`0 de ${skus.length}`);
     setExtractionError("");
     setExtractionResults([]);
-    const results: SkuBatchResult[] = [];
 
     try {
-      for (let index = 0; index < skus.length; index += 30) {
-        const response = await fetch(`${getApiBaseUrl()}/products/batch-search`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            skus: skus.slice(index, index + 30),
-            force_refresh: true,
-            postal_code: interfacePreferences.logisticsPostalCode || null,
-            scope: "all",
-          }),
-        });
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => null);
-          throw new Error(errorData?.detail || `HTTP ${response.status}`);
-        }
-        const data = (await response.json()) as SkuBatchResponse;
-        results.push(...(data.items || []));
+      const response = await fetch(`${getApiBaseUrl()}/products/extraction-jobs/database`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          force_refresh: true,
+          refresh_if_stale: false,
+          postal_code: interfacePreferences.logisticsPostalCode || null,
+          scope: "all",
+        }),
+      });
+      const data = await response.json().catch(() => null) as ExtractionJob | { detail?: string } | null;
+      if (!response.ok || !data || !("id" in data)) {
+        throw new Error(apiErrorMessage(data, `HTTP ${response.status}`));
       }
-
-      setExtractionResults(results);
-      await loadSkuStatus();
+      setActiveExtractionJob(data);
+      window.localStorage.setItem(EXTRACTION_JOB_STORAGE_KEY, data.id);
     } catch (error) {
       setExtractionError(error instanceof Error ? error.message : "Falha ao atualizar o banco local.");
-    } finally {
       setRefreshingAllSkus(false);
+      setExtractionRunning(false);
+      setExtractionProgress("");
     }
   };
 
+  const cancelActiveExtraction = async () => {
+    if (!activeExtractionJob || !isExtractionJobActive(activeExtractionJob)) return;
+    try {
+      const response = await fetch(
+        `${getApiBaseUrl()}/products/extraction-jobs/${activeExtractionJob.id}/cancel`,
+        { method: "POST" },
+      );
+      const data = await response.json().catch(() => null) as ExtractionJob | { detail?: string } | null;
+      if (!response.ok || !data || !("id" in data)) {
+        throw new Error(apiErrorMessage(data, `HTTP ${response.status}`));
+      }
+      setActiveExtractionJob(data);
+    } catch (error) {
+      setExtractionError(error instanceof Error ? error.message : "Falha ao cancelar a fila.");
+    }
+  };
+
+  useEffect(() => {
+    let disposed = false;
+
+    const restoreJob = async () => {
+      const storedJobId = window.localStorage.getItem(EXTRACTION_JOB_STORAGE_KEY);
+      const storedUrl = storedJobId
+        ? `${getApiBaseUrl()}/products/extraction-jobs/${storedJobId}`
+        : null;
+
+      try {
+        let job: ExtractionJob | null = null;
+        if (storedUrl) {
+          const storedResponse = await fetch(storedUrl);
+          if (storedResponse.ok) job = await storedResponse.json() as ExtractionJob;
+        }
+        if (!job || !isExtractionJobActive(job)) {
+          const activeResponse = await fetch(`${getApiBaseUrl()}/products/extraction-jobs/active`);
+          if (activeResponse.ok) {
+            const data = await activeResponse.json() as ActiveExtractionJobResponse;
+            job = data.job || job;
+          }
+        }
+        if (disposed || !job) return;
+        setActiveExtractionJob(job);
+        if (isExtractionJobActive(job)) {
+          setExtractionRunning(true);
+          setExtractionProgress(`${job.processed_skus} de ${job.total_skus}`);
+          setRefreshingAllSkus(job.kind === "database");
+          window.localStorage.setItem(EXTRACTION_JOB_STORAGE_KEY, job.id);
+        } else {
+          window.localStorage.removeItem(EXTRACTION_JOB_STORAGE_KEY);
+        }
+      } catch {
+        window.localStorage.removeItem(EXTRACTION_JOB_STORAGE_KEY);
+      }
+    };
+
+    void restoreJob();
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!activeExtractionJob || !isExtractionJobActive(activeExtractionJob)) return;
+    const jobId = activeExtractionJob.id;
+    let disposed = false;
+    let timer: number | undefined;
+
+    const pollJob = async () => {
+      try {
+        const response = await fetch(`${getApiBaseUrl()}/products/extraction-jobs/${jobId}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        let job = await response.json() as ExtractionJob;
+        if (disposed) return;
+
+        setActiveExtractionJob(job);
+        setExtractionRunning(isExtractionJobActive(job));
+        setExtractionProgress(`${job.processed_skus} de ${job.total_skus}`);
+        setRefreshingAllSkus(isExtractionJobActive(job) && job.kind === "database");
+
+        if (!isExtractionJobActive(job)) {
+          const completedResponse = await fetch(
+            `${getApiBaseUrl()}/products/extraction-jobs/${jobId}?include_items=true`,
+          );
+          if (completedResponse.ok) job = await completedResponse.json() as ExtractionJob;
+          if (disposed) return;
+          const items = job.items || [];
+          const orderedItems = [
+            ...items.filter((item) => item.status === "error"),
+            ...items.filter((item) => item.status !== "error"),
+          ];
+          setActiveExtractionJob(job);
+          setExtractionResults(orderedItems.slice(0, 300));
+          setExtractionRunning(false);
+          setExtractionProgress("");
+          setRefreshingAllSkus(false);
+          setRefreshingSku(null);
+          window.localStorage.removeItem(EXTRACTION_JOB_STORAGE_KEY);
+          await loadSkuStatus();
+          return;
+        }
+      } catch (error) {
+        if (!disposed) {
+          console.error("Erro ao acompanhar fila de extracao:", error);
+          setExtractionError("A fila continua no backend, mas o progresso nao pode ser consultado agora.");
+        }
+      }
+      if (!disposed) timer = window.setTimeout(pollJob, 1400);
+    };
+
+    timer = window.setTimeout(pollJob, 500);
+    return () => {
+      disposed = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [activeExtractionJob?.id, activeExtractionJob?.status]);
+
   const openSkuSelector = () => {
+    setSidebarOpen(false);
     setDraftSearchSkus(selectedSearchSkus);
     setSkuSelectorFilter("");
     setSkuSelectorError("");
@@ -530,6 +1077,27 @@ export const HeroSection = () => {
   const visibleSkuSelectorItems = skuStatusItems.filter((item) =>
     item.sku.toLowerCase().includes(skuSelectorFilter.trim().toLowerCase()),
   );
+  const normalizedSkuDatabaseFilter = skuDatabaseFilter.trim().toLowerCase();
+  const visibleDatabaseSkuItems = skuStatusItems.filter((item) =>
+    [item.sku, item.description, item.subfamily, item.sku_category, item.cluster]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase().includes(normalizedSkuDatabaseFilter)),
+  );
+  const visibleAdminUsers = adminUsers.filter((user) =>
+    user.username.toLowerCase().includes(adminSearch.trim().toLowerCase()),
+  );
+  const scheduleSummary = getScheduleSummary(scheduleSettings);
+  const adminTargetLocked = Boolean(
+    selectedAdminUser &&
+    !currentUser?.is_owner &&
+    selectedAdminUser.is_admin &&
+    selectedAdminUser.id !== currentUser?.id,
+  );
+  const canDeleteAdminUser = (user: AuthUser) => Boolean(
+    !user.is_owner &&
+    user.id !== currentUser?.id &&
+    (currentUser?.is_owner || !user.is_admin)
+  );
 
   return (
     <div className={`app-shell ${sidebarCollapsed ? "app-shell--sidebar-collapsed" : ""}`}>
@@ -544,7 +1112,7 @@ export const HeroSection = () => {
 
       <aside className={`app-sidebar ${sidebarOpen ? "app-sidebar--open" : ""}`}>
         <div className="flex h-16 items-center justify-start border-b border-[var(--border)] px-5">
-          <img src={theme === "dark" ? logoWhiteUrl : logoUrl} alt="NevePrice" className="h-8 w-auto" />
+          <img src={theme === "dark" ? logoWhiteUrl : logoUrl} alt="NeveTrack" className="h-8 w-auto" />
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col px-3 py-5">
@@ -582,14 +1150,16 @@ export const HeroSection = () => {
                   <Download size={15} />
                   Extrações
                 </button>
-                <button type="button" className="account-popover__item" onClick={openSettings}>
-                  <Settings size={15} />
-                  Configurações
-                </button>
+                {currentUser.is_admin && (
+                  <button type="button" className="account-popover__item" onClick={openAdministration}>
+                    <ShieldCheck size={15} />
+                    Administração
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={handleLogout}
-                  className="account-popover__item account-popover__item--danger"
+                  className="account-popover__item"
                 >
                   <LogOut size={15} />
                   Encerrar sessão
@@ -601,12 +1171,12 @@ export const HeroSection = () => {
               onClick={currentUser ? () => setAccountOpen((open) => !open) : openLogin}
               className="flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left transition-colors hover:bg-[var(--surface-subtle)]"
             >
-              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-900 text-xs font-bold text-white">
-                {currentUser ? currentUser.slice(0, 2) : <UserRound size={17} />}
+              <span className="account-avatar">
+                {currentUser ? currentUser.username.slice(0, 2) : <UserRound size={17} />}
               </span>
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-xs font-semibold text-[var(--foreground)]">
-                  {currentUser || "Entrar na conta"}
+                  {currentUser?.username || "Entrar na conta"}
                 </span>
               </span>
             </button>
@@ -673,11 +1243,11 @@ export const HeroSection = () => {
             <button
               type="button"
               className="icon-button"
-              aria-label={theme === "dark" ? "Usar tema claro" : "Usar tema escuro"}
-              title={theme === "dark" ? "Usar tema claro" : "Usar tema escuro"}
-              onClick={toggleTheme}
+              aria-label="Abrir configurações"
+              title="Configurações"
+              onClick={openSettings}
             >
-              {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
+              <Settings size={17} />
             </button>
           </div>
         </header>
@@ -706,7 +1276,7 @@ export const HeroSection = () => {
           >
             <div className="flex items-start justify-between gap-4">
               <div>
-                <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-slate-900 text-white">
+                <span className="auth-dialog__icon">
                   <UserRound size={19} />
                 </span>
                 <h2 className="mt-5 text-lg font-semibold text-[var(--foreground)]">Acesso</h2>
@@ -722,6 +1292,9 @@ export const HeroSection = () => {
               <input
                 type="text"
                 value={loginUser}
+                required
+                minLength={3}
+                maxLength={40}
                 onChange={(event) => {
                   setLoginUser(event.target.value);
                   setAuthError("");
@@ -732,23 +1305,327 @@ export const HeroSection = () => {
             </label>
             <label className="form-field mt-4">
               <span>Senha</span>
-              <input
-                type="password"
-                value={loginPassword}
-                onChange={(event) => {
-                  setLoginPassword(event.target.value);
-                  setAuthError("");
-                }}
-                autoComplete="current-password"
-              />
+              <div className="password-input">
+                <input
+                  type={showLoginPassword ? "text" : "password"}
+                  value={loginPassword}
+                  required
+                  minLength={4}
+                  maxLength={200}
+                  onChange={(event) => {
+                    setLoginPassword(event.target.value);
+                    setAuthError("");
+                  }}
+                  autoComplete="current-password"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowLoginPassword((visible) => !visible)}
+                  aria-label={showLoginPassword ? "Ocultar senha" : "Mostrar senha"}
+                  title={showLoginPassword ? "Ocultar senha" : "Mostrar senha"}
+                >
+                  {showLoginPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
             </label>
 
             {authError && <p className="auth-error">{authError}</p>}
 
             <div className="mt-6 flex justify-end gap-2">
-              <button type="submit" className="button-primary">Entrar</button>
+              <button type="submit" className="button-primary async-button" disabled={authLoading}>
+                <span className={authLoading ? "async-button__content async-button__content--hidden" : "async-button__content"}>
+                  Entrar
+                </span>
+                {authLoading && (
+                  <span className="async-button__loader" aria-hidden="true">
+                    <LoaderCircle size={16} className="animate-spin" />
+                  </span>
+                )}
+              </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {administrationOpen && currentUser?.is_admin && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={closeAdministration}>
+          <section
+            className="workspace-dialog workspace-dialog--admin-list"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Administração de usuários"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="dialog-header">
+              <div>
+                <span className="dialog-icon"><ShieldCheck size={19} /></span>
+                <h2>Administração</h2>
+              </div>
+              <button type="button" className="icon-button" onClick={closeAdministration} aria-label="Fechar">
+                <X size={17} />
+              </button>
+            </div>
+
+            <div className="admin-user-pane">
+              <div className="admin-pane-header">
+                <div>
+                  <strong>Usuários</strong>
+                  <span>{adminUsers.length} cadastrados</span>
+                </div>
+                <button type="button" className="button-primary" onClick={openAdminCreate}>
+                  <UserPlus size={15} />
+                  Criar usuário
+                </button>
+              </div>
+
+              <div className="admin-user-search">
+                <Search size={15} />
+                <input
+                  type="search"
+                  value={adminSearch}
+                  onChange={(event) => setAdminSearch(event.target.value)}
+                  placeholder="Buscar usuário..."
+                  aria-label="Buscar usuário"
+                />
+                {adminSearch && (
+                  <button type="button" onClick={() => setAdminSearch("")} aria-label="Limpar busca">
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+
+              <div className="admin-user-list">
+                {adminLoading && !adminUsers.length ? (
+                  <p className="admin-empty">Carregando usuários...</p>
+                ) : visibleAdminUsers.length ? (
+                  visibleAdminUsers.map((user) => {
+                    return (
+                      <div
+                        key={user.id}
+                        className={selectedAdminUser?.id === user.id ? "admin-user-row admin-user-row--active" : "admin-user-row"}
+                      >
+                        <button type="button" className="admin-user-row__main" onClick={() => selectAdminUser(user)}>
+                          <span className="admin-user-avatar">{user.username.slice(0, 2)}</span>
+                          <span className="min-w-0 flex-1">
+                            <strong>{user.username}</strong>
+                            <small>{user.is_owner ? "Principal" : user.is_admin ? "Administrador" : "Usuário"}</small>
+                          </span>
+                        </button>
+                        {user.is_admin && (
+                          <span
+                            className="admin-user-role-icon"
+                            aria-label={user.is_owner ? "Usuário principal" : "Administrador"}
+                            title={user.is_owner ? "Usuário principal" : "Administrador"}
+                          >
+                            <ShieldCheck size={15} />
+                          </span>
+                        )}
+                        {canDeleteAdminUser(user) && (
+                          <button
+                            type="button"
+                            className="admin-user-delete"
+                            disabled={adminSaving}
+                            onClick={() => {
+                              setAdminDeleteTarget(user);
+                              setAdminDeleteError("");
+                            }}
+                            aria-label={`Remover ${user.username}`}
+                            title="Remover usuário"
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })
+                ) : (
+                  <p className="admin-empty">Nenhum usuário encontrado.</p>
+                )}
+              </div>
+              {!adminEditorOpen && adminError && <p className="auth-error admin-directory-message">{adminError}</p>}
+            </div>
+          </section>
+        </div>
+      )}
+
+      {administrationOpen && adminEditorOpen && currentUser?.is_admin && (
+        <div className="dialog-backdrop dialog-backdrop--nested" role="presentation" onMouseDown={closeAdminEditor}>
+          <section
+            className="workspace-dialog workspace-dialog--admin-editor"
+            role="dialog"
+            aria-modal="true"
+            aria-label={selectedAdminUser ? "Gerenciar acesso" : "Novo acesso"}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="dialog-header">
+              <div>
+                <span className="dialog-icon">{selectedAdminUser ? <ShieldCheck size={19} /> : <UserPlus size={19} />}</span>
+                <h2>{selectedAdminUser ? "Gerenciar acesso" : "Novo acesso"}</h2>
+              </div>
+              <button type="button" className="icon-button" onClick={closeAdminEditor} aria-label="Fechar">
+                <X size={17} />
+              </button>
+            </div>
+
+            <form className="admin-access-form" onSubmit={saveAdminUser}>
+              {selectedAdminUser && (
+                <div className="admin-editor__head">
+                  <div>
+                    <h3>{selectedAdminUser.username}</h3>
+                    <small>Último acesso: {formatDateTime(selectedAdminUser.last_login)}</small>
+                  </div>
+                  {selectedAdminUser.is_owner && <span className="admin-role-badge">Principal</span>}
+                </div>
+              )}
+
+              <label className="form-field">
+                <span>Login</span>
+                <input
+                  type="text"
+                  value={adminUsername}
+                  disabled={Boolean(selectedAdminUser)}
+                  required={!selectedAdminUser}
+                  minLength={3}
+                  maxLength={40}
+                  pattern="[A-Za-z0-9._-]+"
+                  onChange={(event) => {
+                    setAdminUsername(event.target.value.toUpperCase());
+                    setAdminError("");
+                  }}
+                  autoComplete="off"
+                />
+              </label>
+
+              <label className="form-field">
+                <span>{selectedAdminUser ? "Nova senha" : "Senha"}</span>
+                <div className="password-input">
+                  <input
+                    type={showAdminPassword ? "text" : "password"}
+                    value={adminPassword}
+                    disabled={adminTargetLocked}
+                    required={!selectedAdminUser}
+                    minLength={4}
+                    maxLength={200}
+                    onChange={(event) => {
+                      setAdminPassword(event.target.value);
+                      setAdminError("");
+                    }}
+                    autoComplete="new-password"
+                  />
+                  <button
+                    type="button"
+                    disabled={adminTargetLocked}
+                    onClick={() => setShowAdminPassword((visible) => !visible)}
+                    aria-label={showAdminPassword ? "Ocultar senha" : "Mostrar senha"}
+                    title={showAdminPassword ? "Ocultar senha" : "Mostrar senha"}
+                  >
+                    {showAdminPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+                {!adminTargetLocked && (
+                  <span className="password-field-tools password-field-tools--end">
+                    <button type="button" onClick={generateAdminPassword}>
+                      <RefreshCw size={13} />
+                      Gerar senha
+                    </button>
+                  </span>
+                )}
+              </label>
+
+              {currentUser.is_owner && !selectedAdminUser?.is_owner && (
+                <label className="admin-toggle-row">
+                  <span>
+                    <strong>Administrador</strong>
+                    <small>Acesso à gestão de usuários</small>
+                  </span>
+                  <span className="schedule-toggle">
+                    <input
+                      type="checkbox"
+                      checked={adminIsAdmin}
+                      onChange={(event) => setAdminIsAdmin(event.target.checked)}
+                    />
+                    <span className="schedule-toggle__track"><span className="schedule-toggle__thumb" /></span>
+                  </span>
+                </label>
+              )}
+
+              {adminTargetLocked && (
+                <p className="admin-notice">Somente DEUSM2 pode alterar outro administrador.</p>
+              )}
+              {adminError && <p className="auth-error">{adminError}</p>}
+
+              <div className="admin-editor__actions">
+                <button type="submit" className="button-primary async-button" disabled={adminSaving || adminTargetLocked}>
+                  <span className={adminSaving ? "async-button__content async-button__content--hidden" : "async-button__content"}>
+                    {selectedAdminUser ? "Salvar" : "Criar usuário"}
+                  </span>
+                  {adminSaving && (
+                    <span className="async-button__loader" aria-hidden="true">
+                      <LoaderCircle size={16} className="animate-spin" />
+                    </span>
+                  )}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
+      {administrationOpen && adminDeleteTarget && currentUser?.is_admin && (
+        <div
+          className="dialog-backdrop dialog-backdrop--nested dialog-backdrop--confirmation"
+          role="presentation"
+          onMouseDown={() => {
+            if (adminSaving) return;
+            setAdminDeleteTarget(null);
+            setAdminDeleteError("");
+          }}
+        >
+          <section
+            className="workspace-dialog workspace-dialog--confirmation"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="admin-delete-title"
+            aria-describedby="admin-delete-description"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="confirmation-icon" aria-hidden="true">
+              <Trash2 size={19} />
+            </div>
+            <h2 id="admin-delete-title">Excluir usuário?</h2>
+            <p id="admin-delete-description">
+              O acesso de <strong>{adminDeleteTarget.username}</strong> será removido permanentemente.
+            </p>
+            {adminDeleteError && <p className="auth-error">{adminDeleteError}</p>}
+            <div className="confirmation-actions">
+              <button
+                type="button"
+                className="button-secondary"
+                disabled={adminSaving}
+                onClick={() => {
+                  setAdminDeleteTarget(null);
+                  setAdminDeleteError("");
+                }}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="button-primary async-button"
+                disabled={adminSaving}
+                onClick={() => void deleteAdminUser(adminDeleteTarget)}
+              >
+                <span className={adminSaving ? "async-button__content async-button__content--hidden" : "async-button__content"}>
+                  Excluir
+                </span>
+                {adminSaving && (
+                  <span className="async-button__loader" aria-hidden="true">
+                    <LoaderCircle size={16} className="animate-spin" />
+                  </span>
+                )}
+              </button>
+            </div>
+          </section>
         </div>
       )}
 
@@ -857,52 +1734,79 @@ export const HeroSection = () => {
             </div>
 
             <div className="settings-panel">
-              <section className="settings-section">
+              <section className="settings-section settings-section--appearance">
+                <div className="settings-section__head">
+                  <h3>Aparência</h3>
+                </div>
+                <div className="settings-grid">
+                  <label className="settings-field">
+                    <span>Tema</span>
+                    <div className="settings-select">
+                      <select
+                        value={theme}
+                        onChange={(event) => updateTheme(event.target.value as ThemeMode)}
+                      >
+                        <option value="light">Claro</option>
+                        <option value="dark">Escuro</option>
+                      </select>
+                      <ChevronDown size={16} aria-hidden="true" />
+                    </div>
+                  </label>
+                </div>
+              </section>
+
+              <section className="settings-section settings-section--format">
                 <div className="settings-section__head">
                   <h3>Formato</h3>
                 </div>
                 <div className="settings-grid">
                   <label className="settings-field">
                     <span>Moeda</span>
-                    <select
-                      value={interfacePreferences.currency}
-                      onChange={(event) =>
-                        updateInterfacePreferences((currentPreferences) => ({
-                          ...currentPreferences,
-                          currency: event.target.value,
-                        }))
-                      }
-                    >
-                      {currencyOptions.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
+                    <div className="settings-select">
+                      <select
+                        value={interfacePreferences.currency}
+                        onChange={(event) =>
+                          updateInterfacePreferences((currentPreferences) => ({
+                            ...currentPreferences,
+                            currency: event.target.value,
+                          }))
+                        }
+                      >
+                        {currencyOptions.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown size={16} aria-hidden="true" />
+                    </div>
                   </label>
 
                   <label className="settings-field">
                     <span>Formato numérico</span>
-                    <select
-                      value={interfacePreferences.locale}
-                      onChange={(event) =>
-                        updateInterfacePreferences((currentPreferences) => ({
-                          ...currentPreferences,
-                          locale: event.target.value,
-                        }))
-                      }
-                    >
-                      {localeOptions.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
+                    <div className="settings-select">
+                      <select
+                        value={interfacePreferences.locale}
+                        onChange={(event) =>
+                          updateInterfacePreferences((currentPreferences) => ({
+                            ...currentPreferences,
+                            locale: event.target.value,
+                          }))
+                        }
+                      >
+                        {localeOptions.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown size={16} aria-hidden="true" />
+                    </div>
                   </label>
                 </div>
               </section>
 
-              <section className="settings-section">
+              <section className="settings-section settings-section--logistics">
                 <div className="settings-section__head">
                   <h3>Logística</h3>
                 </div>
@@ -923,7 +1827,6 @@ export const HeroSection = () => {
                 </div>
               </section>
 
-              {settingsStatus && <p className="settings-status">{settingsStatus}</p>}
             </div>
           </section>
         </div>
@@ -981,9 +1884,100 @@ export const HeroSection = () => {
               </button>
             </div>
 
+            {activeExtractionJob && (
+              <div
+                className={
+                  isExtractionJobActive(activeExtractionJob)
+                    ? "extraction-job-card extraction-job-card--active"
+                    : "extraction-job-card"
+                }
+                role="status"
+                aria-live="polite"
+              >
+                <div className="extraction-job-card__head">
+                  <span className="extraction-job-card__icon">
+                    {isExtractionJobActive(activeExtractionJob)
+                      ? <LoaderCircle size={16} className="animate-spin" />
+                      : <ListChecks size={16} />}
+                  </span>
+                  <span className="extraction-job-card__copy">
+                    <strong>{extractionJobTitle(activeExtractionJob)}</strong>
+                    <small>
+                      {activeExtractionJob.processed_skus} de {activeExtractionJob.total_skus} SKUs
+                      {activeExtractionJob.batches_total > 1
+                        ? ` · lotes de ${activeExtractionJob.batch_size}`
+                        : ""}
+                    </small>
+                  </span>
+                  {isExtractionJobActive(activeExtractionJob) && !activeExtractionJob.cancel_requested && (
+                    <button type="button" className="button-quiet" onClick={() => void cancelActiveExtraction()}>
+                      Cancelar
+                    </button>
+                  )}
+                </div>
+                <div className="extraction-job-progress" aria-hidden="true">
+                  <span style={{ width: `${Math.min(100, Math.max(0, activeExtractionJob.progress_percent))}%` }} />
+                </div>
+                <div className="extraction-job-card__meta">
+                  <span>
+                    {activeExtractionJob.current_sku
+                      ? `Processando ${activeExtractionJob.current_sku}`
+                      : activeExtractionJob.message}
+                  </span>
+                  <span>
+                    {activeExtractionJob.success_count} concluídos
+                    {activeExtractionJob.error_count > 0 ? ` · ${activeExtractionJob.error_count} erros` : ""}
+                  </span>
+                </div>
+              </div>
+            )}
+
             {extractionTab === "extract" ? (
               <div className="extraction-panel" role="tabpanel">
                 <form onSubmit={runExtractions} className="extraction-form extraction-form--fill">
+                  <div className="sku-import-block">
+                    <div className="sku-import-block__head">
+                      <div>
+                        <strong>Importar planilha</strong>
+                        <span>XLSX, XLSM ou CSV com uma coluna SKU</span>
+                      </div>
+                      <button type="button" className="button-quiet" onClick={downloadSkuTemplate}>
+                        <FileDown size={15} />
+                        Baixar modelo
+                      </button>
+                    </div>
+                    <input
+                      ref={skuFileInputRef}
+                      type="file"
+                      className="sr-only"
+                      accept=".xlsx,.xlsm,.csv"
+                      onChange={(event) => void importSkuFile(event.target.files?.[0])}
+                    />
+                    <button
+                      type="button"
+                      className="sku-import-dropzone"
+                      disabled={skuImporting}
+                      onClick={() => skuFileInputRef.current?.click()}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        void importSkuFile(event.dataTransfer.files?.[0]);
+                      }}
+                    >
+                      {skuImporting ? <LoaderCircle size={17} className="animate-spin" /> : <Upload size={17} />}
+                      <span>{skuImporting ? "Importando..." : "Selecionar ou arrastar arquivo"}</span>
+                    </button>
+                    {skuImportSummary && (
+                      <div className="sku-import-summary" role="status">
+                        <strong>{skuImportSummary.imported_count} SKUs importados</strong>
+                        <span>
+                          {skuImportSummary.created_count} novos · {skuImportSummary.updated_count} atualizados
+                          {skuImportSummary.skipped_count > 0 ? ` · ${skuImportSummary.skipped_count} ignorados` : ""}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
                   <label className="textarea-field">
                     <span>SKUs</span>
                     <textarea
@@ -1006,7 +2000,7 @@ export const HeroSection = () => {
                     </label>
                     <button type="submit" className="button-primary" disabled={extractionRunning}>
                       {extractionRunning ? <LoaderCircle size={15} className="animate-spin" /> : <Download size={15} />}
-                      Extrair
+                      {extractionRunning ? `Na fila ${extractionProgress}` : "Extrair"}
                     </button>
                   </div>
                 </form>
@@ -1032,6 +2026,13 @@ export const HeroSection = () => {
               <div className="extraction-panel" role="tabpanel">
                 <div className="schedule-card">
                   <div className="schedule-card__head">
+                    <div className={scheduleSettings.enabled ? "schedule-summary" : "schedule-summary schedule-summary--inactive"}>
+                      <span className="schedule-summary__icon"><CalendarClock size={17} /></span>
+                      <span className="schedule-summary__content">
+                        <strong>{scheduleSummary.primary}</strong>
+                        <small>{scheduleSummary.secondary}</small>
+                      </span>
+                    </div>
                     <label className="schedule-toggle">
                       <input
                         type="checkbox"
@@ -1139,9 +2140,21 @@ export const HeroSection = () => {
                       />
                       <span>Atualizar via APIs</span>
                     </label>
-                    <button type="button" className="button-primary" onClick={() => void saveSchedule()}>
-                      <CheckCircle2 size={15} />
-                      Salvar
+                    <button
+                      type="button"
+                      className="button-primary async-button"
+                      onClick={() => void saveSchedule()}
+                      disabled={scheduleSaving}
+                    >
+                      <span className={scheduleSaving ? "async-button__content async-button__content--hidden" : "async-button__content"}>
+                        <CheckCircle2 size={15} />
+                        Salvar
+                      </span>
+                      {scheduleSaving && (
+                        <span className="async-button__loader" aria-hidden="true">
+                          <LoaderCircle size={16} className="animate-spin" />
+                        </span>
+                      )}
                     </button>
                   </div>
 
@@ -1153,44 +2166,76 @@ export const HeroSection = () => {
                   <div className="sku-status-card__header">
                     <div>
                       <h3>Banco local</h3>
-                      <p>{skuStatusItems.length} SKUs acompanhados</p>
+                      <p>
+                        {normalizedSkuDatabaseFilter
+                          ? `${visibleDatabaseSkuItems.length} de ${skuStatusItems.length} SKUs`
+                          : `${skuStatusItems.length} SKUs acompanhados`}
+                      </p>
                     </div>
                     <button
                       type="button"
                       className="button-secondary sku-refresh-all"
                       onClick={() => void refreshAllSkus()}
-                      disabled={refreshingAllSkus || !skuStatusItems.length}
+                      disabled={extractionRunning || refreshingAllSkus || !skuStatusItems.length}
                     >
                       {refreshingAllSkus && <LoaderCircle size={15} className="animate-spin" />}
-                      Atualizar
+                      {refreshingAllSkus ? extractionProgress || "Atualizando" : "Atualizar"}
                     </button>
+                  </div>
+                  <div className="sku-status-search">
+                    <div className="sku-status-search__field">
+                      <Search size={15} />
+                      <input
+                        type="search"
+                        value={skuDatabaseFilter}
+                        onChange={(event) => setSkuDatabaseFilter(event.target.value)}
+                        placeholder="Pesquisar no banco local..."
+                        aria-label="Pesquisar SKUs do banco local"
+                      />
+                    </div>
                   </div>
                   <div className="sku-status-list">
                     {skuStatusLoading && !skuStatusItems.length ? (
                       <p className="sku-status-empty">Carregando...</p>
-                    ) : skuStatusItems.length ? (
-                      skuStatusItems.map((item) => (
+                    ) : visibleDatabaseSkuItems.length ? (
+                      visibleDatabaseSkuItems.map((item) => (
                         <div key={item.sku} className="sku-status-row">
                           <strong>{item.sku}</strong>
-                          <span>{item.offer_count} ofertas</span>
-                          <span>{item.store_count} lojas</span>
+                          <span className="sku-status-row__offers">{item.offer_count} ofertas</span>
+                          <span className="sku-status-row__stores">{item.store_count} lojas</span>
                           <time>{formatDateTime(item.last_update)}</time>
-                          <button
-                            type="button"
-                            className="table-action"
-                            onClick={() => void refreshSingleSku(item.sku)}
-                            disabled={Boolean(refreshingSku)}
-                            aria-label={`Atualizar ${item.sku}`}
-                            title="Atualizar SKU"
-                          >
-                            {refreshingSku === item.sku
-                              ? <LoaderCircle size={15} className="animate-spin" />
-                              : <RefreshCw size={15} />}
-                          </button>
+                          <span className="sku-status-actions">
+                            <button
+                              type="button"
+                              className="table-action"
+                              onClick={() => void deleteLocalSku(item.sku)}
+                              disabled={extractionRunning || Boolean(deletingSku)}
+                              aria-label={`Excluir ${item.sku}`}
+                              title="Excluir SKU"
+                            >
+                              {deletingSku === item.sku
+                                ? <LoaderCircle size={15} className="animate-spin" />
+                                : <Trash2 size={15} />}
+                            </button>
+                            <button
+                              type="button"
+                              className="table-action"
+                              onClick={() => void refreshSingleSku(item.sku)}
+                              disabled={extractionRunning || Boolean(refreshingSku) || Boolean(deletingSku)}
+                              aria-label={`Atualizar ${item.sku}`}
+                              title="Atualizar SKU"
+                            >
+                              {refreshingSku === item.sku
+                                ? <LoaderCircle size={15} className="animate-spin" />
+                                : <RefreshCw size={15} />}
+                            </button>
+                          </span>
                         </div>
                       ))
                     ) : (
-                      <p className="sku-status-empty">Nenhum SKU no banco local.</p>
+                      <p className="sku-status-empty">
+                        {skuStatusItems.length ? "Nenhum SKU encontrado." : "Nenhum SKU no banco local."}
+                      </p>
                     )}
                   </div>
                 </div>

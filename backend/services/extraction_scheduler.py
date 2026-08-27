@@ -4,12 +4,11 @@ from datetime import datetime, timedelta, timezone
 
 from database import SessionLocal
 from models.product import ExtractionSchedule, KnownSku
-from services.scraper_service import run_all_scrapers
+from services.extraction_queue import enqueue_extraction_job
 
 
 LOCAL_TIMEZONE = timezone(timedelta(hours=-3), name="America/Sao_Paulo")
 SCHEDULER_INTERVAL_SECONDS = 30
-SKU_PAUSE_SECONDS = 0.5
 
 _started = False
 _start_lock = threading.Lock()
@@ -95,36 +94,24 @@ def _known_skus():
         db.close()
 
 
-def _record_completion(run_key, completed_at):
-    db = SessionLocal()
-    try:
-        schedule = db.query(ExtractionSchedule).filter(ExtractionSchedule.id == 1).first()
-        if not schedule:
-            return
-        schedule.last_run_key = run_key
-        schedule.last_run = completed_at
-        db.commit()
-    finally:
-        db.close()
-
-
 def _run_cycle(postal_code, run_key, force_refresh):
     skus = _known_skus()
-    print(f" LOG: Agendamento iniciado para {len(skus)} SKUs.")
-    if force_refresh:
-        for index, sku in enumerate(skus, start=1):
-            db = SessionLocal()
-            try:
-                run_all_scrapers(sku, db, postal_code=postal_code, scope="all")
-            except Exception as exc:
-                db.rollback()
-                print(f" WARNING: Agendamento falhou para {sku}: {exc}")
-            finally:
-                db.close()
-            if index < len(skus):
-                time.sleep(SKU_PAUSE_SECONDS)
-    _record_completion(run_key, datetime.utcnow())
-    print(" LOG: Agendamento concluido.")
+    if not skus:
+        return None
+    job = enqueue_extraction_job(
+        skus,
+        kind="scheduled",
+        force_refresh=force_refresh,
+        refresh_if_stale=False,
+        postal_code=postal_code,
+        scope="all",
+        schedule_run_key=run_key,
+    )
+    print(
+        f" LOG: Agendamento enfileirado para {len(skus)} SKUs "
+        f"no job {job['id']}."
+    )
+    return job
 
 
 def _tick():
@@ -152,7 +139,7 @@ def start_extraction_scheduler():
         _started = True
         thread = threading.Thread(
             target=_scheduler_loop,
-            name="neveprice-extraction-scheduler",
+            name="nevetrack-extraction-scheduler",
             daemon=True,
         )
         thread.start()

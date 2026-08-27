@@ -1,7 +1,8 @@
 from urllib.parse import urlencode, urljoin
 
-import requests
 from cachetools import TTLCache, cached
+
+from services.http_client import create_resilient_session
 
 ALGOLIA_APP_ID = "1CF3ZT43ZU"
 ALGOLIA_API_KEY = "28e054533dcdd3d71379fc3f38e78f1e"
@@ -18,6 +19,7 @@ REGION_KEYS = (
 )
 
 cache = TTLCache(maxsize=100, ttl=900)
+session = create_resilient_session()
 
 
 def _headers():
@@ -103,7 +105,7 @@ def scrape_leroy(product_query: str):
     payload = {"requests": [{"indexName": ALGOLIA_INDEX, "params": params}]}
 
     try:
-        response = requests.post(
+        response = session.post(
             ALGOLIA_URL,
             headers=_headers(),
             json=payload,

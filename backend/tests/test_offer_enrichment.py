@@ -10,7 +10,7 @@ from services.offer_enrichment import (
     _parse_payment_details,
     normalize_postal_code,
 )
-from services.scraper_service import _price_detail_values
+from services.scraper_service import _merge_cached_offer_details, _price_detail_values
 
 
 class OfferEnrichmentTests(unittest.TestCase):
@@ -72,6 +72,26 @@ class OfferEnrichmentTests(unittest.TestCase):
             details["logistics_captured_at"],
             datetime(2026, 8, 19, 12, 0),
         )
+
+    def test_fresh_response_keeps_known_logistics_when_source_omits_them(self):
+        url = "https://example.com/produto?tracking=1"
+        cached = {
+            "https://example.com/produto": {
+                "url": url,
+                "shipping_cost": 12.5,
+                "delivery_min_days": 2,
+                "delivery_max_days": 4,
+                "is_cached": True,
+            }
+        }
+        merged = _merge_cached_offer_details(
+            {"url": url, "price": 100, "shipping_cost": None, "_bucket": "store"},
+            cached,
+        )
+        self.assertEqual(merged["shipping_cost"], 12.5)
+        self.assertEqual(merged["delivery_max_days"], 4)
+        self.assertEqual(merged["_bucket"], "store")
+        self.assertNotIn("is_cached", merged)
 
 
 if __name__ == "__main__":

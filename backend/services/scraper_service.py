@@ -1,7 +1,9 @@
+import os
 import re
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from threading import BoundedSemaphore
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy.orm import Session
@@ -13,9 +15,18 @@ from scrapers.comparison import (
 )
 from services.store_registry import STORE_BY_LABEL, TARGET_STORES
 from services.offer_enrichment import enrich_offers, normalize_postal_code
+from services.bing_shopping import search_bing_shopping
 
-STORE_ITEM_LIMIT = 50
+STORE_ITEM_LIMIT = 100
 CATALOG_ROW_LIMIT = 30
+DETAIL_ENRICHMENT_LIMIT = 160
+
+try:
+    MAX_PARALLEL_SKUS = int(os.getenv("NEVETRACK_MAX_PARALLEL_SKUS", "2"))
+except (TypeError, ValueError):
+    MAX_PARALLEL_SKUS = 2
+MAX_PARALLEL_SKUS = min(3, max(1, MAX_PARALLEL_SKUS))
+SCRAPE_SLOTS = BoundedSemaphore(MAX_PARALLEL_SKUS)
 
 KNOWN_SKUS = {
     "W10866791",
@@ -985,6 +996,26 @@ def _append_discovered_store_payloads(store_payloads, available_results):
     return store_payloads
 
 
+def _source_health(store_payloads):
+    return [
+        {
+            "key": store.get("key"),
+            "label": store.get("label"),
+            "status": (
+                "cached"
+                if store.get("available") and store.get("message") == "Cache local"
+                else "available"
+                if store.get("available")
+                else "empty"
+            ),
+            "offer_count": len(store.get("products") or []),
+            "cadence": store.get("cadence"),
+            "message": store.get("message"),
+        }
+        for store in store_payloads
+    ]
+
+
 def build_summary_from_cached_results(available_results, product_query):
     store_payloads = []
 
@@ -1035,6 +1066,7 @@ def build_summary_from_cached_results(available_results, product_query):
         "results": available_results,
         "stores": store_payloads,
         "comparison": _build_comparison_rows(available_results, product_query),
+        "source_health": _source_health(store_payloads),
     }
 
 
@@ -1263,7 +1295,43 @@ def _run_store_scrapers(store_config, product_query):
     )
 
 
-def run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="all"):
+def _merge_cached_offer_details(item, cached_lookup):
+    cached_item = cached_lookup.get(_offer_url_identity(item.get("url") or ""))
+    if not cached_item:
+        return item
+
+    merged = {**item}
+    for field in OFFER_DETAIL_FIELDS:
+        if field == "is_cached":
+            continue
+        if merged.get(field) is None and cached_item.get(field) is not None:
+            merged[field] = cached_item[field]
+    return merged
+
+
+def _interleave_store_items(raw_by_store, discovered_items):
+    buckets = [
+        [
+            {**item, "_bucket": store_key}
+            for item in store_items
+        ]
+        for store_key, store_items in raw_by_store.items()
+        if store_items
+    ]
+    if discovered_items:
+        buckets.append(
+            [{**item, "_bucket": "_discovered"} for item in discovered_items]
+        )
+
+    interleaved = []
+    for index in range(max((len(bucket) for bucket in buckets), default=0)):
+        for bucket in buckets:
+            if index < len(bucket):
+                interleaved.append(bucket[index])
+    return interleaved
+
+
+def _run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="all"):
     postal_code = normalize_postal_code(postal_code)
     scope = scope if scope in {"all", "sites", "retail"} else "all"
     print(f" LOG: Iniciando buscas gratuitas para '{product_query}' ({scope})")
@@ -1273,8 +1341,9 @@ def run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="a
         for store in TARGET_STORES
         if scope == "all" or store.get("scope") == scope
     ]
-    worker_count = min(8, max(1, len(selected_stores) + 1))
+    worker_count = min(8, max(1, len(selected_stores) + 2))
     comparison_items = []
+    bing_shopping_items = []
 
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         store_futures = {
@@ -1284,6 +1353,11 @@ def run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="a
         }
         comparison_future = (
             executor.submit(scrape_comparison_offers, product_query)
+            if scope in {"all", "retail"}
+            else None
+        )
+        bing_shopping_future = (
+            executor.submit(search_bing_shopping, product_query)
             if scope in {"all", "retail"}
             else None
         )
@@ -1301,9 +1375,19 @@ def run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="a
             except Exception as exc:
                 print(f" WARNING: Comparadores falharam: {exc}")
 
+        if bing_shopping_future:
+            try:
+                bing_shopping_items = bing_shopping_future.result()
+                print(
+                    " LOG: Bing Shopping retornou "
+                    f"{len(bing_shopping_items)} itens."
+                )
+            except Exception as exc:
+                print(f" WARNING: Bing Shopping falhou: {exc}")
+
     discovered_items = []
     selected_store_keys = {store["key"] for store in selected_stores}
-    for item in comparison_items:
+    for item in [*comparison_items, *bing_shopping_items]:
         store = STORE_BY_LABEL.get(item.get("source"))
         normalized = _normalize_result(
             item,
@@ -1317,16 +1401,30 @@ def run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="a
                 discovered_items.append(normalized)
 
     query_sku = _primary_sku(product_query)
+    cached_by_store = {store["key"]: [] for store in TARGET_STORES}
+    cached_discovered = []
+    cached_detail_lookup = {}
     if query_sku:
-        tagged_items = []
-        for store_key, items in raw_by_store.items():
-            tagged_items.extend({**item, "_bucket": store_key} for item in items)
-        tagged_items.extend({**item, "_bucket": "_discovered"} for item in discovered_items)
-        enriched = enrich_offers(tagged_items[:120], postal_code)
-        enriched.extend(tagged_items[120:])
+        cached_by_store = _cached_sku_items_by_store(db, query_sku)
+        cached_discovered = _cached_discovered_sku_items(db, query_sku)
+        cached_items = [
+            item
+            for store_items in cached_by_store.values()
+            for item in store_items
+        ] + cached_discovered
+        cached_detail_lookup = {
+            _offer_url_identity(item["url"]): item for item in cached_items
+        }
+        tagged_items = _interleave_store_items(raw_by_store, discovered_items)
+        enriched = enrich_offers(
+            tagged_items[:DETAIL_ENRICHMENT_LIMIT],
+            postal_code,
+        )
+        enriched.extend(tagged_items[DETAIL_ENRICHMENT_LIMIT:])
         raw_by_store = {store["key"]: [] for store in TARGET_STORES}
         discovered_items = []
-        for item in enriched:
+        for enriched_item in enriched:
+            item = _merge_cached_offer_details(enriched_item, cached_detail_lookup)
             bucket = item.pop("_bucket", "_discovered")
             if bucket == "_discovered":
                 discovered_items.append(item)
@@ -1343,13 +1441,12 @@ def run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="a
     ]
     fresh_results.extend(fresh_discovered)
     if query_sku:
-        cached_by_store = _cached_sku_items_by_store(db, query_sku)
         for store in TARGET_STORES:
             if not raw_by_store[store["key"]]:
                 raw_by_store[store["key"]] = cached_by_store[store["key"]]
 
         fresh_identities = {_offer_url_identity(item["url"]) for item in fresh_discovered}
-        for cached_item in _cached_discovered_sku_items(db, query_sku):
+        for cached_item in cached_discovered:
             if _offer_url_identity(cached_item["url"]) not in fresh_identities:
                 discovered_items.append(cached_item)
 
@@ -1409,5 +1506,16 @@ def run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="a
         "results": available_results,
         "stores": store_payloads,
         "comparison": comparison_rows,
+        "source_health": _source_health(store_payloads),
         "scope": scope,
     }
+
+
+def run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="all"):
+    with SCRAPE_SLOTS:
+        return _run_all_scrapers(
+            product_query,
+            db,
+            postal_code=postal_code,
+            scope=scope,
+        )
