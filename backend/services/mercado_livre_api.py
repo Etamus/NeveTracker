@@ -31,7 +31,10 @@ def search_mercado_livre(product_query: str):
             "Accept": "application/json",
             "Accept-Language": "pt-BR,pt;q=0.9",
         }
+        api_enabled = os.getenv("MERCADO_LIVRE_API_ENABLED", "true").strip().lower()
         access_token = os.getenv("MERCADO_LIVRE_ACCESS_TOKEN", "").strip()
+        if api_enabled in {"0", "false", "no", "off"}:
+            access_token = ""
         if access_token:
             headers["Authorization"] = f"Bearer {access_token}"
 

@@ -139,7 +139,7 @@ def start_extraction_scheduler():
         _started = True
         thread = threading.Thread(
             target=_scheduler_loop,
-            name="nevetrack-extraction-scheduler",
+            name="nevetracker-extraction-scheduler",
             daemon=True,
         )
         thread.start()

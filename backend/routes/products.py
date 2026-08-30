@@ -1039,7 +1039,7 @@ def export_analytics(payload: AnalyticsExportRequest):
 
     workbook = build_analytics_workbook(payload)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M")
-    filename = f"nevetrack-analytics-{timestamp}.xlsx"
+    filename = f"nevetracker-analytics-{timestamp}.xlsx"
     return StreamingResponse(
         workbook,
         media_type=(

@@ -176,6 +176,47 @@ export interface AuthUsersResponse {
   items: AuthUser[];
 }
 
+export type IntegrationProviderKey =
+  | "bright_data"
+  | "apify"
+  | "serper"
+  | "dataforseo"
+  | "searchapi"
+  | "mercado_livre";
+
+export interface IntegrationProviderSettings {
+  provider: IntegrationProviderKey;
+  label: string;
+  description: string;
+  category: "discovery" | "store";
+  credential_label: string;
+  credential_url: string;
+  enabled: boolean;
+  configured: boolean;
+  has_api_key: boolean;
+  api_key_masked?: string | null;
+  usage_mode: "fallback" | "always";
+  supports_usage_mode: boolean;
+  supports_limit: boolean;
+  max_results: number;
+  quota: {
+    limit: number | null;
+    used: number;
+    remaining: number | null;
+    unit: string;
+    period: "monthly" | "lifetime" | "unmetered";
+    period_key?: string | null;
+    hard_locked: boolean;
+  };
+  zone?: string;
+  actor_id?: string;
+  login?: string;
+}
+
+export interface IntegrationSettingsResponse {
+  items: IntegrationProviderSettings[];
+}
+
 export interface SkuImportResponse {
   filename: string;
   imported_count: number;

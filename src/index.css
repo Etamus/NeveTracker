@@ -1578,6 +1578,18 @@ svg.animate-spin {
   overflow: hidden;
 }
 
+.workspace-dialog--settings {
+  width: min(620px, 100%);
+}
+
+.workspace-dialog--integrations {
+  width: min(880px, 100%);
+  height: min(760px, calc(100vh - 40px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .workspace-dialog--sku-selector {
   width: min(580px, 100%);
   height: min(660px, calc(100vh - 40px));
@@ -2141,6 +2153,156 @@ svg.animate-spin {
 
 .settings-section--logistics {
   grid-area: logistics;
+}
+
+.integration-loading {
+  display: flex;
+  min-height: 64px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.integration-modal-body {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  margin-top: 20px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.integration-group {
+  padding: 16px;
+}
+
+.integration-group + .integration-group {
+  border-top: 1px solid var(--border);
+}
+
+.integration-group__head {
+  margin-bottom: 8px;
+}
+
+.integration-group__head h3 {
+  margin: 0;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.integration-list {
+  display: grid;
+}
+
+.integration-provider {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+  padding: 15px 0;
+}
+
+.integration-provider:first-child {
+  border-top: 0;
+  padding-top: 2px;
+}
+
+.integration-provider:last-child {
+  padding-bottom: 2px;
+}
+
+.integration-provider__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.integration-provider__head > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.integration-provider__head strong {
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.integration-provider__title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.integration-provider__title strong,
+.integration-provider__title a {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+}
+
+.integration-provider__title a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.integration-provider__title a:hover {
+  color: var(--foreground);
+}
+
+.integration-provider__head > div > span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.integration-provider__head > div > .integration-quota {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 5px;
+  margin-top: 3px;
+  color: var(--success-foreground, #18794e);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.integration-provider__head > div > .integration-quota--locked {
+  color: var(--danger, #b42318);
+}
+
+.integration-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.integration-provider--store .integration-fields {
+  grid-template-columns: minmax(220px, 340px);
+}
+
+.workspace-dialog--integrations .settings-field input,
+.workspace-dialog--integrations .settings-field select {
+  height: 38px;
+  font-size: 12px;
+}
+
+.integration-modal-footer {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  margin-top: 16px;
 }
 
 .settings-section--appearance .settings-grid,
@@ -3336,6 +3498,7 @@ svg.animate-spin {
   .filter-popover { left: 0; right: auto; }
   .workspace-dialog { max-height: calc(100vh - 24px); padding: 18px; }
   .workspace-dialog--wide { height: calc(100vh - 24px); }
+  .workspace-dialog--integrations { height: calc(100vh - 24px); }
   .settings-grid {
     grid-template-columns: 1fr;
   }
@@ -3350,6 +3513,10 @@ svg.animate-spin {
     align-items: stretch;
     flex-direction: column;
   }
+  .integration-fields { grid-template-columns: 1fr; }
+  .integration-provider--store .integration-fields { grid-template-columns: 1fr; }
+  .integration-provider__head { align-items: flex-start; }
+  .integration-modal-footer .button-primary { width: 100%; }
   .extraction-tabs { grid-template-columns: 1fr; }
   .extraction-job-card__meta {
     align-items: flex-start;

@@ -1,6 +1,6 @@
-# NeveTrack
+# NeveTracker
 
-NeveTrack é uma aplicação local para análise e comparação de preços de peças, SKUs e produtos em múltiplas fontes. O projeto combina um frontend React/Vite com um backend Python/FastAPI, banco SQLite local e dashboards de análise orientados pela IA **NeveAI**.
+NeveTracker é uma aplicação local para análise e comparação de preços de peças, SKUs e produtos em múltiplas fontes. O projeto combina um frontend React/Vite com um backend Python/FastAPI, banco SQLite local e dashboards de análise orientados pela IA **NeveAI**.
 
 O foco atual do sistema é comparar ofertas por **lojistas reais** sempre que a fonte permite, em vez de tratar apenas marketainel de preços por item e tabelas comparativas por marketplace/fonte.
 
@@ -29,7 +29,7 @@ O foco atual do sistema é comparar ofertas por **lojistas reais** sempre que a 
 ## Estrutura
 
 ```text
-NeveTrack/
+NeveTracker/
 ├── backend/              # FastAPI, SQLAlchemy, scrapers e SQLite local
 ├── components/           # Componentes React da interface
 ├── models/               # Tipos TypeScript compartilhados no frontend
@@ -89,6 +89,11 @@ O projeto trabalha com as seguintes fontes:
 - ComClick
 - Bing Shopping (fallback sem chave)
 - DuckDuckGo para descoberta de páginas de produto (fallback sem chave)
+- Bright Data SERP API (opcional, com chave e controle de consumo)
+- Apify Google Shopping Actor (opcional, com token e controle de consumo)
+- Serper Google Shopping (opcional, com chave e cota gratuita)
+- DataForSEO Merchant API (opcional, pay-as-you-go)
+- SearchAPI Google Shopping + Amazon Brasil (opcional, com chave)
 
 As fontes são gratuitas e podem bloquear, limitar ou omitir informações em alguns momentos. Quando não é possível obter o nome real do lojista, o sistema usa o melhor identificador gratuito disponível, como ID de anúncio, seller ID ou origem da oferta.
 
@@ -171,15 +176,59 @@ Backend:
 ```text
 DATABASE_URL=sqlite:///precos.db
 MERCADO_LIVRE_ACCESS_TOKEN=
-NEVETRACK_MAX_PARALLEL_SKUS=2
-NEVETRACK_QUEUE_SKU_PAUSE_SECONDS=0.75
-NEVETRACK_QUEUE_BATCH_PAUSE_SECONDS=5
+NEVETRACKER_MAX_PARALLEL_SKUS=2
+NEVETRACKER_QUEUE_SKU_PAUSE_SECONDS=0.75
+NEVETRACKER_QUEUE_BATCH_PAUSE_SECONDS=5
+NEVETRACKER_EXTERNAL_FALLBACK_MIN_RESULTS=8
+BRIGHT_DATA_ENABLED=false
+BRIGHT_DATA_API_KEY=
+BRIGHT_DATA_SERP_ZONE=
+BRIGHT_DATA_USAGE_MODE=fallback
+BRIGHT_DATA_MAX_RESULTS=20
+APIFY_ENABLED=false
+APIFY_API_TOKEN=
+APIFY_ACTOR_ID=damilo/google-shopping-apify
+APIFY_USAGE_MODE=fallback
+APIFY_MAX_RESULTS=20
+SERPER_ENABLED=false
+SERPER_API_KEY=
+SERPER_USAGE_MODE=fallback
+SERPER_MAX_RESULTS=20
+DATAFORSEO_ENABLED=false
+DATAFORSEO_LOGIN=
+DATAFORSEO_PASSWORD=
+DATAFORSEO_USAGE_MODE=fallback
+DATAFORSEO_MAX_RESULTS=20
+SEARCHAPI_ENABLED=false
+SEARCHAPI_API_KEY=
+SEARCHAPI_USAGE_MODE=fallback
+SEARCHAPI_MAX_RESULTS=20
+MERCADO_LIVRE_API_ENABLED=false
 ```
 
 Se `DATABASE_URL` não for informado, o backend usa automaticamente `backend/precos.db`.
 O token do Mercado Livre é opcional; quando informado, habilita a API oficial autenticada antes dos fallbacks gratuitos.
 Os fallbacks de Bing Shopping e DuckDuckGo não exigem configuração ou chave. Eles passam pelas mesmas validações de SKU e não substituem Mercado Livre, lojas diretas, Buscapé ou Zoom.
 As variáveis da fila são opcionais. Os padrões limitam a duas pesquisas de SKU simultâneas, aguardam 0,75 segundo entre SKUs e fazem uma pausa de 5 segundos a cada lote de 30.
+
+Administradores podem configurar todos os conectores em `Usuario > Integracoes`. As credenciais sao salvas apenas em `backend/.env`, ficam fora do Git e nunca retornam completas para o frontend. No modo `Completar lacunas`, a fonte de descoberta so e chamada quando falta alguma loja-alvo ou quando as fontes gratuitas retornam menos ofertas que o limite de fallback. No modo `Toda extracao`, ela e chamada em cada atualizacao com APIs. O limite de resultados e aplicado por SKU e por provedor.
+
+O token do Mercado Livre alimenta somente a API oficial dessa loja. A SearchAPI consulta Google Shopping, expande até dois produtos em ofertas diretas por lojista e também pesquisa a Amazon Brasil; por isso pode consumir até quatro consultas por SKU. APIs oficiais de seller da Amazon, Magalu e Shopee não são usadas para inteligência competitiva porque restringem a consulta ao catálogo autorizado da própria conta.
+
+### Protecao obrigatoria das cotas gratuitas
+
+Toda chamada paga em potencial passa primeiro por uma reserva atomica no arquivo local `backend/provider_quota.db`. Se nao houver saldo gratuito suficiente, o backend bloqueia a chamada antes de acessar o provedor. O contador e compartilhado entre filas e processos, persiste entre reinicializacoes e nao e estornado em falhas ou timeouts, pois uma tentativa pode ser faturada mesmo sem retornar dados.
+
+| Provedor | Trava local | Renovacao |
+| --- | ---: | --- |
+| Bright Data | 5.000 requisicoes | Mensal |
+| Apify | 1.400 resultados (ate US$ 4,90 no Actor padrao) | Mensal |
+| Serper | 2.500 consultas | Vitalicia |
+| DataForSEO | 1.000 itens reservados (ate US$ 1 de teste) | Vitalicia |
+| SearchAPI | 100 consultas | Vitalicia |
+| Mercado Livre | Sem tarifa de uso publicada | Nao se aplica |
+
+O saldo aparece em `Usuario > Integracoes`. As cotas vitalicias nao podem ser reiniciadas pela interface. Para contas que ja tenham sido usadas fora do NeveTracker, confirme o consumo anterior no painel do provedor antes de ativar a chave: a trava controla integralmente o que o NeveTracker consome, mas nao enxerga chamadas feitas por outros sistemas com a mesma credencial.
 
 ## Endpoints Principais
 
@@ -204,6 +253,8 @@ POST /auth/logout
 GET /auth/me
 GET|POST /auth/users
 PATCH|DELETE /auth/users/{id}
+GET /integrations
+PUT /integrations/{provider}
 ```
 
 A busca retorna:

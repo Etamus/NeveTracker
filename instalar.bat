@@ -4,7 +4,7 @@ setlocal EnableExtensions
 set "INSTALLER=%~dp0scripts\install.ps1"
 if not exist "%INSTALLER%" (
   echo ERRO: Instalador nao encontrado em "%INSTALLER%".
-  if not defined NEVETRACK_NO_PAUSE pause
+  if not defined NEVETRACKER_NO_PAUSE pause
   exit /b 1
 )
 
@@ -14,7 +14,7 @@ set "EXIT_CODE=%ERRORLEVEL%"
 if not "%EXIT_CODE%"=="0" (
   echo.
   echo A instalacao nao foi concluida. Consulte .logs\install.log.
-  if not defined NEVETRACK_NO_PAUSE pause
+  if not defined NEVETRACKER_NO_PAUSE pause
 )
 
 exit /b %EXIT_CODE%

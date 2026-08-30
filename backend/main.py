@@ -8,6 +8,7 @@ import models.auth  # noqa: F401
 from database import Base, SessionLocal, engine
 from models.product import KnownSku
 from routes.auth import auth_router
+from routes.integrations import integration_router
 from routes.products import process_extraction_queue_item, product_router
 from services.auth_service import ensure_owner_user
 from services.extraction_queue import (
@@ -147,7 +148,7 @@ _seed_known_skus()
 with SessionLocal() as auth_db:
     ensure_owner_user(auth_db)
 
-app = FastAPI(title="NeveTrack")
+app = FastAPI(title="NeveTracker")
 
 origins = [
     "https://hudok139.github.io",
@@ -166,6 +167,11 @@ app.add_middleware(
 
 app.include_router(product_router, prefix="/products", tags=["Products"])
 app.include_router(auth_router, prefix="/auth", tags=["Auth"])
+app.include_router(
+    integration_router,
+    prefix="/integrations",
+    tags=["Integrations"],
+)
 
 
 @app.on_event("startup")

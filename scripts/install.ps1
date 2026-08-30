@@ -256,7 +256,7 @@ try {
     New-Item -ItemType Directory -Path $InstallLock -Force | Out-Null
     $lockCreated = $true
 
-    Write-Step "=== NeveTrack: instalacao e reparo ==="
+    Write-Step "=== NeveTracker: instalacao e reparo ==="
     if (-not (Test-Path -LiteralPath (Join-Path $BackendDir "main.py"))) { throw "Backend nao encontrado." }
     if (-not (Test-Path -LiteralPath (Join-Path $Root "package.json"))) { throw "Frontend nao encontrado." }
 

@@ -271,9 +271,9 @@ def build_analytics_workbook(payload):
     _write_stores_sheet(workbook, payload.rows)
     _write_offers_sheet(workbook, payload.rows)
 
-    workbook.properties.title = "NeveTrack Analytics"
+    workbook.properties.title = "NeveTracker Analytics"
     workbook.properties.subject = payload.query or "Dados de analytics e lojistas"
-    workbook.properties.creator = "NeveTrack"
+    workbook.properties.creator = "NeveTracker"
     workbook.properties.created = datetime.now()
 
     buffer = BytesIO()

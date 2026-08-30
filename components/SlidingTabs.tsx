@@ -1621,7 +1621,7 @@ const MarketAnalytics = ({
 
       const blob = await response.blob();
       const disposition = response.headers.get("Content-Disposition") || "";
-      const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || "nevetrack-analytics.xlsx";
+      const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || "nevetracker-analytics.xlsx";
       const downloadUrl = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = downloadUrl;

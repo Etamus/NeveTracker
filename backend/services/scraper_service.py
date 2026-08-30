@@ -13,16 +13,18 @@ from scrapers.comparison import (
     scrape_comparison_offers,
     scrape_target_catalog,
 )
-from services.store_registry import STORE_BY_LABEL, TARGET_STORES
+from services.store_registry import STORE_BY_LABEL, TARGET_STORES, find_target_store
 from services.offer_enrichment import enrich_offers, normalize_postal_code
 from services.bing_shopping import search_bing_shopping
+from services.external_market_providers import run_external_market_provider
+from services.integration_settings import get_search_provider_names, should_run_provider
 
 STORE_ITEM_LIMIT = 100
 CATALOG_ROW_LIMIT = 30
 DETAIL_ENRICHMENT_LIMIT = 160
 
 try:
-    MAX_PARALLEL_SKUS = int(os.getenv("NEVETRACK_MAX_PARALLEL_SKUS", "2"))
+    MAX_PARALLEL_SKUS = int(os.getenv("NEVETRACKER_MAX_PARALLEL_SKUS", "2"))
 except (TypeError, ValueError):
     MAX_PARALLEL_SKUS = 2
 MAX_PARALLEL_SKUS = min(3, max(1, MAX_PARALLEL_SKUS))
@@ -1344,6 +1346,7 @@ def _run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="
     worker_count = min(8, max(1, len(selected_stores) + 2))
     comparison_items = []
     bing_shopping_items = []
+    external_provider_runs = []
 
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         store_futures = {
@@ -1385,10 +1388,63 @@ def _run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="
             except Exception as exc:
                 print(f" WARNING: Bing Shopping falhou: {exc}")
 
+    if scope in {"all", "retail"}:
+        current_offer_count = (
+            sum(len(items) for items in raw_by_store.values())
+            + len(comparison_items)
+            + len(bing_shopping_items)
+        )
+        found_store_keys = {
+            store_key
+            for store_key, items in raw_by_store.items()
+            if items
+        }
+        for discovered_item in [*comparison_items, *bing_shopping_items]:
+            discovered_store = find_target_store(
+                discovered_item.get("source"),
+                discovered_item.get("store"),
+                discovered_item.get("url"),
+            )
+            if discovered_store:
+                found_store_keys.add(discovered_store["key"])
+        missing_store_count = len(
+            {store["key"] for store in selected_stores} - found_store_keys
+        )
+        external_providers = [
+            provider
+            for provider in get_search_provider_names()
+            if should_run_provider(
+                provider,
+                current_offer_count,
+                missing_store_count,
+            )
+        ]
+        if external_providers:
+            with ThreadPoolExecutor(max_workers=len(external_providers)) as executor:
+                provider_futures = {
+                    executor.submit(
+                        run_external_market_provider,
+                        provider,
+                        product_query,
+                    ): provider
+                    for provider in external_providers
+                }
+                for future in as_completed(provider_futures):
+                    external_provider_runs.append(future.result())
+
     discovered_items = []
     selected_store_keys = {store["key"] for store in selected_stores}
-    for item in [*comparison_items, *bing_shopping_items]:
-        store = STORE_BY_LABEL.get(item.get("source"))
+    external_items = [
+        item
+        for provider_run in external_provider_runs
+        for item in provider_run["items"]
+    ]
+    for item in [*comparison_items, *bing_shopping_items, *external_items]:
+        store = STORE_BY_LABEL.get(item.get("source")) or find_target_store(
+            item.get("source"),
+            item.get("store"),
+            item.get("url"),
+        )
         normalized = _normalize_result(
             item,
             product_query,
@@ -1501,12 +1557,22 @@ def _run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="
         f"{len(comparison_rows)} linhas comparativas, "
         f"{processed_count} precos novos/atualizados."
     )
+    provider_health = [
+        {
+            "key": provider_run["provider"],
+            "label": provider_run["label"],
+            "status": provider_run["status"],
+            "offer_count": len(provider_run["items"]),
+            "message": provider_run["message"],
+        }
+        for provider_run in external_provider_runs
+    ]
     return {
         "processed_count": processed_count,
         "results": available_results,
         "stores": store_payloads,
         "comparison": comparison_rows,
-        "source_health": _source_health(store_payloads),
+        "source_health": [*_source_health(store_payloads), *provider_health],
         "scope": scope,
     }
 

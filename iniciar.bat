@@ -4,7 +4,7 @@ setlocal EnableExtensions
 set "STARTER=%~dp0scripts\start.ps1"
 if not exist "%STARTER%" (
   echo ERRO: Inicializador nao encontrado em "%STARTER%".
-  if not defined NEVETRACK_NO_PAUSE pause
+  if not defined NEVETRACKER_NO_PAUSE pause
   exit /b 1
 )
 
@@ -13,8 +13,8 @@ set "EXIT_CODE=%ERRORLEVEL%"
 
 if not "%EXIT_CODE%"=="0" (
   echo.
-  echo O NeveTrack nao iniciou. Consulte os arquivos da pasta .logs.
-  if not defined NEVETRACK_NO_PAUSE pause
+  echo O NeveTracker nao iniciou. Consulte os arquivos da pasta .logs.
+  if not defined NEVETRACKER_NO_PAUSE pause
 )
 
 exit /b %EXIT_CODE%

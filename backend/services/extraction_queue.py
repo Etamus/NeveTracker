@@ -29,10 +29,10 @@ def _bounded_env_float(name, default, minimum, maximum):
 
 
 SKU_PAUSE_SECONDS = _bounded_env_float(
-    "NEVETRACK_QUEUE_SKU_PAUSE_SECONDS", 0.75, 0.25, 5.0
+    "NEVETRACKER_QUEUE_SKU_PAUSE_SECONDS", 0.75, 0.25, 5.0
 )
 BATCH_PAUSE_SECONDS = _bounded_env_float(
-    "NEVETRACK_QUEUE_BATCH_PAUSE_SECONDS", 5.0, 1.0, 60.0
+    "NEVETRACKER_QUEUE_BATCH_PAUSE_SECONDS", 5.0, 1.0, 60.0
 )
 
 _processor = None
@@ -538,7 +538,7 @@ def start_extraction_queue():
         _started = True
         thread = threading.Thread(
             target=_worker_loop,
-            name="nevetrack-extraction-queue",
+            name="nevetracker-extraction-queue",
             daemon=True,
         )
         thread.start()

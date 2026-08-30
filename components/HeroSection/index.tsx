@@ -9,14 +9,17 @@ import {
   Download,
   Eye,
   EyeOff,
+  ExternalLink,
   FileDown,
   Grid2X2,
+  KeyRound,
   ListChecks,
   LoaderCircle,
   LogOut,
   PackageSearch,
   PanelLeftClose,
   PanelLeftOpen,
+  Plug,
   RefreshCw,
   Search,
   Settings,
@@ -34,6 +37,8 @@ import type {
   AuthUser,
   AuthUsersResponse,
   ExtractionJob,
+  IntegrationProviderSettings,
+  IntegrationSettingsResponse,
   SkuBatchResult,
   SkuImportResponse,
   SkuStatusItem,
@@ -50,24 +55,28 @@ import {
   type InterfacePreferences,
 } from "../../src/preferences";
 
-const AUTH_TOKEN_STORAGE_KEY = "nevetrack-auth-token";
-const THEME_STORAGE_KEY = "nevetrack-theme";
-const SCHEDULE_STORAGE_KEY = "nevetrack-extraction-schedule";
-const EXTRACTION_JOB_STORAGE_KEY = "nevetrack-active-extraction-job";
-const PREVIOUS_STORAGE_PREFIX = ["neve", "price"].join("");
-const PREVIOUS_AUTH_TOKEN_STORAGE_KEY = `${PREVIOUS_STORAGE_PREFIX}-auth-token`;
-const PREVIOUS_AUTH_USER_STORAGE_KEY = `${PREVIOUS_STORAGE_PREFIX}-auth-user`;
-const PREVIOUS_THEME_STORAGE_KEY = `${PREVIOUS_STORAGE_PREFIX}-theme`;
-const PREVIOUS_SCHEDULE_STORAGE_KEY = `${PREVIOUS_STORAGE_PREFIX}-extraction-schedule`;
+const AUTH_TOKEN_STORAGE_KEY = "nevetracker-auth-token";
+const THEME_STORAGE_KEY = "nevetracker-theme";
+const SCHEDULE_STORAGE_KEY = "nevetracker-extraction-schedule";
+const EXTRACTION_JOB_STORAGE_KEY = "nevetracker-active-extraction-job";
+const LEGACY_STORAGE_PREFIXES = [
+  ["neve", "track"].join(""),
+  ["neve", "price"].join(""),
+];
+const legacyStorageKeys = (suffix: string) =>
+  LEGACY_STORAGE_PREFIXES.map((prefix) => `${prefix}-${suffix}`);
 
-const readMigratedStorageValue = (key: string, previousKey: string) => {
+const readMigratedStorageValue = (key: string, previousKeys: string[]) => {
   const currentValue = window.localStorage.getItem(key);
   if (currentValue !== null) return currentValue;
-  const previousValue = window.localStorage.getItem(previousKey);
-  if (previousValue === null) return null;
-  window.localStorage.setItem(key, previousValue);
-  window.localStorage.removeItem(previousKey);
-  return previousValue;
+  for (const previousKey of previousKeys) {
+    const previousValue = window.localStorage.getItem(previousKey);
+    if (previousValue === null) continue;
+    window.localStorage.setItem(key, previousValue);
+    window.localStorage.removeItem(previousKey);
+    return previousValue;
+  }
+  return null;
 };
 
 const navigation = [
@@ -166,7 +175,7 @@ const defaultScheduleSettings: ScheduledExtractionSettings = {
 };
 
 const getInitialTheme = (): ThemeMode => {
-  const storedTheme = readMigratedStorageValue(THEME_STORAGE_KEY, PREVIOUS_THEME_STORAGE_KEY);
+  const storedTheme = readMigratedStorageValue(THEME_STORAGE_KEY, legacyStorageKeys("theme"));
   const initialTheme = storedTheme === "light" || storedTheme === "dark"
     ? storedTheme
     : window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
@@ -180,7 +189,7 @@ const getInitialScheduleSettings = (): ScheduledExtractionSettings => {
   try {
     const storedSettings = readMigratedStorageValue(
       SCHEDULE_STORAGE_KEY,
-      PREVIOUS_SCHEDULE_STORAGE_KEY,
+      legacyStorageKeys("extraction-schedule"),
     );
     if (!storedSettings) return defaultScheduleSettings;
 
@@ -230,7 +239,7 @@ const formatDateTime = (value?: string | null) => {
 };
 
 const getAuthToken = () =>
-  readMigratedStorageValue(AUTH_TOKEN_STORAGE_KEY, PREVIOUS_AUTH_TOKEN_STORAGE_KEY) || "";
+  readMigratedStorageValue(AUTH_TOKEN_STORAGE_KEY, legacyStorageKeys("auth-token")) || "";
 
 const authorizedHeaders = (initial?: HeadersInit) => {
   const headers = new Headers(initial);
@@ -257,6 +266,7 @@ export const HeroSection = () => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [integrationsOpen, setIntegrationsOpen] = useState(false);
   const [extractionsOpen, setExtractionsOpen] = useState(false);
   const [administrationOpen, setAdministrationOpen] = useState(false);
   const [adminEditorOpen, setAdminEditorOpen] = useState(false);
@@ -286,6 +296,11 @@ export const HeroSection = () => {
   const [scheduleStatus, setScheduleStatus] = useState("");
   const [scheduleSaving, setScheduleSaving] = useState(false);
   const [interfacePreferences, setInterfacePreferences] = useState<InterfacePreferences>(getInterfacePreferences);
+  const [integrationProviders, setIntegrationProviders] = useState<IntegrationProviderSettings[]>([]);
+  const [integrationKeys, setIntegrationKeys] = useState<Record<string, string>>({});
+  const [integrationsLoading, setIntegrationsLoading] = useState(false);
+  const [integrationsSaving, setIntegrationsSaving] = useState(false);
+  const [integrationsError, setIntegrationsError] = useState("");
   const [skuInput, setSkuInput] = useState("");
   const [forceExtraction, setForceExtraction] = useState(true);
   const [skuStatusItems, setSkuStatusItems] = useState<SkuStatusItem[]>([]);
@@ -319,7 +334,7 @@ export const HeroSection = () => {
   } = useHeroSection();
 
   useEffect(() => {
-    window.localStorage.removeItem(PREVIOUS_AUTH_USER_STORAGE_KEY);
+    legacyStorageKeys("auth-user").forEach((key) => window.localStorage.removeItem(key));
     const token = getAuthToken();
     if (!token) return;
 
@@ -347,6 +362,7 @@ export const HeroSection = () => {
       if (event.key === "Escape") {
         setLoginOpen(false);
         setSettingsOpen(false);
+        setIntegrationsOpen(false);
         setExtractionsOpen(false);
         setAdminDeleteTarget(null);
         setAdminDeleteError("");
@@ -451,6 +467,7 @@ export const HeroSection = () => {
     }
     setCurrentUser(null);
     setAccountOpen(false);
+    setIntegrationsOpen(false);
     setAdminEditorOpen(false);
     setAdministrationOpen(false);
     window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
@@ -499,10 +516,86 @@ export const HeroSection = () => {
     }
   };
 
+  const loadIntegrationSettings = async () => {
+    if (!currentUser?.is_admin) return;
+    setIntegrationsLoading(true);
+    setIntegrationsError("");
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/integrations`, {
+        headers: authorizedHeaders(),
+      });
+      const data = await response.json().catch(() => null) as IntegrationSettingsResponse | { detail?: string } | null;
+      if (!response.ok || !data || !("items" in data)) {
+        throw new Error(apiErrorMessage(data, "Não foi possível carregar as integrações."));
+      }
+      setIntegrationProviders(data.items);
+      setIntegrationKeys({});
+    } catch (error) {
+      setIntegrationsError(error instanceof Error ? error.message : "Não foi possível carregar as integrações.");
+    } finally {
+      setIntegrationsLoading(false);
+    }
+  };
+
+  const updateIntegrationProvider = (
+    provider: IntegrationProviderSettings["provider"],
+    changes: Partial<IntegrationProviderSettings>,
+  ) => {
+    setIntegrationProviders((currentProviders) => currentProviders.map((currentProvider) => (
+      currentProvider.provider === provider
+        ? { ...currentProvider, ...changes }
+        : currentProvider
+    )));
+  };
+
+  const saveIntegrationSettings = async () => {
+    if (integrationsSaving) return;
+    setIntegrationsSaving(true);
+    setIntegrationsError("");
+    try {
+      const updatedProviders: IntegrationProviderSettings[] = [];
+      for (const provider of integrationProviders) {
+        const apiKey = integrationKeys[provider.provider]?.trim();
+        const response = await fetch(`${getApiBaseUrl()}/integrations/${provider.provider}`, {
+          method: "PUT",
+          headers: authorizedHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({
+            enabled: provider.enabled,
+            usage_mode: provider.usage_mode,
+            max_results: provider.max_results,
+            zone: provider.zone,
+            actor_id: provider.actor_id,
+            login: provider.login,
+            ...(apiKey ? { api_key: apiKey } : {}),
+          }),
+        });
+        const data = await response.json().catch(() => null) as IntegrationProviderSettings | { detail?: string } | null;
+        if (!response.ok || !data || !("provider" in data)) {
+          throw new Error(apiErrorMessage(data, `Não foi possível salvar ${provider.label}.`));
+        }
+        updatedProviders.push(data);
+      }
+      setIntegrationProviders(updatedProviders);
+      setIntegrationKeys({});
+    } catch (error) {
+      setIntegrationsError(error instanceof Error ? error.message : "Não foi possível salvar as integrações.");
+    } finally {
+      setIntegrationsSaving(false);
+    }
+  };
+
   const openSettings = () => {
     setAccountOpen(false);
     setSidebarOpen(false);
     setSettingsOpen(true);
+  };
+
+  const openIntegrations = () => {
+    if (!currentUser?.is_admin) return;
+    setAccountOpen(false);
+    setSidebarOpen(false);
+    setIntegrationsOpen(true);
+    void loadIntegrationSettings();
   };
 
   const openExtractions = () => {
@@ -1098,6 +1191,10 @@ export const HeroSection = () => {
     user.id !== currentUser?.id &&
     (currentUser?.is_owner || !user.is_admin)
   );
+  const integrationGroups = [
+    { category: "discovery", title: "Descoberta de lojistas" },
+    { category: "store", title: "APIs por loja" },
+  ] as const;
 
   return (
     <div className={`app-shell ${sidebarCollapsed ? "app-shell--sidebar-collapsed" : ""}`}>
@@ -1112,7 +1209,7 @@ export const HeroSection = () => {
 
       <aside className={`app-sidebar ${sidebarOpen ? "app-sidebar--open" : ""}`}>
         <div className="flex h-16 items-center justify-start border-b border-[var(--border)] px-5">
-          <img src={theme === "dark" ? logoWhiteUrl : logoUrl} alt="NeveTrack" className="h-8 w-auto" />
+          <img src={theme === "dark" ? logoWhiteUrl : logoUrl} alt="NeveTracker" className="h-8 w-auto" />
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col px-3 py-5">
@@ -1150,6 +1247,12 @@ export const HeroSection = () => {
                   <Download size={15} />
                   Extrações
                 </button>
+                {currentUser.is_admin && (
+                  <button type="button" className="account-popover__item" onClick={openIntegrations}>
+                    <Plug size={15} />
+                    Integrações
+                  </button>
+                )}
                 {currentUser.is_admin && (
                   <button type="button" className="account-popover__item" onClick={openAdministration}>
                     <ShieldCheck size={15} />
@@ -1717,7 +1820,7 @@ export const HeroSection = () => {
       {settingsOpen && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => setSettingsOpen(false)}>
           <section
-            className="workspace-dialog"
+            className="workspace-dialog workspace-dialog--settings"
             role="dialog"
             aria-modal="true"
             aria-label="Configurações"
@@ -1827,6 +1930,180 @@ export const HeroSection = () => {
                 </div>
               </section>
 
+            </div>
+          </section>
+        </div>
+      )}
+
+      {integrationsOpen && currentUser?.is_admin && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setIntegrationsOpen(false)}>
+          <section
+            className="workspace-dialog workspace-dialog--integrations"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Integrações"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="dialog-header">
+              <div>
+                <span className="dialog-icon"><Plug size={19} /></span>
+                <h2>Integrações</h2>
+              </div>
+              <button type="button" className="icon-button" onClick={() => setIntegrationsOpen(false)} aria-label="Fechar">
+                <X size={17} />
+              </button>
+            </div>
+
+            <div className="integration-modal-body">
+              {integrationsLoading ? (
+                <div className="integration-loading">
+                  <LoaderCircle size={17} className="animate-spin" />
+                  Carregando integrações
+                </div>
+              ) : (
+                integrationGroups.map((group) => {
+                  const providers = integrationProviders.filter((provider) => provider.category === group.category);
+                  if (!providers.length) return null;
+
+                  return (
+                    <section className="integration-group" key={group.category}>
+                      <div className="integration-group__head">
+                        <h3>{group.title}</h3>
+                      </div>
+                      <div className="integration-list">
+                        {providers.map((provider) => {
+                          const extraField = provider.provider === "bright_data"
+                            ? { label: "Zona SERP", value: provider.zone || "", key: "zone" as const }
+                            : provider.provider === "apify"
+                              ? { label: "Actor ID", value: provider.actor_id || "", key: "actor_id" as const }
+                              : provider.provider === "dataforseo"
+                                ? { label: "Login", value: provider.login || "", key: "login" as const }
+                                : null;
+
+                          return (
+                            <div className={`integration-provider integration-provider--${provider.category}`} key={provider.provider}>
+                              <div className="integration-provider__head">
+                                <div>
+                                  <div className="integration-provider__title">
+                                    <strong>{provider.label}</strong>
+                                    <a
+                                      href={provider.credential_url}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      onClick={(event) => event.stopPropagation()}
+                                    >
+                                      Obter credencial
+                                      <ExternalLink size={12} aria-hidden="true" />
+                                    </a>
+                                  </div>
+                                  <span>{provider.description}</span>
+                                  <span className={`integration-quota ${provider.quota.hard_locked ? "integration-quota--locked" : ""}`}>
+                                    <ShieldCheck size={13} aria-hidden="true" />
+                                    {provider.quota.limit === null
+                                      ? "Sem cobrança por uso: nenhuma cota financeira necessária"
+                                      : provider.quota.hard_locked
+                                        ? `Cota gratuita esgotada: novas chamadas estão bloqueadas`
+                                        : `${provider.quota.remaining?.toLocaleString("pt-BR")} de ${provider.quota.limit.toLocaleString("pt-BR")} ${provider.quota.unit} disponíveis ${provider.quota.period === "monthly" ? "neste mês" : "na franquia gratuita"}`}
+                                  </span>
+                                </div>
+                                <label className="schedule-toggle">
+                                  <input
+                                    type="checkbox"
+                                    checked={provider.enabled}
+                                    onChange={(event) => updateIntegrationProvider(provider.provider, { enabled: event.target.checked })}
+                                  />
+                                  <span className="schedule-toggle__track" aria-hidden="true">
+                                    <span className="schedule-toggle__thumb" />
+                                  </span>
+                                  {provider.enabled ? "Ativo" : "Inativo"}
+                                </label>
+                              </div>
+
+                              <div className="integration-fields">
+                                <label className="settings-field integration-field--key">
+                                  <span>{provider.credential_label}</span>
+                                  <input
+                                    type="password"
+                                    autoComplete="off"
+                                    value={integrationKeys[provider.provider] || ""}
+                                    placeholder={provider.api_key_masked || "Cole a credencial"}
+                                    onChange={(event) => setIntegrationKeys((currentKeys) => ({
+                                      ...currentKeys,
+                                      [provider.provider]: event.target.value,
+                                    }))}
+                                  />
+                                </label>
+
+                                {extraField && (
+                                  <label className="settings-field integration-field--endpoint">
+                                    <span>{extraField.label}</span>
+                                    <input
+                                      value={extraField.value}
+                                      onChange={(event) => updateIntegrationProvider(provider.provider, {
+                                        [extraField.key]: event.target.value,
+                                      })}
+                                    />
+                                  </label>
+                                )}
+
+                                {provider.supports_usage_mode && (
+                                  <label className="settings-field integration-field--mode">
+                                    <span>Quando usar</span>
+                                    <div className="settings-select">
+                                      <select
+                                        value={provider.usage_mode}
+                                        onChange={(event) => updateIntegrationProvider(provider.provider, {
+                                          usage_mode: event.target.value as IntegrationProviderSettings["usage_mode"],
+                                        })}
+                                      >
+                                        <option value="fallback">Completar lacunas</option>
+                                        <option value="always">Toda extração</option>
+                                      </select>
+                                      <ChevronDown size={16} aria-hidden="true" />
+                                    </div>
+                                  </label>
+                                )}
+
+                                {provider.supports_limit && (
+                                  <label className="settings-field integration-field--limit">
+                                    <span>Resultados por SKU</span>
+                                    <div className="settings-select">
+                                      <select
+                                        value={provider.max_results}
+                                        onChange={(event) => updateIntegrationProvider(provider.provider, {
+                                          max_results: Number(event.target.value),
+                                        })}
+                                      >
+                                        {[10, 20, 30, 40, 50, 100].map((limit) => (
+                                          <option key={limit} value={limit}>{limit}</option>
+                                        ))}
+                                      </select>
+                                      <ChevronDown size={16} aria-hidden="true" />
+                                    </div>
+                                  </label>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  );
+                })
+              )}
+            </div>
+
+            {integrationsError && <p className="auth-error">{integrationsError}</p>}
+            <div className="integration-modal-footer">
+              <button
+                type="button"
+                className="button-primary"
+                onClick={() => void saveIntegrationSettings()}
+                disabled={integrationsSaving || integrationsLoading || !integrationProviders.length}
+              >
+                {integrationsSaving ? <LoaderCircle size={15} className="animate-spin" /> : <KeyRound size={15} />}
+                Salvar
+              </button>
             </div>
           </section>
         </div>

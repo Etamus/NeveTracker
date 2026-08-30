@@ -6,6 +6,7 @@ from bs4 import BeautifulSoup
 
 from services.extraction_scheduler import _due_run_key
 from services.offer_enrichment import (
+    DETAIL_CACHE,
     _jsonld_offer_details,
     _parse_payment_details,
     normalize_postal_code,
@@ -14,6 +15,9 @@ from services.scraper_service import _merge_cached_offer_details, _price_detail_
 
 
 class OfferEnrichmentTests(unittest.TestCase):
+    def setUp(self):
+        DETAIL_CACHE.clear()
+
     def test_payment_prices_and_difference(self):
         details = _parse_payment_details(
             "R$ 11,61 10% à Vista ou R$ 12,90 em 1x de R$ 12,90 sem juros",

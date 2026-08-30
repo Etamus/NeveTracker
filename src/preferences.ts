@@ -1,6 +1,9 @@
-export const INTERFACE_PREFERENCES_KEY = "nevetrack-interface-preferences";
-export const INTERFACE_PREFERENCES_EVENT = "nevetrack-interface-preferences-updated";
-const PREVIOUS_INTERFACE_PREFERENCES_KEY = `${["neve", "price"].join("")}-interface-preferences`;
+export const INTERFACE_PREFERENCES_KEY = "nevetracker-interface-preferences";
+export const INTERFACE_PREFERENCES_EVENT = "nevetracker-interface-preferences-updated";
+const PREVIOUS_INTERFACE_PREFERENCES_KEYS = [
+  `${["neve", "track"].join("")}-interface-preferences`,
+  `${["neve", "price"].join("")}-interface-preferences`,
+];
 
 export const STORE_OPTIONS = [
   { label: "Mercado Livre", aliases: ["mercado livre", "meli", "-ml", "mlb"] },
@@ -50,10 +53,12 @@ export const getInterfacePreferences = (): InterfacePreferences => {
   try {
     let storedPreferences = window.localStorage.getItem(INTERFACE_PREFERENCES_KEY);
     if (!storedPreferences) {
-      storedPreferences = window.localStorage.getItem(PREVIOUS_INTERFACE_PREFERENCES_KEY);
-      if (storedPreferences) {
+      for (const previousKey of PREVIOUS_INTERFACE_PREFERENCES_KEYS) {
+        storedPreferences = window.localStorage.getItem(previousKey);
+        if (!storedPreferences) continue;
         window.localStorage.setItem(INTERFACE_PREFERENCES_KEY, storedPreferences);
-        window.localStorage.removeItem(PREVIOUS_INTERFACE_PREFERENCES_KEY);
+        window.localStorage.removeItem(previousKey);
+        break;
       }
     }
     if (!storedPreferences) return defaultInterfacePreferences;

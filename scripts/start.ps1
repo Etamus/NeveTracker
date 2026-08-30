@@ -112,7 +112,7 @@ function Show-LogTail([string]$Path) {
 
 try {
     Write-Host ""
-    Write-Step "=== NeveTrack: inicializacao local ==="
+    Write-Step "=== NeveTracker: inicializacao local ==="
 
     if (-not (Test-ProjectReady)) {
         Write-Step "Ambiente ausente ou incompleto. Executando instalacao/reparo automatico..."
@@ -134,7 +134,7 @@ try {
 
     $frontendPort = 5173
     $frontendUrl = "http://127.0.0.1:$frontendPort"
-    $frontendAlreadyRunning = Test-HttpService "$frontendUrl/" "NeveTrack"
+    $frontendAlreadyRunning = Test-HttpService "$frontendUrl/" "NeveTracker"
     if ($backendPort -ne 8000 -and $frontendAlreadyRunning) {
         $frontendAlreadyRunning = $false
     }
@@ -184,32 +184,32 @@ try {
     }
 
     Write-Step "Aguardando frontend responder..."
-    if (-not (Wait-ForService "$frontendUrl/" "NeveTrack" 90 $frontendProcess)) {
+    if (-not (Wait-ForService "$frontendUrl/" "NeveTracker" 90 $frontendProcess)) {
         Show-LogTail (Join-Path $LogsDir "frontend.error.log")
         throw "Frontend nao respondeu em ate 90 segundos."
     }
 
     Write-Host ""
-    Write-Step "NeveTrack pronto."
+    Write-Step "NeveTracker pronto."
     Write-Host "Backend:  $backendUrl"
     Write-Host "Frontend: $frontendUrl"
     Write-Host "Logs:     $LogsDir"
 
-    if (-not $env:NEVETRACK_NO_BROWSER) {
+    if (-not $env:NEVETRACKER_NO_BROWSER) {
         try {
             Start-Process $frontendUrl
         } catch {
             Write-Step "Nao foi possivel abrir o navegador automaticamente. Acesse $frontendUrl manualmente."
         }
     }
-    if ($env:NEVETRACK_EXIT_AFTER_READY) { exit 0 }
+    if ($env:NEVETRACKER_EXIT_AFTER_READY) { exit 0 }
 
     Write-Host ""
     Write-Host "Este console permanecera aberto. Pressione Ctrl+C para encerrar os processos iniciados aqui."
     while ($true) {
         foreach ($process in $script:StartedProcesses) {
             if ($process.HasExited) {
-                throw "Um processo do NeveTrack encerrou inesperadamente (PID $($process.Id), codigo $($process.ExitCode))."
+                throw "Um processo do NeveTracker encerrou inesperadamente (PID $($process.Id), codigo $($process.ExitCode))."
             }
         }
         Start-Sleep -Seconds 2

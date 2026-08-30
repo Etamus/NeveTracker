@@ -41,6 +41,23 @@ def _headers(url, accept="text/html"):
     }
 
 
+def _blocked_page_response(response):
+    if response.status_code in {401, 403, 408, 425, 429, 500, 502, 503, 504}:
+        return True
+    text = response.text or ""
+    if response.status_code != 200 or len(text) < 500:
+        return True
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", text, re.I | re.S)
+    title = re.sub(r"\s+", " ", title_match.group(1) if title_match else "")
+    return bool(
+        re.search(
+            r"access denied|captcha|cloudflare|robot check|temporarily blocked",
+            title,
+            re.I,
+        )
+    )
+
+
 def _as_float(value):
     if value is None:
         return None
@@ -547,6 +564,10 @@ def _fetch_details(url, current_price, postal_code=None):
     session = _session()
     try:
         response = session.get(url, headers=_headers(url), timeout=12)
+        if _blocked_page_response(response):
+            if postal_code and "mercadolivre.com" in parsed.netloc:
+                return _mercado_livre_shipping(session, url, postal_code)
+            return {}
         if response.status_code != 200 or not response.text:
             if postal_code and "mercadolivre.com" in parsed.netloc:
                 return _mercado_livre_shipping(session, url, postal_code)
