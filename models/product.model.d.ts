@@ -93,6 +93,10 @@ export interface SkuStatusItem {
   sku_category?: string | null;
   cluster?: string | null;
   market_type?: "Cativo" | "Competitivo" | string | null;
+  ean?: string | null;
+  mpn?: string | null;
+  model?: string | null;
+  brand?: string | null;
 }
 
 export interface SkuStatusResponse {
@@ -125,6 +129,7 @@ export interface ExtractionJob {
   kind: "single" | "manual" | "database" | "scheduled" | string;
   status: ExtractionJobStatus;
   scope: "all" | "sites" | "retail" | string;
+  mode: "quick" | "precise" | string;
   force_refresh: boolean;
   refresh_if_stale: boolean;
   batch_size: number;
@@ -146,6 +151,35 @@ export interface ExtractionJob {
   items?: SkuBatchResult[];
 }
 
+export interface CrawlerControlSettings {
+  default_mode: "quick" | "precise";
+  external_discovery_fallback: boolean;
+  playwright_shipping_fallback: boolean;
+  concurrent_requests_per_domain: number;
+  request_timeout_seconds: number;
+  updated_at?: string | null;
+}
+
+export interface ProductSourceItem {
+  id: number;
+  sku: string;
+  store: string;
+  seller?: string | null;
+  url: string;
+  match_confidence: number;
+  match_method: string;
+  active: boolean;
+  validation_status: string;
+  failure_reason?: string | null;
+  last_collected_at?: string | null;
+}
+
+export interface ProductSourceResponse {
+  items: ProductSourceItem[];
+  active_count: number;
+  invalid_count: number;
+}
+
 export interface ActiveExtractionJobResponse {
   job?: ExtractionJob | null;
 }
@@ -158,6 +192,8 @@ export interface SkuImportError {
 export interface AuthUser {
   id: number;
   username: string;
+  avatar_data_url?: string | null;
+  role: "developer" | "governor" | "viewer";
   is_admin: boolean;
   is_owner: boolean;
   created_at: string;
@@ -179,9 +215,7 @@ export interface AuthUsersResponse {
 export type IntegrationProviderKey =
   | "bright_data"
   | "apify"
-  | "serper"
   | "dataforseo"
-  | "searchapi"
   | "mercado_livre";
 
 export interface IntegrationProviderSettings {

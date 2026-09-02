@@ -914,8 +914,8 @@ export default function SlidingTabs({
   ];
 
   return (
-    <div className="mx-auto w-full max-w-[1600px]">
-      {!selectedRow && (
+    <div className={`sliding-tabs mx-auto w-full max-w-[1600px] ${activeTab === 1 || activeTab === 2 ? "sliding-tabs--fixed" : ""}`}>
+      {!selectedRow && activeTab !== 1 && (
         <section className="metrics-grid" aria-label="Resumo da pesquisa">
           {metricCards.map((metric) => {
             const Icon = metric.icon;
@@ -1132,28 +1132,32 @@ export default function SlidingTabs({
           )}
 
           {activeTab === 1 && (
-            <CatalogGrid
-              products={filteredProducts.slice(
-                (catalogPage - 1) * CATALOG_PAGE_SIZE,
-                catalogPage * CATALOG_PAGE_SIZE,
-              )}
-              total={filteredProducts.length}
-              page={catalogPage}
-              pageSize={CATALOG_PAGE_SIZE}
-              searched={Boolean(lastQuery)}
-              onPageChange={setCatalogPage}
-            />
+            <div className="tab-scroll-region">
+              <CatalogGrid
+                products={filteredProducts.slice(
+                  (catalogPage - 1) * CATALOG_PAGE_SIZE,
+                  catalogPage * CATALOG_PAGE_SIZE,
+                )}
+                total={filteredProducts.length}
+                page={catalogPage}
+                pageSize={CATALOG_PAGE_SIZE}
+                searched={Boolean(lastQuery)}
+                onPageChange={setCatalogPage}
+              />
+            </div>
           )}
 
           {activeTab === 2 && (
-            <MarketAnalytics
-              products={filteredProducts}
-              rows={filteredRows}
-              stores={marketStoreRanking}
-              searched={Boolean(lastQuery)}
-              query={lastQuery}
-              onOpenProduct={openAnalytics}
-            />
+            <div className="tab-scroll-region">
+              <MarketAnalytics
+                products={filteredProducts}
+                rows={filteredRows}
+                stores={marketStoreRanking}
+                searched={Boolean(lastQuery)}
+                query={lastQuery}
+                onOpenProduct={openAnalytics}
+              />
+            </div>
           )}
         </>
       )}

@@ -16,12 +16,12 @@ PROVIDER_CONFIG = {
     "bright_data": {
         "label": "Bright Data",
         "description": (
-            "Google Shopping. Grátis: 5 mil requisições/mês; depois "
-            "US$ 1,50 por 1.000 requisições bem-sucedidas."
+            "Grátis: 5 mil requisições/mês; depois US$ 1,50 por 1 mil "
+            "requisições bem-sucedidas."
         ),
         "credential_url": "https://brightdata.com/cp/zones",
         "category": "discovery",
-        "credential_label": "API key",
+        "credential_label": "API",
         "key_env": "BRIGHT_DATA_API_KEY",
         "enabled_env": "BRIGHT_DATA_ENABLED",
         "mode_env": "BRIGHT_DATA_USAGE_MODE",
@@ -33,12 +33,11 @@ PROVIDER_CONFIG = {
     "apify": {
         "label": "Apify",
         "description": (
-            "Google Shopping. Plano grátis com US$ 5 em créditos mensais; "
-            "o Actor configurado cobra US$ 3,50 por 1.000 resultados."
+            "Grátis: US$ 5 em créditos mensais; US$ 3,50 por 1 mil resultados."
         ),
         "credential_url": "https://console.apify.com/account/integrations",
         "category": "discovery",
-        "credential_label": "API token",
+        "credential_label": "API",
         "key_env": "APIFY_API_TOKEN",
         "enabled_env": "APIFY_ENABLED",
         "mode_env": "APIFY_USAGE_MODE",
@@ -47,29 +46,15 @@ PROVIDER_CONFIG = {
         "extra_name": "actor_id",
         "extra_default": "damilo/google-shopping-apify",
     },
-    "serper": {
-        "label": "Serper",
-        "description": (
-            "Google Shopping. Inclui 2.500 consultas grátis; depois usa créditos "
-            "pré-pagos a partir de US$ 50 por 50 mil consultas."
-        ),
-        "credential_url": "https://serper.dev/",
-        "category": "discovery",
-        "credential_label": "API key",
-        "key_env": "SERPER_API_KEY",
-        "enabled_env": "SERPER_ENABLED",
-        "mode_env": "SERPER_USAGE_MODE",
-        "limit_env": "SERPER_MAX_RESULTS",
-    },
     "dataforseo": {
         "label": "DataForSEO",
         "description": (
-            "Produtos e sellers. Inclui US$ 1 em créditos de teste; depois US$ 0,001 por item, "
-            "com recarga mínima de US$ 50 e sem mensalidade."
+            "Grátis: US$ 1 em créditos; depois US$ 0,001 por item "
+            "(recarga mínima de US$ 50)."
         ),
         "credential_url": "https://app.dataforseo.com/api-access",
         "category": "discovery",
-        "credential_label": "API password",
+        "credential_label": "API",
         "key_env": "DATAFORSEO_PASSWORD",
         "enabled_env": "DATAFORSEO_ENABLED",
         "mode_env": "DATAFORSEO_USAGE_MODE",
@@ -78,41 +63,24 @@ PROVIDER_CONFIG = {
         "extra_name": "login",
         "extra_default": "",
     },
-    "searchapi": {
-        "label": "SearchAPI (Google + Amazon)",
-        "description": (
-            "Google Shopping e Amazon Brasil. Inclui 100 consultas grátis; depois "
-            "planos a partir de US$ 40/mês. Pode consumir até 4 consultas por SKU."
-        ),
-        "credential_url": "https://www.searchapi.io/dashboard",
-        "category": "discovery",
-        "credential_label": "API key",
-        "key_env": "SEARCHAPI_API_KEY",
-        "enabled_env": "SEARCHAPI_ENABLED",
-        "mode_env": "SEARCHAPI_USAGE_MODE",
-        "limit_env": "SEARCHAPI_MAX_RESULTS",
-    },
     "mercado_livre": {
         "label": "Mercado Livre",
         "description": (
-            "API oficial sem tarifa de uso publicada. Exige criar um aplicativo "
-            "e autorizar a conta via OAuth para gerar o access token."
+            "API oficial sem tarifa de uso."
         ),
         "credential_url": "https://developers.mercadolivre.com.br/devcenter/",
         "category": "store",
-        "credential_label": "Access token",
+        "credential_label": "Token",
         "key_env": "MERCADO_LIVRE_ACCESS_TOKEN",
         "enabled_env": "MERCADO_LIVRE_API_ENABLED",
-        "supports_usage_mode": False,
-        "supports_limit": False,
+        "mode_env": "MERCADO_LIVRE_USAGE_MODE",
+        "limit_env": "MERCADO_LIVRE_MAX_RESULTS",
     },
 }
 
 PROVIDER_ORDER = (
     "bright_data",
     "apify",
-    "serper",
-    "searchapi",
     "dataforseo",
     "mercado_livre",
 )
@@ -122,12 +90,18 @@ def _as_bool(value):
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _bounded_limit(value, default=20):
+def _bounded_limit(value, default=20, maximum=100):
     try:
         parsed = int(value)
     except (TypeError, ValueError):
         parsed = default
-    return min(100, max(10, parsed))
+    return min(maximum, max(10, parsed))
+
+
+def _provider_limit(provider, value):
+    if provider == "mercado_livre":
+        return _bounded_limit(value, default=100, maximum=500)
+    return _bounded_limit(value)
 
 
 def _masked_secret(value):
@@ -171,7 +145,10 @@ def _provider_settings(provider):
         "usage_mode": usage_mode,
         "supports_usage_mode": config.get("supports_usage_mode", True),
         "supports_limit": config.get("supports_limit", True),
-        "max_results": _bounded_limit(os.getenv(config.get("limit_env", ""))),
+        "max_results": _provider_limit(
+            provider,
+            os.getenv(config.get("limit_env", "")),
+        ),
         "quota": get_provider_quota(provider),
     }
     if config.get("extra_name"):
@@ -272,7 +249,10 @@ def update_integration_settings(provider, payload):
         if config.get("mode_env"):
             _write_env(config["mode_env"], payload.usage_mode)
         if config.get("limit_env"):
-            _write_env(config["limit_env"], _bounded_limit(payload.max_results))
+            _write_env(
+                config["limit_env"],
+                _provider_limit(provider, payload.max_results),
+            )
         if extra_env:
             _write_env(extra_env, next_extra)
 

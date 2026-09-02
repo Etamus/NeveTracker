@@ -1,4 +1,7 @@
 from datetime import datetime
+import base64
+import binascii
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
@@ -7,18 +10,25 @@ from database import get_db
 from models.auth import AuthSession, AuthUser
 from schemas.auth import LoginRequest, UserCreateRequest, UserUpdateRequest
 from services.auth_service import (
+    ROLE_DEVELOPER,
+    ROLE_GOVERNOR,
+    ROLE_VIEWER,
+    apply_user_role,
     create_session,
     get_auth_session,
     get_current_user,
     normalize_username,
     require_admin,
     set_password,
+    user_role,
     user_payload,
     verify_password,
 )
 
 
 auth_router = APIRouter()
+AVATAR_PATTERN = re.compile(r"^data:image/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$")
+MAX_AVATAR_BYTES = 400 * 1024
 
 
 def _find_user_or_404(db, user_id):
@@ -29,10 +39,35 @@ def _find_user_or_404(db, user_id):
 
 
 def _ensure_target_access(actor, target):
-    if target.is_owner and not actor.is_owner:
+    actor_role = user_role(actor)
+    target_role = user_role(target)
+    if target_role == ROLE_DEVELOPER and actor_role != ROLE_DEVELOPER:
         raise HTTPException(status_code=403, detail="O usuario principal e protegido.")
-    if target.is_admin and not actor.is_owner and target.id != actor.id:
-        raise HTTPException(status_code=403, detail="Somente DEUSM2 pode alterar outro administrador.")
+    if target_role == ROLE_GOVERNOR and actor_role != ROLE_DEVELOPER and target.id != actor.id:
+        raise HTTPException(status_code=403, detail="Governantes so podem alterar a propria conta.")
+
+
+def _requested_role(payload, default=ROLE_VIEWER):
+    if payload.role is not None:
+        return payload.role
+    if payload.is_admin is not None:
+        return ROLE_GOVERNOR if payload.is_admin else ROLE_VIEWER
+    return default
+
+
+def _validated_avatar(value):
+    if value is None or value == "":
+        return None
+    match = AVATAR_PATTERN.fullmatch(value)
+    if not match:
+        raise HTTPException(status_code=400, detail="Formato de foto de perfil invalido.")
+    try:
+        image_bytes = base64.b64decode(match.group(2), validate=True)
+    except (ValueError, binascii.Error):
+        raise HTTPException(status_code=400, detail="Foto de perfil invalida.")
+    if len(image_bytes) > MAX_AVATAR_BYTES:
+        raise HTTPException(status_code=413, detail="A foto de perfil deve ter no maximo 400 KB.")
+    return value
 
 
 @auth_router.post("/login")
@@ -95,15 +130,20 @@ def create_user(
         raise HTTPException(status_code=400, detail=str(exc))
     if db.query(AuthUser).filter(AuthUser.username == username).first():
         raise HTTPException(status_code=409, detail="Ja existe um usuario com esse login.")
-    if payload.is_admin and not actor.is_owner:
-        raise HTTPException(status_code=403, detail="Somente DEUSM2 pode definir administradores.")
+    requested_role = _requested_role(payload)
+    actor_role = user_role(actor)
+    if requested_role == ROLE_DEVELOPER:
+        raise HTTPException(status_code=403, detail="Somente DEUSM2 possui o perfil Administrador.")
+    if actor_role == ROLE_GOVERNOR and requested_role != ROLE_VIEWER:
+        raise HTTPException(status_code=403, detail="Governantes so podem criar Visualizadores.")
 
     user = AuthUser(
         username=username,
-        is_admin=payload.is_admin,
         is_owner=False,
         created_by_id=actor.id,
+        avatar_data_url=_validated_avatar(payload.avatar_data_url),
     )
+    apply_user_role(user, requested_role)
     try:
         set_password(user, payload.password)
     except ValueError as exc:
@@ -124,12 +164,14 @@ def update_user(
     target = _find_user_or_404(db, user_id)
     _ensure_target_access(actor, target)
 
-    if payload.is_admin is not None:
-        if not actor.is_owner:
-            raise HTTPException(status_code=403, detail="Somente DEUSM2 pode definir administradores.")
-        if target.is_owner and payload.is_admin is False:
-            raise HTTPException(status_code=400, detail="DEUSM2 deve permanecer administrador.")
-        target.is_admin = payload.is_admin
+    role_changed = payload.role is not None or payload.is_admin is not None
+    if role_changed:
+        if user_role(actor) != ROLE_DEVELOPER:
+            raise HTTPException(status_code=403, detail="Somente DEUSM2 pode definir perfis.")
+        requested_role = _requested_role(payload, user_role(target))
+        if target.is_owner or requested_role == ROLE_DEVELOPER:
+            raise HTTPException(status_code=400, detail="DEUSM2 deve permanecer o unico Administrador.")
+        apply_user_role(target, requested_role)
 
     password_changed = payload.password is not None
     if password_changed:
@@ -139,7 +181,11 @@ def update_user(
             raise HTTPException(status_code=400, detail=str(exc))
         db.query(AuthSession).filter(AuthSession.user_id == target.id).delete()
 
-    if not password_changed and payload.is_admin is None:
+    avatar_changed = "avatar_data_url" in payload.model_fields_set
+    if avatar_changed:
+        target.avatar_data_url = _validated_avatar(payload.avatar_data_url)
+
+    if not password_changed and not role_changed and not avatar_changed:
         raise HTTPException(status_code=400, detail="Nenhuma alteracao foi informada.")
 
     target.updated_at = datetime.utcnow()

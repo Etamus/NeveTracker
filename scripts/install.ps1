@@ -13,6 +13,7 @@ $VenvDir = Join-Path $BackendDir ".venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 $InstallLock = Join-Path $Root ".install.lock"
 $PythonVersion = "3.11.9"
+$InstallSchemaVersion = 2
 
 New-Item -ItemType Directory -Path $ToolsDir, $LogsDir -Force | Out-Null
 $LogFile = Join-Path $LogsDir "install.log"
@@ -257,8 +258,13 @@ try {
     $lockCreated = $true
 
     Write-Step "=== NeveTracker: instalacao e reparo ==="
+    if (-not $IsWindows -and $PSVersionTable.PSEdition -eq "Core") { throw "Este instalador suporta somente Windows." }
     if (-not (Test-Path -LiteralPath (Join-Path $BackendDir "main.py"))) { throw "Backend nao encontrado." }
     if (-not (Test-Path -LiteralPath (Join-Path $Root "package.json"))) { throw "Frontend nao encontrado." }
+    if (-not (Test-Path -LiteralPath (Join-Path $Root "package-lock.json"))) { throw "package-lock.json nao encontrado." }
+    if (-not (Test-Path -LiteralPath (Join-Path $BackendDir "requirements.txt"))) { throw "requirements.txt nao encontrado." }
+    if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot "ensure_node.py"))) { throw "Preparador do Node nao encontrado." }
+    if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot "start.ps1"))) { throw "Inicializador do projeto nao encontrado." }
 
     $python = Resolve-Python311
     if (-not $python) { $python = Install-Python311 }
@@ -268,6 +274,8 @@ try {
     Invoke-Logged $python @($nodeHelper, $Root) 3
     $nodeTools = Resolve-NodeTools
     Write-Step "Node pronto: $($nodeTools.Node)"
+    Invoke-Logged $nodeTools.Node @("--version") 1
+    Invoke-Logged $nodeTools.Npm @("--version") 1
 
     if (-not (Test-Python311 $VenvPython)) {
         if (Test-Path -LiteralPath $VenvDir) {
@@ -280,6 +288,16 @@ try {
     Invoke-Logged $VenvPython @("-m", "ensurepip", "--upgrade") 2
     Invoke-Logged $VenvPython @("-m", "pip", "install", "--disable-pip-version-check", "--retries", "5", "--timeout", "60", "--upgrade", "pip", "setuptools", "wheel") 3
     Invoke-Logged $VenvPython @("-m", "pip", "install", "--disable-pip-version-check", "--retries", "5", "--timeout", "60", "-r", (Join-Path $BackendDir "requirements.txt")) 3
+    Invoke-Logged $VenvPython @("-m", "pip", "check") 1
+    Invoke-Logged $VenvPython @("-m", "playwright", "install", "chromium") 3
+    Invoke-Logged $VenvPython @(
+        "-c",
+        "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); page=b.new_page(); page.set_content('<title>ok</title>'); assert page.title() == 'ok'; b.close(); p.stop(); print('Chromium validado')"
+    ) 1
+    $playwrightExecutable = & $VenvPython -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); print(p.chromium.executable_path); p.stop()" 2>$null | Select-Object -Last 1
+    if ($LASTEXITCODE -ne 0 -or -not $playwrightExecutable -or -not (Test-Path -LiteralPath $playwrightExecutable)) {
+        throw "O Chromium do Playwright foi instalado, mas o executavel nao foi localizado."
+    }
 
     $dbPath = (Join-Path $BackendDir "precos.db").Replace('\', '/')
     Set-EnvValue (Join-Path $BackendDir ".env") "DATABASE_URL" "sqlite:///$dbPath"
@@ -288,6 +306,7 @@ try {
 
     Push-Location $Root
     try {
+        Invoke-Logged $VenvPython @("-m", "compileall", "-q", $BackendDir) 1
         $installArgs = if (Test-Path -LiteralPath (Join-Path $Root "package-lock.json")) { @("ci", "--no-audit", "--no-fund") } else { @("install", "--no-audit", "--no-fund") }
         try {
             Invoke-Logged $nodeTools.Npm $installArgs 2
@@ -295,22 +314,32 @@ try {
             Write-Step "npm ci nao concluiu. Reparando dependencias com npm install."
             Invoke-Logged $nodeTools.Npm @("install", "--no-audit", "--no-fund") 2
         }
+        Invoke-Logged $nodeTools.Npm @("run", "lint") 1
         Invoke-Logged $nodeTools.Npm @("run", "build") 1
+        if (-not (Test-Path -LiteralPath (Join-Path $Root "dist\index.html"))) {
+            throw "O frontend foi compilado, mas dist\index.html nao foi gerado."
+        }
     } finally {
         Pop-Location
     }
 
     Push-Location $BackendDir
     try {
-        Invoke-Logged $VenvPython @("-c", "import fastapi, uvicorn, sqlalchemy, openpyxl; import main; print('Backend validado')") 1
+        Invoke-Logged $VenvPython @(
+            "-c",
+            "import fastapi, uvicorn, sqlalchemy, openpyxl, scrapy, playwright, multipart; from fastapi.testclient import TestClient; import main; response=TestClient(main.app).get('/'); assert response.status_code == 200 and response.json().get('status') == 'API Online'; print('Backend e banco validados')"
+        ) 1
     } finally {
         Pop-Location
     }
 
     $state = @{
+        schema_version = $InstallSchemaVersion
         installed_at = (Get-Date).ToUniversalTime().ToString("o")
         python = $python
         node = $nodeTools.Node
+        playwright_executable = $playwrightExecutable
+        frontend_index = (Join-Path $Root "dist\index.html")
         requirements_sha256 = (Get-FileHash -LiteralPath (Join-Path $BackendDir "requirements.txt") -Algorithm SHA256).Hash
         package_lock_sha256 = (Get-FileHash -LiteralPath (Join-Path $Root "package-lock.json") -Algorithm SHA256).Hash
     }

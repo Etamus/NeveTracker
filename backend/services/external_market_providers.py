@@ -5,8 +5,6 @@ import re
 import time
 from urllib.parse import quote, urlencode
 
-import requests
-
 from services.http_client import create_resilient_session
 from services.integration_settings import get_runtime_provider_settings
 from services.provider_quota import reserve_provider_quota
@@ -14,10 +12,8 @@ from services.provider_quota import reserve_provider_quota
 
 BRIGHT_DATA_ENDPOINT = "https://api.brightdata.com/request"
 APIFY_ENDPOINT = "https://api.apify.com/v2/acts"
-SERPER_ENDPOINT = "https://google.serper.dev/shopping"
 DATAFORSEO_ENDPOINT = "https://api.dataforseo.com/v3/merchant/google/products"
 DATAFORSEO_SELLERS_ENDPOINT = "https://api.dataforseo.com/v3/merchant/google/sellers"
-SEARCHAPI_ENDPOINT = "https://www.searchapi.io/api/v1/search"
 SESSION = create_resilient_session(pool_size=4)
 
 
@@ -378,29 +374,6 @@ def search_apify(query):
     return _normalize_payload(response.json(), query, "apify", limit)
 
 
-def search_serper(query):
-    settings = get_runtime_provider_settings("serper")
-    limit = settings["max_results"]
-    reserve_provider_quota("serper", 1)
-    response = SESSION.post(
-        SERPER_ENDPOINT,
-        headers={
-            "X-API-KEY": settings["api_key"],
-            "Content-Type": "application/json",
-        },
-        json={
-            "q": query,
-            "gl": "br",
-            "hl": "pt-br",
-            "num": limit,
-        },
-        timeout=(10, 45),
-    )
-    if response.status_code >= 400:
-        raise RuntimeError(f"Serper respondeu HTTP {response.status_code}.")
-    return _normalize_payload(response.json(), query, "serper", limit)
-
-
 def _dataforseo_task_result(payload):
     tasks = payload.get("tasks") if isinstance(payload, dict) else None
     if not tasks or not isinstance(tasks[0], dict):
@@ -543,103 +516,11 @@ def search_dataforseo(query):
     raise RuntimeError("DataForSEO excedeu o tempo de processamento da consulta.")
 
 
-def _searchapi_get(settings, **params):
-    reserve_provider_quota("searchapi", 1)
-    try:
-        response = SESSION.get(
-            SEARCHAPI_ENDPOINT,
-            headers={"Authorization": f"Bearer {settings['api_key']}"},
-            params=params,
-            timeout=(10, 60),
-        )
-    except requests.RequestException as exc:
-        raise RuntimeError(f"SearchAPI indisponivel: {exc}") from exc
-    if response.status_code >= 400:
-        raise RuntimeError(f"SearchAPI respondeu HTTP {response.status_code}.")
-    return response.json()
-
-
-def _searchapi_amazon_items(payload):
-    results = []
-    for source_item in payload.get("organic_results") or []:
-        if not isinstance(source_item, dict):
-            continue
-        item = dict(source_item)
-        item["seller_name"] = "Amazon Brasil"
-        item["source"] = "Amazon Brasil"
-        fulfillment = item.get("fulfillment") or {}
-        standard_delivery = fulfillment.get("standard_delivery") or {}
-        if isinstance(standard_delivery, dict) and standard_delivery.get("text"):
-            item["delivery"] = standard_delivery["text"]
-        results.append(item)
-    return results
-
-
-def search_searchapi(query):
-    settings = get_runtime_provider_settings("searchapi")
-    limit = settings["max_results"]
-    payloads = []
-    errors = []
-
-    try:
-        shopping_payload = _searchapi_get(
-            settings,
-            engine="google_shopping",
-            q=query,
-            gl="br",
-            hl="pt-br",
-        )
-        offer_payloads = []
-        product_tokens = list(
-            dict.fromkeys(
-                str(item.get("product_token") or "")
-                for item in shopping_payload.get("shopping_results") or []
-                if isinstance(item, dict) and item.get("product_token")
-            )
-        )
-        for product_token in product_tokens[:2]:
-            try:
-                offer_payloads.append(
-                    _searchapi_get(
-                        settings,
-                        engine="google_product_offers",
-                        product_token=product_token,
-                        gl="br",
-                        hl="pt-br",
-                    )
-                )
-            except RuntimeError as exc:
-                errors.append(str(exc))
-        payloads.extend(offer_payloads)
-        payloads.append(shopping_payload)
-    except RuntimeError as exc:
-        errors.append(str(exc))
-
-    try:
-        amazon_payload = _searchapi_get(
-            settings,
-            engine="amazon_search",
-            q=query,
-            amazon_domain="amazon.com.br",
-            language="pt_BR",
-            delivery_country="br",
-        )
-        payloads.insert(0, _searchapi_amazon_items(amazon_payload))
-    except RuntimeError as exc:
-        errors.append(str(exc))
-
-    if not payloads:
-        raise RuntimeError(errors[0] if errors else "SearchAPI nao retornou dados.")
-    return _normalize_payload(payloads, query, "searchapi", limit)
-
-
 def run_external_market_provider(provider, query):
     providers = {
         "bright_data": ("Bright Data", search_bright_data),
         "apify": ("Apify", search_apify),
-        "serper": ("Serper", search_serper),
         "dataforseo": ("DataForSEO", search_dataforseo),
-        "searchapi": ("SearchAPI", search_searchapi),
     }
     label, search = providers[provider]
     try:

@@ -3,6 +3,7 @@ import os
 from cachetools import TTLCache, cached
 
 from services.http_client import create_resilient_session
+from services.integration_settings import get_runtime_provider_settings
 
 BASE_URL = "https://api.mercadolibre.com/sites/MLB/search"
 cache = TTLCache(maxsize=100, ttl=900)
@@ -22,6 +23,8 @@ def extract_brand(item):
 @cached(cache)
 def search_mercado_livre(product_query: str):
     try:
+        integration = get_runtime_provider_settings("mercado_livre")
+        max_results = min(500, max(10, int(integration["max_results"])))
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -41,7 +44,7 @@ def search_mercado_livre(product_query: str):
         results = []
         seen_ids = set()
 
-        for offset in (0, 50):
+        for offset in range(0, max_results, 50):
             response = session.get(
                 BASE_URL,
                 params={
@@ -126,8 +129,15 @@ def search_mercado_livre(product_query: str):
                     }
                 )
 
+                if len(results) >= max_results:
+                    break
+
             paging = data.get("paging") or {}
-            if not page_items or offset + len(page_items) >= int(paging.get("total") or 0):
+            if (
+                len(results) >= max_results
+                or not page_items
+                or offset + len(page_items) >= int(paging.get("total") or 0)
+            ):
                 break
 
         return results

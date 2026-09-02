@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import type { FormEvent } from "react";
+import type { ChangeEvent, FormEvent, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
 import {
   BarChart3,
+  Camera,
   CalendarClock,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Database,
   Download,
   Eye,
@@ -12,9 +15,11 @@ import {
   ExternalLink,
   FileDown,
   Grid2X2,
+  Github,
+  Info,
   KeyRound,
-  ListChecks,
   LoaderCircle,
+  LogIn,
   LogOut,
   PackageSearch,
   PanelLeftClose,
@@ -22,12 +27,17 @@ import {
   Plug,
   RefreshCw,
   Search,
+  Scale,
   Settings,
+  Shield,
+  SlidersHorizontal,
   ShieldCheck,
+  SquareCheckBig,
   Trash2,
   Upload,
   UserPlus,
   UserRound,
+  Wrench,
   X,
 } from "lucide-react";
 import SlidingTabs from "../SlidingTabs";
@@ -36,9 +46,12 @@ import type {
   AuthLoginResponse,
   AuthUser,
   AuthUsersResponse,
+  CrawlerControlSettings,
   ExtractionJob,
   IntegrationProviderSettings,
   IntegrationSettingsResponse,
+  ProductSourceItem,
+  ProductSourceResponse,
   SkuBatchResult,
   SkuImportResponse,
   SkuStatusItem,
@@ -86,7 +99,35 @@ const navigation = [
 ];
 
 type ThemeMode = "light" | "dark";
-type ExtractionTab = "extract" | "database" | "schedule";
+type UserRole = AuthUser["role"];
+type ExtractionTab = "extract" | "database" | "schedule" | "control";
+type ExtractionMode = "quick" | "precise";
+type SettingsTab = "general" | "about";
+type AdminEditorTab = "access" | "profile";
+
+const defaultCrawlerControl: CrawlerControlSettings = {
+  default_mode: "quick",
+  external_discovery_fallback: true,
+  playwright_shipping_fallback: false,
+  concurrent_requests_per_domain: 2,
+  request_timeout_seconds: 15,
+};
+const ADMIN_USERS_PAGE_SIZE = 6;
+const AVATAR_CROP_PREVIEW_SIZE = 320;
+
+const resolvedUserRole = (user?: AuthUser | null): UserRole => {
+  if (!user) return "viewer";
+  if (user.role) return user.role;
+  if (user.is_owner) return "developer";
+  return user.is_admin ? "governor" : "viewer";
+};
+
+const userRoleLabel = (user: AuthUser) => {
+  const role = resolvedUserRole(user);
+  if (role === "developer") return "Administrador";
+  if (role === "governor") return "Governante";
+  return "Visualizador";
+};
 
 const TERMINAL_EXTRACTION_STATUSES = new Set([
   "completed",
@@ -114,7 +155,6 @@ type ScheduledExtractionSettings = {
   endTime: string;
   days: number[];
   repeatEveryHours: number;
-  forceRefresh: boolean;
   lastRunKey?: string;
 };
 
@@ -129,11 +169,11 @@ const weekDays = [
 ];
 
 const weekDayNames = new Map([
-  [1, "segunda-feira"],
-  [2, "terça-feira"],
-  [3, "quarta-feira"],
-  [4, "quinta-feira"],
-  [5, "sexta-feira"],
+  [1, "segunda"],
+  [2, "terça"],
+  [3, "quarta"],
+  [4, "quinta"],
+  [5, "sexta"],
   [6, "sábado"],
   [0, "domingo"],
 ]);
@@ -171,7 +211,6 @@ const defaultScheduleSettings: ScheduledExtractionSettings = {
   endTime: "18:00",
   days: [1],
   repeatEveryHours: 0,
-  forceRefresh: true,
 };
 
 const getInitialTheme = (): ThemeMode => {
@@ -208,7 +247,6 @@ const getInitialScheduleSettings = (): ScheduledExtractionSettings => {
       endTime: typeof parsed.endTime === "string" && /^\d{2}:\d{2}$/.test(parsed.endTime) ? parsed.endTime : "18:00",
       days: days.length ? days : defaultScheduleSettings.days,
       repeatEveryHours,
-      forceRefresh: parsed.forceRefresh !== false,
     };
   } catch {
     return defaultScheduleSettings;
@@ -238,6 +276,19 @@ const formatDateTime = (value?: string | null) => {
   }).format(date);
 };
 
+const formatCompactDateTime = (value?: string | null) => {
+  if (!value) return "Sem execução";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Sem execução";
+  return new Intl.DateTimeFormat("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+};
+
 const getAuthToken = () =>
   readMigratedStorageValue(AUTH_TOKEN_STORAGE_KEY, legacyStorageKeys("auth-token")) || "";
 
@@ -258,6 +309,100 @@ const apiErrorMessage = (data: unknown, fallback: string) => {
     return data.detail;
   }
   return fallback;
+};
+
+type StyledSelectOption<T extends string | number> = {
+  value: T;
+  label: string;
+};
+
+type StyledSelectProps<T extends string | number> = {
+  value: T;
+  options: StyledSelectOption<T>[];
+  onChange: (value: T) => void;
+  ariaLabel: string;
+  disabled?: boolean;
+};
+
+const StyledSelect = <T extends string | number,>({
+  value,
+  options,
+  onChange,
+  ariaLabel,
+  disabled = false,
+}: StyledSelectProps<T>) => {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
+  const selectedOption = options[selectedIndex];
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    return () => document.removeEventListener("pointerdown", closeOutside);
+  }, [open]);
+
+  const selectAt = (index: number) => {
+    const option = options[index];
+    if (!option) return;
+    onChange(option.value);
+  };
+
+  return (
+    <div ref={rootRef} className={open ? "styled-select styled-select--open" : "styled-select"}>
+      <button
+        type="button"
+        className="styled-select__trigger"
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        disabled={disabled}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            setOpen(false);
+            return;
+          }
+          if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+          event.preventDefault();
+          setOpen(true);
+          if (event.key === "Home") return selectAt(0);
+          if (event.key === "End") return selectAt(options.length - 1);
+          const direction = event.key === "ArrowDown" ? 1 : -1;
+          selectAt((selectedIndex + direction + options.length) % options.length);
+        }}
+      >
+        <span>{selectedOption?.label || "Selecione"}</span>
+        <ChevronDown size={15} aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="styled-select__menu" role="listbox" aria-label={ariaLabel}>
+          {options.map((option) => {
+            const selected = option.value === value;
+            return (
+              <button
+                key={String(option.value)}
+                type="button"
+                role="option"
+                aria-selected={selected}
+                className={selected ? "styled-select__option styled-select__option--selected" : "styled-select__option"}
+                onClick={() => {
+                  onChange(option.value);
+                  setOpen(false);
+                }}
+              >
+                <span>{option.label}</span>
+                {selected && <CheckCircle2 size={14} aria-hidden="true" />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 };
 
 export const HeroSection = () => {
@@ -282,27 +427,46 @@ export const HeroSection = () => {
   const [selectedAdminUser, setSelectedAdminUser] = useState<AuthUser | null>(null);
   const [adminUsername, setAdminUsername] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
-  const [adminIsAdmin, setAdminIsAdmin] = useState(false);
+  const [adminRole, setAdminRole] = useState<UserRole>("viewer");
   const [adminLoading, setAdminLoading] = useState(false);
   const [adminSaving, setAdminSaving] = useState(false);
   const [adminError, setAdminError] = useState("");
   const [adminSearch, setAdminSearch] = useState("");
+  const [adminPage, setAdminPage] = useState(1);
   const [showAdminPassword, setShowAdminPassword] = useState(false);
   const [adminDeleteTarget, setAdminDeleteTarget] = useState<AuthUser | null>(null);
   const [adminDeleteError, setAdminDeleteError] = useState("");
+  const [adminAvatarDraft, setAdminAvatarDraft] = useState<string | null | undefined>(undefined);
+  const [adminEditorTab, setAdminEditorTab] = useState<AdminEditorTab>("access");
+  const [avatarCropOpen, setAvatarCropOpen] = useState(false);
+  const [avatarCropSource, setAvatarCropSource] = useState("");
+  const [avatarCropZoom, setAvatarCropZoom] = useState(1);
+  const [avatarCropX, setAvatarCropX] = useState(0);
+  const [avatarCropY, setAvatarCropY] = useState(0);
+  const [avatarCropError, setAvatarCropError] = useState("");
+  const [avatarImageSize, setAvatarImageSize] = useState({ width: 0, height: 0 });
   const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [extractionTab, setExtractionTab] = useState<ExtractionTab>("extract");
   const [scheduleSettings, setScheduleSettings] = useState<ScheduledExtractionSettings>(getInitialScheduleSettings);
-  const [scheduleStatus, setScheduleStatus] = useState("");
   const [scheduleSaving, setScheduleSaving] = useState(false);
   const [interfacePreferences, setInterfacePreferences] = useState<InterfacePreferences>(getInterfacePreferences);
   const [integrationProviders, setIntegrationProviders] = useState<IntegrationProviderSettings[]>([]);
+  const [activeIntegrationProvider, setActiveIntegrationProvider] = useState<string | null>(null);
   const [integrationKeys, setIntegrationKeys] = useState<Record<string, string>>({});
   const [integrationsLoading, setIntegrationsLoading] = useState(false);
   const [integrationsSaving, setIntegrationsSaving] = useState(false);
   const [integrationsError, setIntegrationsError] = useState("");
   const [skuInput, setSkuInput] = useState("");
-  const [forceExtraction, setForceExtraction] = useState(true);
+  const [extractionMode, setExtractionMode] = useState<ExtractionMode>("quick");
+  const [crawlerControl, setCrawlerControl] = useState<CrawlerControlSettings>(defaultCrawlerControl);
+  const [crawlerSources, setCrawlerSources] = useState<ProductSourceItem[]>([]);
+  const [crawlerSourcesHistoryOpen, setCrawlerSourcesHistoryOpen] = useState(false);
+  const [crawlerActiveCount, setCrawlerActiveCount] = useState(0);
+  const [crawlerInvalidCount, setCrawlerInvalidCount] = useState(0);
+  const [crawlerControlLoading, setCrawlerControlLoading] = useState(false);
+  const [crawlerControlSaving, setCrawlerControlSaving] = useState(false);
+  const [rediscoveringSku, setRediscoveringSku] = useState<string | null>(null);
   const [skuStatusItems, setSkuStatusItems] = useState<SkuStatusItem[]>([]);
   const [skuStatusLoading, setSkuStatusLoading] = useState(false);
   const [skuDatabaseFilter, setSkuDatabaseFilter] = useState("");
@@ -322,6 +486,8 @@ export const HeroSection = () => {
   const [skuSelectorError, setSkuSelectorError] = useState("");
   const accountRef = useRef<HTMLDivElement>(null);
   const skuFileInputRef = useRef<HTMLInputElement>(null);
+  const avatarFileInputRef = useRef<HTMLInputElement>(null);
+  const avatarDragRef = useRef<{ pointerId: number; clientX: number; clientY: number; x: number; y: number } | null>(null);
   const themeTransitionTimerRef = useRef<number | null>(null);
   const {
     productName,
@@ -516,8 +682,81 @@ export const HeroSection = () => {
     }
   };
 
+  const loadCrawlerControl = async () => {
+    setCrawlerControlLoading(true);
+    try {
+      const controlResponse = await fetch(`${getApiBaseUrl()}/products/crawler-control`, {
+        headers: authorizedHeaders(),
+      });
+      if (!controlResponse.ok) throw new Error("Falha ao carregar o motor de coleta.");
+      const control = await controlResponse.json() as CrawlerControlSettings;
+      setCrawlerControl(control);
+      setExtractionMode(control.default_mode);
+      if (resolvedUserRole(currentUser) === "developer") {
+        const sourceResponse = await fetch(`${getApiBaseUrl()}/products/sources`, {
+          headers: authorizedHeaders(),
+        });
+        if (!sourceResponse.ok) throw new Error("Falha ao carregar as fontes recentes.");
+        const sources = await sourceResponse.json() as ProductSourceResponse;
+        setCrawlerSources(sources.items || []);
+        setCrawlerActiveCount(sources.active_count || 0);
+        setCrawlerInvalidCount(sources.invalid_count || 0);
+      }
+    } catch (error) {
+      setExtractionError(error instanceof Error ? error.message : "Falha ao carregar o motor de coleta.");
+    } finally {
+      setCrawlerControlLoading(false);
+    }
+  };
+
+  const saveCrawlerControl = async () => {
+    if (crawlerControlSaving) return;
+    setCrawlerControlSaving(true);
+    setExtractionError("");
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/products/crawler-control`, {
+        method: "PUT",
+        headers: authorizedHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(crawlerControl),
+      });
+      const data = await response.json().catch(() => null) as CrawlerControlSettings | { detail?: string } | null;
+      if (!response.ok || !data || !("default_mode" in data)) {
+        throw new Error(apiErrorMessage(data, "Não foi possível salvar o controle de coleta."));
+      }
+      setCrawlerControl(data);
+      setExtractionMode(data.default_mode);
+    } catch (error) {
+      setExtractionError(error instanceof Error ? error.message : "Não foi possível salvar o controle de coleta.");
+    } finally {
+      setCrawlerControlSaving(false);
+    }
+  };
+
+  const rediscoverSourceSku = async (sku: string) => {
+    if (extractionRunning || rediscoveringSku) return;
+    setRediscoveringSku(sku);
+    setExtractionError("");
+    try {
+      const response = await fetch(
+        `${getApiBaseUrl()}/products/sources/${encodeURIComponent(sku)}/rediscover`,
+        { method: "POST", headers: authorizedHeaders() },
+      );
+      const data = await response.json().catch(() => null) as ExtractionJob | { detail?: string } | null;
+      if (!response.ok || !data || !("id" in data)) {
+        throw new Error(apiErrorMessage(data, "Não foi possível redescobrir o SKU."));
+      }
+      setActiveExtractionJob(data);
+      setExtractionRunning(true);
+      window.localStorage.setItem(EXTRACTION_JOB_STORAGE_KEY, data.id);
+    } catch (error) {
+      setExtractionError(error instanceof Error ? error.message : "Não foi possível redescobrir o SKU.");
+    } finally {
+      setRediscoveringSku(null);
+    }
+  };
+
   const loadIntegrationSettings = async () => {
-    if (!currentUser?.is_admin) return;
+    if (resolvedUserRole(currentUser) !== "developer") return;
     setIntegrationsLoading(true);
     setIntegrationsError("");
     try {
@@ -529,6 +768,11 @@ export const HeroSection = () => {
         throw new Error(apiErrorMessage(data, "Não foi possível carregar as integrações."));
       }
       setIntegrationProviders(data.items);
+      setActiveIntegrationProvider((currentProvider) => (
+        data.items.some((provider) => provider.provider === currentProvider)
+          ? currentProvider
+          : data.items[0]?.provider || null
+      ));
       setIntegrationKeys({});
     } catch (error) {
       setIntegrationsError(error instanceof Error ? error.message : "Não foi possível carregar as integrações.");
@@ -587,11 +831,12 @@ export const HeroSection = () => {
   const openSettings = () => {
     setAccountOpen(false);
     setSidebarOpen(false);
+    setSettingsTab("general");
     setSettingsOpen(true);
   };
 
   const openIntegrations = () => {
-    if (!currentUser?.is_admin) return;
+    if (resolvedUserRole(currentUser) !== "developer") return;
     setAccountOpen(false);
     setSidebarOpen(false);
     setIntegrationsOpen(true);
@@ -599,6 +844,7 @@ export const HeroSection = () => {
   };
 
   const openExtractions = () => {
+    if (!currentUser || resolvedUserRole(currentUser) === "viewer") return;
     setAccountOpen(false);
     setSidebarOpen(false);
     setExtractionError("");
@@ -608,7 +854,8 @@ export const HeroSection = () => {
     setExtractionTab("extract");
     setExtractionsOpen(true);
     void loadSkuStatus();
-    void fetch(`${getApiBaseUrl()}/products/schedule`)
+    void loadCrawlerControl();
+    void fetch(`${getApiBaseUrl()}/products/schedule`, { headers: authorizedHeaders() })
       .then((response) => response.ok ? response.json() : null)
       .then((data) => {
         if (!data) return;
@@ -619,7 +866,6 @@ export const HeroSection = () => {
           endTime: typeof data.end_time === "string" ? data.end_time : currentSettings.endTime,
           days: Array.isArray(data.days) && data.days.length ? data.days : currentSettings.days,
           repeatEveryHours: Math.min(12, Math.max(0, Math.trunc(Number(data.repeat_every_hours) || 0))),
-          forceRefresh: data.force_refresh !== false,
           lastRunKey: typeof data.last_run_key === "string" ? data.last_run_key : undefined,
         }));
       })
@@ -652,20 +898,26 @@ export const HeroSection = () => {
     setSelectedAdminUser(null);
     setAdminUsername("");
     setAdminPassword("");
-    setAdminIsAdmin(false);
+    setAdminRole("viewer");
     setAdminError("");
     setShowAdminPassword(false);
     setAdminDeleteTarget(null);
     setAdminDeleteError("");
+    setAdminAvatarDraft(undefined);
+    setAdminEditorTab("access");
+    setAvatarCropOpen(false);
+    setAvatarCropSource("");
+    setAvatarCropError("");
   };
 
   const openAdministration = () => {
-    if (!currentUser?.is_admin) return;
+    if (!currentUser || resolvedUserRole(currentUser) === "viewer") return;
     setAccountOpen(false);
     setSidebarOpen(false);
     resetAdminEditor();
     setAdminEditorOpen(false);
     setAdminSearch("");
+    setAdminPage(1);
     setAdministrationOpen(true);
     void loadAdminUsers();
   };
@@ -690,12 +942,115 @@ export const HeroSection = () => {
     setSelectedAdminUser(user);
     setAdminUsername(user.username);
     setAdminPassword("");
-    setAdminIsAdmin(user.is_admin);
+    setAdminRole(resolvedUserRole(user));
     setAdminError("");
     setShowAdminPassword(false);
     setAdminDeleteTarget(null);
     setAdminDeleteError("");
+    setAdminAvatarDraft(undefined);
+    setAdminEditorTab("access");
     setAdminEditorOpen(true);
+  };
+
+  const selectAvatarFile = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!/^image\/(jpeg|png|webp)$/.test(file.type)) {
+      setAdminError("Use uma imagem JPG, PNG ou WebP.");
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      setAdminError("A imagem original deve ter no máximo 8 MB.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      setAvatarCropSource(String(reader.result || ""));
+      setAvatarCropZoom(1);
+      setAvatarCropX(0);
+      setAvatarCropY(0);
+      setAvatarImageSize({ width: 0, height: 0 });
+      setAvatarCropError("");
+      setAvatarCropOpen(true);
+    };
+    reader.onerror = () => setAdminError("Não foi possível ler a imagem.");
+    reader.readAsDataURL(file);
+  };
+
+  const applyAvatarCrop = async () => {
+    if (!avatarCropSource) return;
+    try {
+      const image = new Image();
+      image.src = avatarCropSource;
+      await image.decode();
+      const size = 256;
+      const canvas = document.createElement("canvas");
+      canvas.width = size;
+      canvas.height = size;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Canvas indisponível.");
+      const scale = Math.max(size / image.naturalWidth, size / image.naturalHeight) * avatarCropZoom;
+      const width = image.naturalWidth * scale;
+      const height = image.naturalHeight * scale;
+      const previewScale = size / AVATAR_CROP_PREVIEW_SIZE;
+      const left = (size - width) / 2 + avatarCropX * previewScale;
+      const top = (size - height) / 2 + avatarCropY * previewScale;
+      context.drawImage(image, left, top, width, height);
+      setAdminAvatarDraft(canvas.toDataURL("image/jpeg", 0.86));
+      setAvatarCropOpen(false);
+      setAvatarCropSource("");
+      setAdminError("");
+    } catch {
+      setAvatarCropError("Não foi possível processar esta imagem.");
+    }
+  };
+
+  const clampAvatarPosition = (x: number, y: number, zoom = avatarCropZoom) => {
+    if (!avatarImageSize.width || !avatarImageSize.height) return { x, y };
+    const previewSize = AVATAR_CROP_PREVIEW_SIZE;
+    const baseScale = Math.max(previewSize / avatarImageSize.width, previewSize / avatarImageSize.height);
+    const maxX = Math.max(0, (avatarImageSize.width * baseScale * zoom - previewSize) / 2);
+    const maxY = Math.max(0, (avatarImageSize.height * baseScale * zoom - previewSize) / 2);
+    return {
+      x: Math.max(-maxX, Math.min(maxX, x)),
+      y: Math.max(-maxY, Math.min(maxY, y)),
+    };
+  };
+
+  const startAvatarDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    avatarDragRef.current = {
+      pointerId: event.pointerId,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      x: avatarCropX,
+      y: avatarCropY,
+    };
+  };
+
+  const moveAvatarDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = avatarDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const position = clampAvatarPosition(
+      drag.x + event.clientX - drag.clientX,
+      drag.y + event.clientY - drag.clientY,
+    );
+    setAvatarCropX(position.x);
+    setAvatarCropY(position.y);
+  };
+
+  const stopAvatarDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (avatarDragRef.current?.pointerId === event.pointerId) avatarDragRef.current = null;
+  };
+
+  const zoomAvatarCrop = (event: ReactWheelEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const nextZoom = Math.max(1, Math.min(3, avatarCropZoom + (event.deltaY < 0 ? 0.12 : -0.12)));
+    const position = clampAvatarPosition(avatarCropX, avatarCropY, nextZoom);
+    setAvatarCropZoom(nextZoom);
+    setAvatarCropX(position.x);
+    setAvatarCropY(position.y);
   };
 
   const saveAdminUser = async (event: FormEvent<HTMLFormElement>) => {
@@ -703,20 +1058,26 @@ export const HeroSection = () => {
     if (adminSaving) return;
 
     const editingUser = selectedAdminUser;
-    const payload: { username?: string; password?: string; is_admin?: boolean } = {};
+    const payload: { username?: string; password?: string; role?: UserRole; avatar_data_url?: string | null } = {};
     if (editingUser) {
       if (adminPassword) payload.password = adminPassword;
-      if (currentUser?.is_owner && !editingUser.is_owner && adminIsAdmin !== editingUser.is_admin) {
-        payload.is_admin = adminIsAdmin;
+      if (
+        resolvedUserRole(currentUser) === "developer" &&
+        !editingUser.is_owner &&
+        adminRole !== resolvedUserRole(editingUser)
+      ) {
+        payload.role = adminRole;
       }
+      if (adminAvatarDraft !== undefined) payload.avatar_data_url = adminAvatarDraft;
       if (!Object.keys(payload).length) {
-        setAdminError("Informe uma nova senha ou altere o perfil administrativo.");
+        setAdminError("Altere a foto, a senha ou as permissões.");
         return;
       }
     } else {
       payload.username = adminUsername.trim().toUpperCase();
       payload.password = adminPassword;
-      payload.is_admin = currentUser?.is_owner ? adminIsAdmin : false;
+      payload.role = resolvedUserRole(currentUser) === "developer" ? adminRole : "viewer";
+      if (adminAvatarDraft !== undefined) payload.avatar_data_url = adminAvatarDraft;
     }
 
     setAdminSaving(true);
@@ -741,6 +1102,7 @@ export const HeroSection = () => {
         handleLogout();
         return;
       }
+      if (editingUser?.id === currentUser?.id) setCurrentUser(data);
 
       setAdminPassword("");
       await loadAdminUsers();
@@ -804,26 +1166,23 @@ export const HeroSection = () => {
   const saveSchedule = async () => {
     if (scheduleSaving) return;
     setScheduleSaving(true);
-    setScheduleStatus("Salvando...");
     try {
       const response = await fetch(`${getApiBaseUrl()}/products/schedule`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: authorizedHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           enabled: scheduleSettings.enabled,
           start_time: scheduleSettings.time,
           end_time: scheduleSettings.endTime,
           days: scheduleSettings.days,
           repeat_every_hours: scheduleSettings.repeatEveryHours,
-          force_refresh: scheduleSettings.forceRefresh,
+          force_refresh: true,
           postal_code: interfacePreferences.logisticsPostalCode || null,
         }),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      setScheduleStatus("Programação salva.");
     } catch (error) {
       console.error("Erro ao salvar programação:", error);
-      setScheduleStatus("Não foi possível salvar a programação.");
     } finally {
       setScheduleSaving(false);
     }
@@ -851,13 +1210,14 @@ export const HeroSection = () => {
     try {
       const response = await fetch(`${getApiBaseUrl()}/products/extraction-jobs`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authorizedHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           skus,
-          force_refresh: forceExtraction,
+          force_refresh: true,
           refresh_if_stale: false,
           postal_code: interfacePreferences.logisticsPostalCode || null,
           scope: "all",
+          mode: extractionMode,
         }),
       });
       const data = await response.json().catch(() => null) as ExtractionJob | { detail?: string } | null;
@@ -886,6 +1246,7 @@ export const HeroSection = () => {
       body.append("file", file);
       const response = await fetch(`${getApiBaseUrl()}/products/import/skus`, {
         method: "POST",
+        headers: authorizedHeaders(),
         body,
       });
       if (!response.ok) {
@@ -918,12 +1279,13 @@ export const HeroSection = () => {
     try {
       const response = await fetch(`${getApiBaseUrl()}/products/extraction-jobs`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authorizedHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           skus: [sku],
           force_refresh: true,
           postal_code: interfacePreferences.logisticsPostalCode || null,
           scope: "all",
+          mode: extractionMode,
         }),
       });
       const data = await response.json().catch(() => null) as ExtractionJob | { detail?: string } | null;
@@ -947,7 +1309,7 @@ export const HeroSection = () => {
     try {
       const response = await fetch(
         `${getApiBaseUrl()}/products/skus/${encodeURIComponent(sku)}`,
-        { method: "DELETE" },
+        { method: "DELETE", headers: authorizedHeaders() },
       );
       const data = await response.json().catch(() => null) as { detail?: string } | null;
       if (!response.ok) {
@@ -977,12 +1339,13 @@ export const HeroSection = () => {
     try {
       const response = await fetch(`${getApiBaseUrl()}/products/extraction-jobs/database`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authorizedHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           force_refresh: true,
           refresh_if_stale: false,
           postal_code: interfacePreferences.logisticsPostalCode || null,
           scope: "all",
+          mode: extractionMode,
         }),
       });
       const data = await response.json().catch(() => null) as ExtractionJob | { detail?: string } | null;
@@ -1004,7 +1367,7 @@ export const HeroSection = () => {
     try {
       const response = await fetch(
         `${getApiBaseUrl()}/products/extraction-jobs/${activeExtractionJob.id}/cancel`,
-        { method: "POST" },
+        { method: "POST", headers: authorizedHeaders() },
       );
       const data = await response.json().catch(() => null) as ExtractionJob | { detail?: string } | null;
       if (!response.ok || !data || !("id" in data)) {
@@ -1028,11 +1391,13 @@ export const HeroSection = () => {
       try {
         let job: ExtractionJob | null = null;
         if (storedUrl) {
-          const storedResponse = await fetch(storedUrl);
+          const storedResponse = await fetch(storedUrl, { headers: authorizedHeaders() });
           if (storedResponse.ok) job = await storedResponse.json() as ExtractionJob;
         }
         if (!job || !isExtractionJobActive(job)) {
-          const activeResponse = await fetch(`${getApiBaseUrl()}/products/extraction-jobs/active`);
+          const activeResponse = await fetch(`${getApiBaseUrl()}/products/extraction-jobs/active`, {
+            headers: authorizedHeaders(),
+          });
           if (activeResponse.ok) {
             const data = await activeResponse.json() as ActiveExtractionJobResponse;
             job = data.job || job;
@@ -1067,7 +1432,9 @@ export const HeroSection = () => {
 
     const pollJob = async () => {
       try {
-        const response = await fetch(`${getApiBaseUrl()}/products/extraction-jobs/${jobId}`);
+        const response = await fetch(`${getApiBaseUrl()}/products/extraction-jobs/${jobId}`, {
+          headers: authorizedHeaders(),
+        });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         let job = await response.json() as ExtractionJob;
         if (disposed) return;
@@ -1080,6 +1447,7 @@ export const HeroSection = () => {
         if (!isExtractionJobActive(job)) {
           const completedResponse = await fetch(
             `${getApiBaseUrl()}/products/extraction-jobs/${jobId}?include_items=true`,
+            { headers: authorizedHeaders() },
           );
           if (completedResponse.ok) job = await completedResponse.json() as ExtractionJob;
           if (disposed) return;
@@ -1129,13 +1497,19 @@ export const HeroSection = () => {
         setSkuSelectorError("");
         return currentSkus.filter((item) => item !== sku);
       }
-      if (currentSkus.length >= 30) {
-        setSkuSelectorError("Selecione no máximo 30 SKUs por pesquisa.");
-        return currentSkus;
-      }
       setSkuSelectorError("");
       return [...currentSkus, sku];
     });
+  };
+
+  const toggleAllDraftSearchSkus = () => {
+    if (draftSearchSkus.length) {
+      setDraftSearchSkus([]);
+      setSkuSelectorError("");
+      return;
+    }
+    setDraftSearchSkus(visibleSkuSelectorItems.map((item) => item.sku));
+    setSkuSelectorError("");
   };
 
   const searchSelectedSkus = () => {
@@ -1176,25 +1550,63 @@ export const HeroSection = () => {
       .filter(Boolean)
       .some((value) => String(value).toLowerCase().includes(normalizedSkuDatabaseFilter)),
   );
-  const visibleAdminUsers = adminUsers.filter((user) =>
-    user.username.toLowerCase().includes(adminSearch.trim().toLowerCase()),
+  const latestExtractionAt = skuStatusItems.reduce<string | null>((latest, item) => {
+    if (!item.last_update) return latest;
+    const currentTimestamp = new Date(item.last_update).getTime();
+    const latestTimestamp = latest ? new Date(latest).getTime() : Number.NaN;
+    if (Number.isNaN(currentTimestamp)) return latest;
+    return Number.isNaN(latestTimestamp) || currentTimestamp > latestTimestamp
+      ? item.last_update
+      : latest;
+  }, null);
+  const visibleAdminUsers = adminUsers.filter((user) => {
+    const term = adminSearch.trim().toLowerCase();
+    return user.username.toLowerCase().includes(term);
+  });
+  const adminTotalPages = Math.max(1, Math.ceil(visibleAdminUsers.length / ADMIN_USERS_PAGE_SIZE));
+  const effectiveAdminPage = Math.min(adminPage, adminTotalPages);
+  const adminPageStart = (effectiveAdminPage - 1) * ADMIN_USERS_PAGE_SIZE;
+  const paginatedAdminUsers = visibleAdminUsers.slice(
+    adminPageStart,
+    adminPageStart + ADMIN_USERS_PAGE_SIZE,
   );
+  const adminVisiblePageCount = Math.min(5, adminTotalPages);
+  const adminFirstVisiblePage = Math.max(
+    1,
+    Math.min(effectiveAdminPage - 2, adminTotalPages - adminVisiblePageCount + 1),
+  );
+  const adminVisiblePages = Array.from(
+    { length: adminVisiblePageCount },
+    (_, index) => adminFirstVisiblePage + index,
+  );
+  const adminAvatarValue = adminAvatarDraft === undefined
+    ? selectedAdminUser?.avatar_data_url
+    : adminAvatarDraft;
+  const adminAvatarName = selectedAdminUser?.username || adminUsername;
   const scheduleSummary = getScheduleSummary(scheduleSettings);
+  const currentUserRole = resolvedUserRole(currentUser);
+  const canUseExtractions = Boolean(currentUser && currentUserRole !== "viewer");
+  const canManageIntegrations = currentUserRole === "developer";
+  const canManageUsers = Boolean(currentUser && currentUserRole !== "viewer");
+  const canManageAdvancedExtraction = currentUserRole === "developer";
   const adminTargetLocked = Boolean(
     selectedAdminUser &&
-    !currentUser?.is_owner &&
-    selectedAdminUser.is_admin &&
+    currentUserRole !== "developer" &&
+    resolvedUserRole(selectedAdminUser) !== "viewer" &&
     selectedAdminUser.id !== currentUser?.id,
   );
   const canDeleteAdminUser = (user: AuthUser) => Boolean(
     !user.is_owner &&
     user.id !== currentUser?.id &&
-    (currentUser?.is_owner || !user.is_admin)
+    (currentUserRole === "developer" || resolvedUserRole(user) === "viewer")
   );
   const integrationGroups = [
     { category: "discovery", title: "Descoberta de lojistas" },
     { category: "store", title: "APIs por loja" },
   ] as const;
+  const selectedIntegrationProvider = integrationProviders.find(
+    (provider) => provider.provider === activeIntegrationProvider,
+  ) || integrationProviders[0] || null;
 
   return (
     <div className={`app-shell ${sidebarCollapsed ? "app-shell--sidebar-collapsed" : ""}`}>
@@ -1241,41 +1653,63 @@ export const HeroSection = () => {
           </nav>
 
           <div ref={accountRef} className="account-menu-root mt-auto border-t border-[var(--border)] pt-4">
-            {currentUser && accountOpen && (
+            {accountOpen && (
               <div className="account-popover">
-                <button type="button" className="account-popover__item" onClick={openExtractions}>
-                  <Download size={15} />
-                  Extrações
-                </button>
-                {currentUser.is_admin && (
-                  <button type="button" className="account-popover__item" onClick={openIntegrations}>
-                    <Plug size={15} />
-                    Integrações
+                {!currentUser && (
+                  <button type="button" className="account-popover__item" onClick={openLogin}>
+                    <LogIn size={15} />
+                    Entrar
                   </button>
                 )}
-                {currentUser.is_admin && (
-                  <button type="button" className="account-popover__item" onClick={openAdministration}>
-                    <ShieldCheck size={15} />
-                    Administração
+                {currentUser && (
+                  <>
+                    {canUseExtractions && (
+                      <button type="button" className="account-popover__item" onClick={openExtractions}>
+                        <Download size={15} />
+                        Extrações
+                      </button>
+                    )}
+                    {canManageIntegrations && (
+                      <button type="button" className="account-popover__item" onClick={openIntegrations}>
+                        <Plug size={15} />
+                        Integrações
+                      </button>
+                    )}
+                    {canManageUsers && (
+                      <button type="button" className="account-popover__item" onClick={openAdministration}>
+                        <ShieldCheck size={15} />
+                        Administração
+                      </button>
+                    )}
+                  </>
+                )}
+                <button type="button" className="account-popover__item" onClick={openSettings}>
+                  <Settings size={15} />
+                  Configurações
+                </button>
+                {currentUser && (
+                  <button
+                    type="button"
+                    onClick={handleLogout}
+                    className="account-popover__item"
+                  >
+                    <LogOut size={15} />
+                    Encerrar sessão
                   </button>
                 )}
-                <button
-                  type="button"
-                  onClick={handleLogout}
-                  className="account-popover__item"
-                >
-                  <LogOut size={15} />
-                  Encerrar sessão
-                </button>
               </div>
             )}
             <button
               type="button"
-              onClick={currentUser ? () => setAccountOpen((open) => !open) : openLogin}
+              onClick={() => setAccountOpen((open) => !open)}
+              aria-expanded={accountOpen}
+              aria-haspopup="menu"
               className="flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left transition-colors hover:bg-[var(--surface-subtle)]"
             >
               <span className="account-avatar">
-                {currentUser ? currentUser.username.slice(0, 2) : <UserRound size={17} />}
+                {currentUser?.avatar_data_url
+                  ? <img src={currentUser.avatar_data_url} alt="" />
+                  : currentUser ? currentUser.username.slice(0, 2) : <UserRound size={17} />}
               </span>
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-xs font-semibold text-[var(--foreground)]">
@@ -1318,7 +1752,7 @@ export const HeroSection = () => {
               aria-label="Selecionar SKUs do banco local"
               title="Selecionar vários SKUs"
             >
-              <ListChecks size={17} />
+              <SquareCheckBig size={17} />
               {selectedSearchSkus.length > 0 && <span>{selectedSearchSkus.length}</span>}
             </button>
             <input
@@ -1342,20 +1776,10 @@ export const HeroSection = () => {
             </button>
           </form>
 
-          <div className="header-actions">
-            <button
-              type="button"
-              className="icon-button"
-              aria-label="Abrir configurações"
-              title="Configurações"
-              onClick={openSettings}
-            >
-              <Settings size={17} />
-            </button>
-          </div>
+          <div className="header-actions" aria-hidden="true" />
         </header>
 
-        <main className="app-content">
+        <main className={activeTab === 1 || activeTab === 2 ? "app-content app-content--fixed" : "app-content"}>
           <SlidingTabs
             activeTab={activeTab}
             onTabChange={setActiveTab}
@@ -1366,6 +1790,48 @@ export const HeroSection = () => {
           />
         </main>
       </section>
+
+      {activeExtractionJob && isExtractionJobActive(activeExtractionJob) && (
+        <aside
+          className="extraction-job-card extraction-job-card--active extraction-job-card--floating"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="extraction-job-card__head">
+            <span className="extraction-job-card__icon">
+              <LoaderCircle size={16} className="animate-spin" />
+            </span>
+            <span className="extraction-job-card__copy">
+              <strong>{extractionJobTitle(activeExtractionJob)}</strong>
+              <small>
+                {activeExtractionJob.processed_skus} de {activeExtractionJob.total_skus} SKUs
+                {activeExtractionJob.batches_total > 1
+                  ? ` · lotes de ${activeExtractionJob.batch_size}`
+                  : ""}
+              </small>
+            </span>
+            {!activeExtractionJob.cancel_requested && (
+              <button type="button" className="button-quiet" onClick={() => void cancelActiveExtraction()}>
+                Cancelar
+              </button>
+            )}
+          </div>
+          <div className="extraction-job-progress" aria-hidden="true">
+            <span style={{ width: `${Math.min(100, Math.max(0, activeExtractionJob.progress_percent))}%` }} />
+          </div>
+          <div className="extraction-job-card__meta">
+            <span>
+              {activeExtractionJob.current_sku
+                ? `Processando ${activeExtractionJob.current_sku}`
+                : activeExtractionJob.message}
+            </span>
+            <span>
+              {activeExtractionJob.success_count} concluídos
+              {activeExtractionJob.error_count > 0 ? ` · ${activeExtractionJob.error_count} erros` : ""}
+            </span>
+          </div>
+        </aside>
+      )}
 
       {loginOpen && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={closeLogin}>
@@ -1450,7 +1916,7 @@ export const HeroSection = () => {
         </div>
       )}
 
-      {administrationOpen && currentUser?.is_admin && (
+      {administrationOpen && canManageUsers && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={closeAdministration}>
           <section
             className="workspace-dialog workspace-dialog--admin-list"
@@ -1470,57 +1936,68 @@ export const HeroSection = () => {
             </div>
 
             <div className="admin-user-pane">
-              <div className="admin-pane-header">
-                <div>
-                  <strong>Usuários</strong>
-                  <span>{adminUsers.length} cadastrados</span>
+              <div className="admin-directory-toolbar">
+                <div className="admin-user-search">
+                  <Search size={15} />
+                  <input
+                    type="search"
+                    value={adminSearch}
+                    onChange={(event) => {
+                      setAdminSearch(event.target.value);
+                      setAdminPage(1);
+                    }}
+                    placeholder="Buscar usuário..."
+                    aria-label="Buscar usuário"
+                  />
+                  {adminSearch && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAdminSearch("");
+                        setAdminPage(1);
+                      }}
+                      aria-label="Limpar busca"
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
                 </div>
-                <button type="button" className="button-primary" onClick={openAdminCreate}>
+                <button type="button" className="button-primary admin-create-button" onClick={openAdminCreate}>
                   <UserPlus size={15} />
                   Criar usuário
                 </button>
               </div>
 
-              <div className="admin-user-search">
-                <Search size={15} />
-                <input
-                  type="search"
-                  value={adminSearch}
-                  onChange={(event) => setAdminSearch(event.target.value)}
-                  placeholder="Buscar usuário..."
-                  aria-label="Buscar usuário"
-                />
-                {adminSearch && (
-                  <button type="button" onClick={() => setAdminSearch("")} aria-label="Limpar busca">
-                    <X size={14} />
-                  </button>
-                )}
-              </div>
-
               <div className="admin-user-list">
                 {adminLoading && !adminUsers.length ? (
                   <p className="admin-empty">Carregando usuários...</p>
-                ) : visibleAdminUsers.length ? (
-                  visibleAdminUsers.map((user) => {
+                ) : paginatedAdminUsers.length ? (
+                  paginatedAdminUsers.map((user) => {
                     return (
                       <div
                         key={user.id}
                         className={selectedAdminUser?.id === user.id ? "admin-user-row admin-user-row--active" : "admin-user-row"}
                       >
                         <button type="button" className="admin-user-row__main" onClick={() => selectAdminUser(user)}>
-                          <span className="admin-user-avatar">{user.username.slice(0, 2)}</span>
+                          <span className="admin-user-avatar">
+                            {user.avatar_data_url
+                              ? <img src={user.avatar_data_url} alt="" />
+                              : user.username.slice(0, 2)}
+                          </span>
                           <span className="min-w-0 flex-1">
                             <strong>{user.username}</strong>
-                            <small>{user.is_owner ? "Principal" : user.is_admin ? "Administrador" : "Usuário"}</small>
+                            <small>{userRoleLabel(user)}</small>
                           </span>
                         </button>
-                        {user.is_admin && (
+                        {resolvedUserRole(user) !== "viewer" && (
                           <span
                             className="admin-user-role-icon"
-                            aria-label={user.is_owner ? "Usuário principal" : "Administrador"}
-                            title={user.is_owner ? "Usuário principal" : "Administrador"}
+                            aria-label={userRoleLabel(user)}
+                            title={userRoleLabel(user)}
                           >
-                            <ShieldCheck size={15} />
+                            {resolvedUserRole(user) === "governor"
+                              ? <Shield size={15} />
+                              : <ShieldCheck size={15} />}
                           </span>
                         )}
                         {canDeleteAdminUser(user) && (
@@ -1545,25 +2022,66 @@ export const HeroSection = () => {
                   <p className="admin-empty">Nenhum usuário encontrado.</p>
                 )}
               </div>
+              {visibleAdminUsers.length > 0 && (
+                <div className="panel-footer panel-footer--pagination admin-pagination">
+                  <nav className="pagination" aria-label="Paginação de usuários">
+                    <button
+                      type="button"
+                      onClick={() => setAdminPage(effectiveAdminPage - 1)}
+                      disabled={effectiveAdminPage <= 1}
+                      aria-label="Página anterior"
+                    >
+                      <ChevronLeft size={15} />
+                    </button>
+                    {adminVisiblePages.map((pageNumber) => (
+                      <button
+                        key={pageNumber}
+                        type="button"
+                        className={pageNumber === effectiveAdminPage ? "pagination__page pagination__page--active" : "pagination__page"}
+                        onClick={() => setAdminPage(pageNumber)}
+                        aria-current={pageNumber === effectiveAdminPage ? "page" : undefined}
+                      >
+                        {pageNumber}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setAdminPage(effectiveAdminPage + 1)}
+                      disabled={effectiveAdminPage >= adminTotalPages}
+                      aria-label="Próxima página"
+                    >
+                      <ChevronRight size={15} />
+                    </button>
+                  </nav>
+                </div>
+              )}
               {!adminEditorOpen && adminError && <p className="auth-error admin-directory-message">{adminError}</p>}
             </div>
           </section>
         </div>
       )}
 
-      {administrationOpen && adminEditorOpen && currentUser?.is_admin && (
+      {administrationOpen && adminEditorOpen && canManageUsers && (
         <div className="dialog-backdrop dialog-backdrop--nested" role="presentation" onMouseDown={closeAdminEditor}>
           <section
-            className="workspace-dialog workspace-dialog--admin-editor"
+            className={selectedAdminUser
+              ? "workspace-dialog workspace-dialog--admin-editor workspace-dialog--admin-manage"
+              : "workspace-dialog workspace-dialog--admin-editor workspace-dialog--admin-create"}
             role="dialog"
             aria-modal="true"
-            aria-label={selectedAdminUser ? "Gerenciar acesso" : "Novo acesso"}
+            aria-label={selectedAdminUser ? "Gerenciar usuário" : "Novo usuário"}
             onMouseDown={(event) => event.stopPropagation()}
           >
             <div className="dialog-header">
               <div>
-                <span className="dialog-icon">{selectedAdminUser ? <ShieldCheck size={19} /> : <UserPlus size={19} />}</span>
-                <h2>{selectedAdminUser ? "Gerenciar acesso" : "Novo acesso"}</h2>
+                <span className="dialog-icon">
+                  {selectedAdminUser
+                    ? resolvedUserRole(selectedAdminUser) === "governor"
+                      ? <Shield size={19} />
+                      : <ShieldCheck size={19} />
+                    : <UserPlus size={19} />}
+                </span>
+                <h2>{selectedAdminUser ? "Gerenciar usuário" : "Novo usuário"}</h2>
               </div>
               <button type="button" className="icon-button" onClick={closeAdminEditor} aria-label="Fechar">
                 <X size={17} />
@@ -1571,42 +2089,83 @@ export const HeroSection = () => {
             </div>
 
             <form className="admin-access-form" onSubmit={saveAdminUser}>
+              <div className="admin-editor__content">
               {selectedAdminUser && (
                 <div className="admin-editor__head">
-                  <div>
-                    <h3>{selectedAdminUser.username}</h3>
-                    <small>Último acesso: {formatDateTime(selectedAdminUser.last_login)}</small>
+                  <div className="admin-editor__identity">
+                    <span className="admin-editor-avatar">
+                      {adminAvatarValue
+                        ? <img src={adminAvatarValue} alt="Foto de perfil" />
+                        : adminAvatarName.slice(0, 2)}
+                      <button
+                        type="button"
+                        className="admin-avatar-edit-button admin-avatar-edit-button--compact"
+                        onClick={() => {
+                          if (adminAvatarValue) {
+                            setAdminAvatarDraft(null);
+                          } else {
+                            avatarFileInputRef.current?.click();
+                          }
+                        }}
+                        aria-label={adminAvatarValue ? "Remover foto de perfil" : "Trocar foto"}
+                        title={adminAvatarValue ? "Remover foto" : "Trocar foto"}
+                      >
+                        {adminAvatarValue ? <Trash2 size={10} /> : <Camera size={10} />}
+                      </button>
+                    </span>
+                    <div>
+                      <h3>{selectedAdminUser.username}</h3>
+                      <small>Último acesso: {formatDateTime(selectedAdminUser.last_login)}</small>
+                    </div>
                   </div>
-                  {selectedAdminUser.is_owner && <span className="admin-role-badge">Principal</span>}
+                  {selectedAdminUser.is_owner && <span className="admin-role-badge">Administrador</span>}
+                  <input
+                    ref={avatarFileInputRef}
+                    type="file"
+                    className="sr-only"
+                    accept="image/jpeg,image/png,image/webp"
+                    onChange={selectAvatarFile}
+                  />
                 </div>
               )}
 
-              <label className="form-field">
-                <span>Login</span>
-                <input
-                  type="text"
-                  value={adminUsername}
-                  disabled={Boolean(selectedAdminUser)}
-                  required={!selectedAdminUser}
-                  minLength={3}
-                  maxLength={40}
-                  pattern="[A-Za-z0-9._-]+"
-                  onChange={(event) => {
-                    setAdminUsername(event.target.value.toUpperCase());
-                    setAdminError("");
-                  }}
-                  autoComplete="off"
-                />
-              </label>
+              {!selectedAdminUser?.is_owner && (
+                <div className="admin-editor-tabs" role="tablist" aria-label="Dados do usuário">
+                  <button type="button" role="tab" aria-selected={adminEditorTab === "access"} className={adminEditorTab === "access" ? "admin-editor-tab admin-editor-tab--active" : "admin-editor-tab"} onClick={() => setAdminEditorTab("access")}>
+                    <KeyRound size={14} /> Acesso
+                  </button>
+                  <button type="button" role="tab" aria-selected={adminEditorTab === "profile"} className={adminEditorTab === "profile" ? "admin-editor-tab admin-editor-tab--active" : "admin-editor-tab"} onClick={() => setAdminEditorTab("profile")}>
+                    <Shield size={14} /> Permissões
+                  </button>
+                </div>
+              )}
 
-              <label className="form-field">
-                <span>{selectedAdminUser ? "Nova senha" : "Senha"}</span>
-                <div className="password-input">
+              {adminEditorTab === "access" && (
+                <div className="admin-editor-panel">
+                  <label className="form-field">
+                    <span>Login</span>
+                    <input
+                      type="text"
+                      value={adminUsername}
+                      disabled={Boolean(selectedAdminUser)}
+                      minLength={3}
+                      maxLength={40}
+                      pattern="[A-Za-z0-9._-]+"
+                      onChange={(event) => {
+                        setAdminUsername(event.target.value.toUpperCase());
+                        setAdminError("");
+                      }}
+                      autoComplete="off"
+                    />
+                  </label>
+
+                  <label className="form-field">
+                    <span>{selectedAdminUser ? "Nova senha" : "Senha"}</span>
+                    <div className="password-input">
                   <input
                     type={showAdminPassword ? "text" : "password"}
                     value={adminPassword}
                     disabled={adminTargetLocked}
-                    required={!selectedAdminUser}
                     minLength={4}
                     maxLength={200}
                     onChange={(event) => {
@@ -1624,40 +2183,51 @@ export const HeroSection = () => {
                   >
                     {showAdminPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                   </button>
+                    </div>
+                    {!adminTargetLocked && (
+                      <span className="password-field-tools password-field-tools--end">
+                        <button type="button" onClick={generateAdminPassword}>
+                          <RefreshCw size={13} />
+                          Gerar senha
+                        </button>
+                      </span>
+                    )}
+                  </label>
                 </div>
-                {!adminTargetLocked && (
-                  <span className="password-field-tools password-field-tools--end">
-                    <button type="button" onClick={generateAdminPassword}>
-                      <RefreshCw size={13} />
-                      Gerar senha
-                    </button>
-                  </span>
-                )}
-              </label>
+              )}
 
-              {currentUser.is_owner && !selectedAdminUser?.is_owner && (
-                <label className="admin-toggle-row">
-                  <span>
-                    <strong>Administrador</strong>
-                    <small>Acesso à gestão de usuários</small>
-                  </span>
-                  <span className="schedule-toggle">
-                    <input
-                      type="checkbox"
-                      checked={adminIsAdmin}
-                      onChange={(event) => setAdminIsAdmin(event.target.checked)}
-                    />
-                    <span className="schedule-toggle__track"><span className="schedule-toggle__thumb" /></span>
-                  </span>
+              {adminEditorTab === "profile" && currentUserRole === "developer" && !selectedAdminUser?.is_owner && (
+                <label className="settings-field admin-role-field">
+                  <span>Perfil</span>
+                  <StyledSelect
+                    value={adminRole === "developer" ? "governor" : adminRole}
+                    ariaLabel="Perfil de acesso"
+                    options={[
+                      { value: "governor", label: "Governante" },
+                      { value: "viewer", label: "Visualizador" },
+                    ]}
+                    onChange={(role) => {
+                      setAdminRole(role as UserRole);
+                      setAdminError("");
+                    }}
+                  />
                 </label>
               )}
 
-              {adminTargetLocked && (
-                <p className="admin-notice">Somente DEUSM2 pode alterar outro administrador.</p>
+              {adminEditorTab === "profile" && currentUserRole !== "developer" && !selectedAdminUser?.is_owner && (
+                <div className="admin-profile-static">
+                  <span>Perfil</span>
+                  <strong>Visualizador</strong>
+                </div>
+              )}
+
+              {adminEditorTab === "profile" && adminTargetLocked && (
+                <p className="admin-notice">Governantes só podem gerenciar Visualizadores e a própria conta.</p>
               )}
               {adminError && <p className="auth-error">{adminError}</p>}
+              </div>
 
-              <div className="admin-editor__actions">
+              <div className="modal-action-footer admin-editor__actions">
                 <button type="submit" className="button-primary async-button" disabled={adminSaving || adminTargetLocked}>
                   <span className={adminSaving ? "async-button__content async-button__content--hidden" : "async-button__content"}>
                     {selectedAdminUser ? "Salvar" : "Criar usuário"}
@@ -1674,7 +2244,55 @@ export const HeroSection = () => {
         </div>
       )}
 
-      {administrationOpen && adminDeleteTarget && currentUser?.is_admin && (
+      {administrationOpen && adminEditorOpen && avatarCropOpen && canManageUsers && (
+        <div className="dialog-backdrop dialog-backdrop--nested dialog-backdrop--avatar-crop" role="presentation" onMouseDown={() => setAvatarCropOpen(false)}>
+          <section
+            className="workspace-dialog workspace-dialog--avatar-crop"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Ajustar foto de perfil"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="dialog-header">
+              <div>
+                <span className="dialog-icon"><Camera size={19} /></span>
+                <h2>Ajustar foto</h2>
+              </div>
+              <button type="button" className="icon-button" onClick={() => setAvatarCropOpen(false)} aria-label="Fechar">
+                <X size={17} />
+              </button>
+            </div>
+
+            <div
+              className="avatar-crop-preview"
+              aria-label="Prévia do recorte"
+              onPointerDown={startAvatarDrag}
+              onPointerMove={moveAvatarDrag}
+              onPointerUp={stopAvatarDrag}
+              onPointerCancel={stopAvatarDrag}
+              onWheel={zoomAvatarCrop}
+            >
+              <img
+                src={avatarCropSource}
+                alt="Prévia da foto"
+                draggable={false}
+                onLoad={(event) => setAvatarImageSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })}
+                style={{
+                  transform: `translate(${avatarCropX}px, ${avatarCropY}px) scale(${avatarCropZoom})`,
+                }}
+              />
+              <span className="avatar-crop-grid" aria-hidden="true" />
+            </div>
+            {avatarCropError && <p className="auth-error">{avatarCropError}</p>}
+            <div className="modal-action-footer avatar-crop-actions">
+              <button type="button" className="button-secondary" onClick={() => setAvatarCropOpen(false)}>Cancelar</button>
+              <button type="button" className="button-primary" onClick={() => void applyAvatarCrop()}>Aplicar</button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {administrationOpen && adminDeleteTarget && canManageUsers && (
         <div
           className="dialog-backdrop dialog-backdrop--nested dialog-backdrop--confirmation"
           role="presentation"
@@ -1743,7 +2361,7 @@ export const HeroSection = () => {
           >
             <div className="dialog-header">
               <div>
-                <span className="dialog-icon"><ListChecks size={19} /></span>
+                <span className="dialog-icon"><SquareCheckBig size={19} /></span>
                 <h2>Selecionar SKUs</h2>
               </div>
               <button type="button" className="icon-button" onClick={() => setSkuSelectorOpen(false)} aria-label="Fechar">
@@ -1769,13 +2387,11 @@ export const HeroSection = () => {
               ) : visibleSkuSelectorItems.length ? (
                 visibleSkuSelectorItems.map((item) => {
                   const checked = draftSearchSkus.includes(item.sku);
-                  const disabled = !checked && draftSearchSkus.length >= 30;
                   return (
-                    <label key={item.sku} className={disabled ? "sku-selector-row sku-selector-row--disabled" : "sku-selector-row"}>
+                    <label key={item.sku} className="sku-selector-row">
                       <input
                         type="checkbox"
                         checked={checked}
-                        disabled={disabled}
                         onChange={() => toggleDraftSearchSku(item.sku)}
                       />
                       <span className="min-w-0 flex-1">
@@ -1793,20 +2409,11 @@ export const HeroSection = () => {
             {skuSelectorError && <p className="auth-error">{skuSelectorError}</p>}
 
             <div className="sku-selector-footer">
-              <span>{draftSearchSkus.length} de 30 selecionados</span>
+              <span>{draftSearchSkus.length} de {skuStatusItems.length} selecionados</span>
               <div className="sku-selector-footer__actions">
-                {draftSearchSkus.length > 0 && (
-                  <button
-                    type="button"
-                    className="button-secondary"
-                    onClick={() => {
-                      setDraftSearchSkus([]);
-                      setSkuSelectorError("");
-                    }}
-                  >
-                    Desmarcar
-                  </button>
-                )}
+                <button type="button" className="button-secondary" onClick={toggleAllDraftSearchSkus}>
+                  {draftSearchSkus.length ? "Desmarcar tudo" : "Marcar tudo"}
+                </button>
                 <button type="button" className="button-primary" onClick={searchSelectedSkus} disabled={!draftSearchSkus.length || loading}>
                   {loading ? <LoaderCircle size={15} className="animate-spin" /> : <Search size={15} />}
                   Pesquisar
@@ -1836,106 +2443,101 @@ export const HeroSection = () => {
               </button>
             </div>
 
-            <div className="settings-panel">
-              <section className="settings-section settings-section--appearance">
-                <div className="settings-section__head">
-                  <h3>Aparência</h3>
-                </div>
-                <div className="settings-grid">
-                  <label className="settings-field">
-                    <span>Tema</span>
-                    <div className="settings-select">
-                      <select
-                        value={theme}
-                        onChange={(event) => updateTheme(event.target.value as ThemeMode)}
-                      >
-                        <option value="light">Claro</option>
-                        <option value="dark">Escuro</option>
-                      </select>
-                      <ChevronDown size={16} aria-hidden="true" />
-                    </div>
-                  </label>
-                </div>
-              </section>
+            <div className="modal-workspace settings-workspace">
+              <div className="modal-sidebar settings-tabs" role="tablist" aria-label="Áreas de configurações">
+                <button type="button" role="tab" aria-selected={settingsTab === "general"} className={settingsTab === "general" ? "extraction-tab extraction-tab--active" : "extraction-tab"} onClick={() => setSettingsTab("general")}>
+                  <Settings size={15} />
+                  Geral
+                </button>
+                <button type="button" role="tab" aria-selected={settingsTab === "about"} className={settingsTab === "about" ? "extraction-tab extraction-tab--active" : "extraction-tab"} onClick={() => setSettingsTab("about")}>
+                  <Info size={15} />
+                  Sobre
+                </button>
+              </div>
 
-              <section className="settings-section settings-section--format">
-                <div className="settings-section__head">
-                  <h3>Formato</h3>
+              <div className="modal-content-panel">
+                <div className="modal-content-scroll settings-panel">
+                  {settingsTab === "general" && (
+                    <section className="settings-section" role="tabpanel">
+                      <div className="settings-grid settings-grid--rows">
+                        <label className="settings-field">
+                          <span>Tema</span>
+                          <StyledSelect
+                            value={theme}
+                            ariaLabel="Tema"
+                            options={[
+                              { value: "light", label: "Claro" },
+                              { value: "dark", label: "Escuro" },
+                            ]}
+                            onChange={(selectedTheme) => updateTheme(selectedTheme as ThemeMode)}
+                          />
+                        </label>
+                        <label className="settings-field">
+                          <span>CEP de referência</span>
+                          <input inputMode="numeric" value={interfacePreferences.logisticsPostalCode} onChange={(event) => updateInterfacePreferences((currentPreferences) => ({ ...currentPreferences, logisticsPostalCode: event.target.value.replace(/\D/g, "").slice(0, 8) }))} />
+                        </label>
+                        <label className="settings-field">
+                          <span>Moeda</span>
+                          <StyledSelect
+                            value={interfacePreferences.currency}
+                            ariaLabel="Moeda"
+                            options={currencyOptions}
+                            onChange={(currency) => updateInterfacePreferences((currentPreferences) => ({ ...currentPreferences, currency }))}
+                          />
+                        </label>
+                        <label className="settings-field">
+                          <span>Formato numérico</span>
+                          <StyledSelect
+                            value={interfacePreferences.locale}
+                            ariaLabel="Formato numérico"
+                            options={localeOptions}
+                            onChange={(locale) => updateInterfacePreferences((currentPreferences) => ({ ...currentPreferences, locale }))}
+                          />
+                        </label>
+                      </div>
+                    </section>
+                  )}
+                  {settingsTab === "about" && (
+                    <section className="settings-about" role="tabpanel">
+                      <strong className="settings-about__title">NeveTracker</strong>
+                      <div className="settings-about__copyright">
+                        <p>Copyright © 2026 Mateus Lopes</p>
+                        <p>Todos os direitos reservados.</p>
+                      </div>
+                      <div className="settings-about__group">
+                        <h3>Repositórios</h3>
+                        <a
+                          className="settings-about__link"
+                          href="https://github.com/Etamus"
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          <Github size={16} aria-hidden="true" />
+                          <span>GitHub</span>
+                        </a>
+                      </div>
+                      <div className="settings-about__group">
+                        <h3>Informações Legais</h3>
+                        <a
+                          className="settings-about__link"
+                          href="https://github.com/Etamus/NeveTracker/blob/main/LICENSE.txt"
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          <Scale size={16} aria-hidden="true" />
+                          <span>Licença</span>
+                        </a>
+                      </div>
+                    </section>
+                  )}
                 </div>
-                <div className="settings-grid">
-                  <label className="settings-field">
-                    <span>Moeda</span>
-                    <div className="settings-select">
-                      <select
-                        value={interfacePreferences.currency}
-                        onChange={(event) =>
-                          updateInterfacePreferences((currentPreferences) => ({
-                            ...currentPreferences,
-                            currency: event.target.value,
-                          }))
-                        }
-                      >
-                        {currencyOptions.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                      <ChevronDown size={16} aria-hidden="true" />
-                    </div>
-                  </label>
-
-                  <label className="settings-field">
-                    <span>Formato numérico</span>
-                    <div className="settings-select">
-                      <select
-                        value={interfacePreferences.locale}
-                        onChange={(event) =>
-                          updateInterfacePreferences((currentPreferences) => ({
-                            ...currentPreferences,
-                            locale: event.target.value,
-                          }))
-                        }
-                      >
-                        {localeOptions.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                      <ChevronDown size={16} aria-hidden="true" />
-                    </div>
-                  </label>
-                </div>
-              </section>
-
-              <section className="settings-section settings-section--logistics">
-                <div className="settings-section__head">
-                  <h3>Logística</h3>
-                </div>
-                <div className="settings-grid">
-                  <label className="settings-field">
-                    <span>CEP de referência</span>
-                    <input
-                      inputMode="numeric"
-                      value={interfacePreferences.logisticsPostalCode}
-                      onChange={(event) =>
-                        updateInterfacePreferences((currentPreferences) => ({
-                          ...currentPreferences,
-                          logisticsPostalCode: event.target.value.replace(/\D/g, "").slice(0, 8),
-                        }))
-                      }
-                    />
-                  </label>
-                </div>
-              </section>
-
+              </div>
             </div>
           </section>
         </div>
       )}
 
-      {integrationsOpen && currentUser?.is_admin && (
+      {integrationsOpen && canManageIntegrations && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => setIntegrationsOpen(false)}>
           <section
             className="workspace-dialog workspace-dialog--integrations"
@@ -1954,147 +2556,169 @@ export const HeroSection = () => {
               </button>
             </div>
 
-            <div className="integration-modal-body">
-              {integrationsLoading ? (
-                <div className="integration-loading">
-                  <LoaderCircle size={17} className="animate-spin" />
-                  Carregando integrações
-                </div>
-              ) : (
-                integrationGroups.map((group) => {
+            <div className="modal-workspace integration-workspace">
+              <nav className="modal-sidebar integration-sidebar" aria-label="Provedores de integração">
+                {integrationGroups.map((group) => {
                   const providers = integrationProviders.filter((provider) => provider.category === group.category);
                   if (!providers.length) return null;
-
                   return (
-                    <section className="integration-group" key={group.category}>
-                      <div className="integration-group__head">
-                        <h3>{group.title}</h3>
-                      </div>
-                      <div className="integration-list">
-                        {providers.map((provider) => {
-                          const extraField = provider.provider === "bright_data"
-                            ? { label: "Zona SERP", value: provider.zone || "", key: "zone" as const }
-                            : provider.provider === "apify"
-                              ? { label: "Actor ID", value: provider.actor_id || "", key: "actor_id" as const }
-                              : provider.provider === "dataforseo"
-                                ? { label: "Login", value: provider.login || "", key: "login" as const }
-                                : null;
+                    <div className="modal-sidebar__group" key={group.category}>
+                      <span>{group.title}</span>
+                      {providers.map((provider) => (
+                        <button
+                          type="button"
+                          key={provider.provider}
+                          className={selectedIntegrationProvider?.provider === provider.provider ? "modal-sidebar__item modal-sidebar__item--active" : "modal-sidebar__item"}
+                          onClick={() => setActiveIntegrationProvider(provider.provider)}
+                        >
+                          <span>{provider.label}</span>
+                          {provider.enabled && <i className="status-dot status-dot--updated" aria-hidden="true" />}
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })}
+              </nav>
 
-                          return (
-                            <div className={`integration-provider integration-provider--${provider.category}`} key={provider.provider}>
-                              <div className="integration-provider__head">
-                                <div>
-                                  <div className="integration-provider__title">
-                                    <strong>{provider.label}</strong>
-                                    <a
-                                      href={provider.credential_url}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      onClick={(event) => event.stopPropagation()}
-                                    >
-                                      Obter credencial
-                                      <ExternalLink size={12} aria-hidden="true" />
-                                    </a>
-                                  </div>
-                                  <span>{provider.description}</span>
-                                  <span className={`integration-quota ${provider.quota.hard_locked ? "integration-quota--locked" : ""}`}>
-                                    <ShieldCheck size={13} aria-hidden="true" />
-                                    {provider.quota.limit === null
-                                      ? "Sem cobrança por uso: nenhuma cota financeira necessária"
-                                      : provider.quota.hard_locked
-                                        ? `Cota gratuita esgotada: novas chamadas estão bloqueadas`
-                                        : `${provider.quota.remaining?.toLocaleString("pt-BR")} de ${provider.quota.limit.toLocaleString("pt-BR")} ${provider.quota.unit} disponíveis ${provider.quota.period === "monthly" ? "neste mês" : "na franquia gratuita"}`}
-                                  </span>
-                                </div>
-                                <label className="schedule-toggle">
-                                  <input
-                                    type="checkbox"
-                                    checked={provider.enabled}
-                                    onChange={(event) => updateIntegrationProvider(provider.provider, { enabled: event.target.checked })}
-                                  />
-                                  <span className="schedule-toggle__track" aria-hidden="true">
-                                    <span className="schedule-toggle__thumb" />
-                                  </span>
-                                  {provider.enabled ? "Ativo" : "Inativo"}
-                                </label>
+              <div className="modal-content-panel">
+                <div className="modal-content-scroll integration-modal-body">
+                  {integrationsLoading ? (
+                    <div className="integration-loading">
+                      <LoaderCircle size={17} className="animate-spin" />
+                      Carregando integrações
+                    </div>
+                  ) : selectedIntegrationProvider ? (() => {
+                    const provider = selectedIntegrationProvider;
+                    const quotaPercent = provider.quota.limit === null
+                      ? 100
+                      : Math.max(0, Math.min(100, Math.round(
+                        ((provider.quota.remaining || 0) / provider.quota.limit) * 100,
+                      )));
+                    const quotaLabel = provider.quota.limit === null
+                      ? "Sem limite"
+                      : provider.quota.hard_locked
+                        ? "Cota esgotada"
+                        : `${quotaPercent}% disponível`;
+                    const credentialLabel = provider.credential_label === "Access token"
+                      ? "Token"
+                      : ["API key", "API token", "API password"].includes(provider.credential_label)
+                        ? "API"
+                        : provider.credential_label;
+                    const extraField = provider.provider === "bright_data"
+                      ? { label: "Zona SERP", value: provider.zone || "", key: "zone" as const }
+                      : provider.provider === "apify"
+                        ? { label: "Actor ID", value: provider.actor_id || "", key: "actor_id" as const }
+                        : provider.provider === "dataforseo"
+                          ? { label: "Login", value: provider.login || "", key: "login" as const }
+                          : null;
+                    return (
+                      <div className={`integration-provider integration-provider--${provider.category}`}>
+                        <div className="integration-provider__head">
+                          <div>
+                            <div className="integration-provider__title">
+                              <strong>{provider.label}</strong>
+                              <a href={provider.credential_url} target="_blank" rel="noreferrer">
+                                Obter credencial
+                                <ExternalLink size={12} aria-hidden="true" />
+                              </a>
+                            </div>
+                            <span>{provider.description}</span>
+                          </div>
+                          <label className="schedule-toggle">
+                            <input type="checkbox" checked={provider.enabled} onChange={(event) => updateIntegrationProvider(provider.provider, { enabled: event.target.checked })} />
+                            <span className="schedule-toggle__track" aria-hidden="true"><span className="schedule-toggle__thumb" /></span>
+                            {provider.enabled ? "Ativo" : "Inativo"}
+                          </label>
+                          {provider.provider !== "mercado_livre" && (
+                            <div
+                              className={`integration-quota-meter ${provider.quota.hard_locked ? "integration-quota-meter--locked" : ""}`}
+                              aria-label={quotaLabel}
+                            >
+                              <div className="integration-quota-meter__label">
+                                  <span>Cota</span>
+                                <strong>{quotaLabel}</strong>
                               </div>
+                              <span className="integration-quota-meter__track" aria-hidden="true">
+                                <span style={{ width: `${quotaPercent}%` }} />
+                              </span>
+                            </div>
+                          )}
+                        </div>
 
-                              <div className="integration-fields">
-                                <label className="settings-field integration-field--key">
-                                  <span>{provider.credential_label}</span>
-                                  <input
-                                    type="password"
-                                    autoComplete="off"
-                                    value={integrationKeys[provider.provider] || ""}
-                                    placeholder={provider.api_key_masked || "Cole a credencial"}
-                                    onChange={(event) => setIntegrationKeys((currentKeys) => ({
-                                      ...currentKeys,
-                                      [provider.provider]: event.target.value,
-                                    }))}
-                                  />
+                        <div className="integration-config">
+                          <section className="integration-config-section">
+                            <div className="integration-config-section__head">
+                              <strong>Credenciais</strong>
+                              <span>Dados de acesso fornecidos pelo provedor</span>
+                            </div>
+                            <div className="integration-fields integration-fields--credentials">
+                              <label className="settings-field integration-field--key">
+                                <span>{credentialLabel}</span>
+                                <input
+                                  type="password"
+                                  autoComplete="off"
+                                  value={integrationKeys[provider.provider] || ""}
+                                  placeholder={provider.api_key_masked || ""}
+                                  onChange={(event) => setIntegrationKeys((currentKeys) => ({ ...currentKeys, [provider.provider]: event.target.value }))}
+                                />
+                              </label>
+                              {extraField && (
+                                <label className="settings-field integration-field--endpoint">
+                                  <span>{extraField.label}</span>
+                                  <input value={extraField.value} onChange={(event) => updateIntegrationProvider(provider.provider, { [extraField.key]: event.target.value })} />
                                 </label>
+                              )}
+                            </div>
+                          </section>
 
-                                {extraField && (
-                                  <label className="settings-field integration-field--endpoint">
-                                    <span>{extraField.label}</span>
-                                    <input
-                                      value={extraField.value}
-                                      onChange={(event) => updateIntegrationProvider(provider.provider, {
-                                        [extraField.key]: event.target.value,
+                          {(provider.supports_usage_mode || provider.supports_limit) && (
+                            <section className="integration-config-section">
+                              <div className="integration-config-section__head">
+                                <strong>Comportamento</strong>
+                                <span>Regras de uso durante as extrações</span>
+                              </div>
+                              <div className="integration-fields integration-fields--behavior">
+                                {provider.supports_usage_mode && (
+                                  <label className="settings-field integration-field--mode">
+                                    <span>Função</span>
+                                    <StyledSelect
+                                      value={provider.usage_mode}
+                                      ariaLabel="Função"
+                                      options={[
+                                        { value: "fallback", label: "Completar lacunas" },
+                                        { value: "always", label: "Toda extração" },
+                                      ]}
+                                      onChange={(usageMode) => updateIntegrationProvider(provider.provider, {
+                                        usage_mode: usageMode as IntegrationProviderSettings["usage_mode"],
                                       })}
                                     />
                                   </label>
                                 )}
-
-                                {provider.supports_usage_mode && (
-                                  <label className="settings-field integration-field--mode">
-                                    <span>Quando usar</span>
-                                    <div className="settings-select">
-                                      <select
-                                        value={provider.usage_mode}
-                                        onChange={(event) => updateIntegrationProvider(provider.provider, {
-                                          usage_mode: event.target.value as IntegrationProviderSettings["usage_mode"],
-                                        })}
-                                      >
-                                        <option value="fallback">Completar lacunas</option>
-                                        <option value="always">Toda extração</option>
-                                      </select>
-                                      <ChevronDown size={16} aria-hidden="true" />
-                                    </div>
-                                  </label>
-                                )}
-
                                 {provider.supports_limit && (
                                   <label className="settings-field integration-field--limit">
-                                    <span>Resultados por SKU</span>
-                                    <div className="settings-select">
-                                      <select
-                                        value={provider.max_results}
-                                        onChange={(event) => updateIntegrationProvider(provider.provider, {
-                                          max_results: Number(event.target.value),
-                                        })}
-                                      >
-                                        {[10, 20, 30, 40, 50, 100].map((limit) => (
-                                          <option key={limit} value={limit}>{limit}</option>
-                                        ))}
-                                      </select>
-                                      <ChevronDown size={16} aria-hidden="true" />
-                                    </div>
+                                    <span>Quantidade de resultados</span>
+                                    <StyledSelect
+                                      value={provider.max_results}
+                                      ariaLabel="Quantidade de resultados"
+                                      options={(provider.provider === "mercado_livre"
+                                        ? [50, 100, 200, 300, 500]
+                                        : [10, 20, 30, 40, 50, 100]
+                                      ).map((limit) => ({ value: limit, label: String(limit) }))}
+                                      onChange={(maxResults) => updateIntegrationProvider(provider.provider, { max_results: maxResults })}
+                                    />
                                   </label>
                                 )}
                               </div>
-                            </div>
-                          );
-                        })}
+                            </section>
+                          )}
+                        </div>
                       </div>
-                    </section>
-                  );
-                })
-              )}
-            </div>
+                    );
+                  })() : null}
+                  {integrationsError && <p className="auth-error">{integrationsError}</p>}
+                </div>
 
-            {integrationsError && <p className="auth-error">{integrationsError}</p>}
-            <div className="integration-modal-footer">
+                <div className="modal-action-footer integration-modal-footer">
               <button
                 type="button"
                 className="button-primary"
@@ -2104,13 +2728,18 @@ export const HeroSection = () => {
                 {integrationsSaving ? <LoaderCircle size={15} className="animate-spin" /> : <KeyRound size={15} />}
                 Salvar
               </button>
+                </div>
+              </div>
             </div>
           </section>
         </div>
       )}
 
-      {extractionsOpen && (
-        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setExtractionsOpen(false)}>
+      {extractionsOpen && canUseExtractions && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => {
+          setCrawlerSourcesHistoryOpen(false);
+          setExtractionsOpen(false);
+        }}>
           <section
             className="workspace-dialog workspace-dialog--wide"
             role="dialog"
@@ -2123,12 +2752,16 @@ export const HeroSection = () => {
                 <span className="dialog-icon"><Database size={19} /></span>
                 <h2>Extrações</h2>
               </div>
-              <button type="button" className="icon-button" onClick={() => setExtractionsOpen(false)} aria-label="Fechar">
+              <button type="button" className="icon-button" onClick={() => {
+                setCrawlerSourcesHistoryOpen(false);
+                setExtractionsOpen(false);
+              }} aria-label="Fechar">
                 <X size={17} />
               </button>
             </div>
 
-            <div className="extraction-tabs" role="tablist" aria-label="Áreas de extração">
+            <div className="modal-workspace extraction-workspace">
+            <div className="modal-sidebar extraction-tabs" role="tablist" aria-label="Áreas de extração">
               <button
                 type="button"
                 role="tab"
@@ -2137,8 +2770,20 @@ export const HeroSection = () => {
                 onClick={() => setExtractionTab("extract")}
               >
                 <Download size={15} />
-                Extração
+                Execução
               </button>
+              {canManageAdvancedExtraction && (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={extractionTab === "control"}
+                  className={extractionTab === "control" ? "extraction-tab extraction-tab--active" : "extraction-tab"}
+                  onClick={() => setExtractionTab("control")}
+                >
+                  <Wrench size={15} />
+                  Definições
+                </button>
+              )}
               <button
                 type="button"
                 role="tab"
@@ -2147,76 +2792,33 @@ export const HeroSection = () => {
                 onClick={() => setExtractionTab("schedule")}
               >
                 <CalendarClock size={15} />
-                Programado
+                Agendamento
               </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={extractionTab === "database"}
-                className={extractionTab === "database" ? "extraction-tab extraction-tab--active" : "extraction-tab"}
-                onClick={() => setExtractionTab("database")}
-              >
-                <Database size={15} />
-                Banco local
-              </button>
+              {canManageAdvancedExtraction && (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={extractionTab === "database"}
+                  className={extractionTab === "database" ? "extraction-tab extraction-tab--active" : "extraction-tab"}
+                  onClick={() => setExtractionTab("database")}
+                >
+                  <Database size={15} />
+                  Dados
+                </button>
+              )}
             </div>
 
-            {activeExtractionJob && (
-              <div
-                className={
-                  isExtractionJobActive(activeExtractionJob)
-                    ? "extraction-job-card extraction-job-card--active"
-                    : "extraction-job-card"
-                }
-                role="status"
-                aria-live="polite"
-              >
-                <div className="extraction-job-card__head">
-                  <span className="extraction-job-card__icon">
-                    {isExtractionJobActive(activeExtractionJob)
-                      ? <LoaderCircle size={16} className="animate-spin" />
-                      : <ListChecks size={16} />}
-                  </span>
-                  <span className="extraction-job-card__copy">
-                    <strong>{extractionJobTitle(activeExtractionJob)}</strong>
-                    <small>
-                      {activeExtractionJob.processed_skus} de {activeExtractionJob.total_skus} SKUs
-                      {activeExtractionJob.batches_total > 1
-                        ? ` · lotes de ${activeExtractionJob.batch_size}`
-                        : ""}
-                    </small>
-                  </span>
-                  {isExtractionJobActive(activeExtractionJob) && !activeExtractionJob.cancel_requested && (
-                    <button type="button" className="button-quiet" onClick={() => void cancelActiveExtraction()}>
-                      Cancelar
-                    </button>
-                  )}
-                </div>
-                <div className="extraction-job-progress" aria-hidden="true">
-                  <span style={{ width: `${Math.min(100, Math.max(0, activeExtractionJob.progress_percent))}%` }} />
-                </div>
-                <div className="extraction-job-card__meta">
-                  <span>
-                    {activeExtractionJob.current_sku
-                      ? `Processando ${activeExtractionJob.current_sku}`
-                      : activeExtractionJob.message}
-                  </span>
-                  <span>
-                    {activeExtractionJob.success_count} concluídos
-                    {activeExtractionJob.error_count > 0 ? ` · ${activeExtractionJob.error_count} erros` : ""}
-                  </span>
-                </div>
-              </div>
-            )}
+            <div className="modal-content-panel">
+            <div className={`modal-content-scroll extraction-content-scroll extraction-content-scroll--${extractionTab}`}>
 
             {extractionTab === "extract" ? (
               <div className="extraction-panel" role="tabpanel">
-                <form onSubmit={runExtractions} className="extraction-form extraction-form--fill">
+                <form id="extraction-run-form" onSubmit={runExtractions} className="extraction-form extraction-form--fill">
                   <div className="sku-import-block">
                     <div className="sku-import-block__head">
                       <div>
                         <strong>Importar planilha</strong>
-                        <span>XLSX, XLSM ou CSV com uma coluna SKU</span>
+                        <span>XLSX, XLSM ou CSV.</span>
                       </div>
                       <button type="button" className="button-quiet" onClick={downloadSkuTemplate}>
                         <FileDown size={15} />
@@ -2256,7 +2858,10 @@ export const HeroSection = () => {
                   </div>
 
                   <label className="textarea-field">
-                    <span>SKUs</span>
+                    <span className="textarea-field__head">
+                      <strong>Preenchimento manual</strong>
+                      <small>Alimente com os materiais que serão extraídos.</small>
+                    </span>
                     <textarea
                       value={skuInput}
                       onChange={(event) => {
@@ -2266,20 +2871,6 @@ export const HeroSection = () => {
                     />
                   </label>
 
-                  <div className="extraction-actions">
-                    <label className="check-field">
-                      <input
-                        type="checkbox"
-                        checked={forceExtraction}
-                        onChange={(event) => setForceExtraction(event.target.checked)}
-                      />
-                      <span>Atualizar via APIs</span>
-                    </label>
-                    <button type="submit" className="button-primary" disabled={extractionRunning}>
-                      {extractionRunning ? <LoaderCircle size={15} className="animate-spin" /> : <Download size={15} />}
-                      {extractionRunning ? `Na fila ${extractionProgress}` : "Extrair"}
-                    </button>
-                  </div>
                 </form>
 
                 {extractionError && <p className="auth-error">{extractionError}</p>}
@@ -2302,34 +2893,8 @@ export const HeroSection = () => {
             ) : extractionTab === "schedule" ? (
               <div className="extraction-panel" role="tabpanel">
                 <div className="schedule-card">
-                  <div className="schedule-card__head">
-                    <div className={scheduleSettings.enabled ? "schedule-summary" : "schedule-summary schedule-summary--inactive"}>
-                      <span className="schedule-summary__icon"><CalendarClock size={17} /></span>
-                      <span className="schedule-summary__content">
-                        <strong>{scheduleSummary.primary}</strong>
-                        <small>{scheduleSummary.secondary}</small>
-                      </span>
-                    </div>
-                    <label className="schedule-toggle">
-                      <input
-                        type="checkbox"
-                        checked={scheduleSettings.enabled}
-                        onChange={(event) =>
-                          setScheduleSettings((currentSettings) => ({
-                            ...currentSettings,
-                            enabled: event.target.checked,
-                          }))
-                        }
-                      />
-                      <span className="schedule-toggle__track" aria-hidden="true">
-                        <span className="schedule-toggle__thumb" />
-                      </span>
-                      <span>{scheduleSettings.enabled ? "Ativo" : "Inativo"}</span>
-                    </label>
-                  </div>
-
                   <div className="schedule-grid">
-                    <label className="schedule-field schedule-field--frequency">
+                    <label className="schedule-field">
                       <span>Horário inicial</span>
                       <input
                         type="time"
@@ -2358,7 +2923,7 @@ export const HeroSection = () => {
                       />
                     </label>
 
-                    <label className="schedule-field">
+                    <label className="schedule-field schedule-field--frequency">
                       <span>Frequência</span>
                       <span className="schedule-frequency-input">
                         <input
@@ -2401,124 +2966,365 @@ export const HeroSection = () => {
                     </div>
                   </div>
 
-                  {scheduleStatus && <p className="schedule-status">{scheduleStatus}</p>}
-
-                  <div className="schedule-row">
-                    <label className="check-field">
+                  <div className="schedule-card__head schedule-card__head--footer">
+                    <div className={scheduleSettings.enabled ? "schedule-summary" : "schedule-summary schedule-summary--inactive"}>
+                      <span className="schedule-summary__icon"><CalendarClock size={17} /></span>
+                      <span className="schedule-summary__content">
+                        <strong>{scheduleSummary.primary}</strong>
+                        <small>{scheduleSummary.secondary}</small>
+                      </span>
+                    </div>
+                    <label className="schedule-toggle">
                       <input
                         type="checkbox"
-                        checked={scheduleSettings.forceRefresh}
+                        checked={scheduleSettings.enabled}
                         onChange={(event) =>
                           setScheduleSettings((currentSettings) => ({
                             ...currentSettings,
-                            forceRefresh: event.target.checked,
+                            enabled: event.target.checked,
                           }))
                         }
                       />
-                      <span>Atualizar via APIs</span>
-                    </label>
-                    <button
-                      type="button"
-                      className="button-primary async-button"
-                      onClick={() => void saveSchedule()}
-                      disabled={scheduleSaving}
-                    >
-                      <span className={scheduleSaving ? "async-button__content async-button__content--hidden" : "async-button__content"}>
-                        <CheckCircle2 size={15} />
-                        Salvar
+                      <span className="schedule-toggle__track" aria-hidden="true">
+                        <span className="schedule-toggle__thumb" />
                       </span>
-                      {scheduleSaving && (
-                        <span className="async-button__loader" aria-hidden="true">
-                          <LoaderCircle size={16} className="animate-spin" />
-                        </span>
-                      )}
-                    </button>
+                      <span>{scheduleSettings.enabled ? "Ativo" : "Inativo"}</span>
+                    </label>
                   </div>
 
                 </div>
               </div>
-            ) : (
+            ) : extractionTab === "database" ? (
               <div className="extraction-panel" role="tabpanel">
                 <div className="sku-status-card">
-                  <div className="sku-status-card__header">
-                    <div>
-                      <h3>Banco local</h3>
-                      <p>
-                        {normalizedSkuDatabaseFilter
-                          ? `${visibleDatabaseSkuItems.length} de ${skuStatusItems.length} SKUs`
-                          : `${skuStatusItems.length} SKUs acompanhados`}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      className="button-secondary sku-refresh-all"
-                      onClick={() => void refreshAllSkus()}
-                      disabled={extractionRunning || refreshingAllSkus || !skuStatusItems.length}
-                    >
-                      {refreshingAllSkus && <LoaderCircle size={15} className="animate-spin" />}
-                      {refreshingAllSkus ? extractionProgress || "Atualizando" : "Atualizar"}
-                    </button>
-                  </div>
-                  <div className="sku-status-search">
-                    <div className="sku-status-search__field">
-                      <Search size={15} />
-                      <input
-                        type="search"
-                        value={skuDatabaseFilter}
-                        onChange={(event) => setSkuDatabaseFilter(event.target.value)}
-                        placeholder="Pesquisar no banco local..."
-                        aria-label="Pesquisar SKUs do banco local"
-                      />
-                    </div>
-                  </div>
-                  <div className="sku-status-list">
-                    {skuStatusLoading && !skuStatusItems.length ? (
-                      <p className="sku-status-empty">Carregando...</p>
-                    ) : visibleDatabaseSkuItems.length ? (
-                      visibleDatabaseSkuItems.map((item) => (
-                        <div key={item.sku} className="sku-status-row">
-                          <strong>{item.sku}</strong>
-                          <span className="sku-status-row__offers">{item.offer_count} ofertas</span>
-                          <span className="sku-status-row__stores">{item.store_count} lojas</span>
-                          <time>{formatDateTime(item.last_update)}</time>
-                          <span className="sku-status-actions">
+                  <div className="sku-database-toolbar">
+                    <div className="sku-database-actions">
+                      <div className="sku-status-search">
+                        <div className="sku-status-search__field">
+                          <Search size={15} />
+                          <input
+                            type="search"
+                            value={skuDatabaseFilter}
+                            onChange={(event) => setSkuDatabaseFilter(event.target.value)}
+                            placeholder="Pesquisar materiais..."
+                            aria-label="Pesquisar SKUs do banco local"
+                          />
+                          {skuDatabaseFilter && (
                             <button
                               type="button"
-                              className="table-action"
-                              onClick={() => void deleteLocalSku(item.sku)}
-                              disabled={extractionRunning || Boolean(deletingSku)}
-                              aria-label={`Excluir ${item.sku}`}
-                              title="Excluir SKU"
+                              className="sku-status-search__clear"
+                              onClick={() => setSkuDatabaseFilter("")}
+                              aria-label="Limpar pesquisa"
+                              title="Limpar pesquisa"
                             >
-                              {deletingSku === item.sku
-                                ? <LoaderCircle size={15} className="animate-spin" />
-                                : <Trash2 size={15} />}
+                              <X size={14} />
                             </button>
-                            <button
-                              type="button"
-                              className="table-action"
-                              onClick={() => void refreshSingleSku(item.sku)}
-                              disabled={extractionRunning || Boolean(refreshingSku) || Boolean(deletingSku)}
-                              aria-label={`Atualizar ${item.sku}`}
-                              title="Atualizar SKU"
-                            >
-                              {refreshingSku === item.sku
-                                ? <LoaderCircle size={15} className="animate-spin" />
-                                : <RefreshCw size={15} />}
-                            </button>
+                          )}
+                          <span className="sku-status-search__count">
+                            <Database size={13} aria-hidden="true" />
+                            {normalizedSkuDatabaseFilter
+                              ? `${visibleDatabaseSkuItems.length} de ${skuStatusItems.length} SKUs`
+                              : `${skuStatusItems.length} SKUs disponíveis`}
                           </span>
                         </div>
-                      ))
-                    ) : (
-                      <p className="sku-status-empty">
-                        {skuStatusItems.length ? "Nenhum SKU encontrado." : "Nenhum SKU no banco local."}
-                      </p>
-                    )}
+                      </div>
+                      <button
+                        type="button"
+                        className="button-secondary sku-refresh-all"
+                        onClick={() => void refreshAllSkus()}
+                        disabled={extractionRunning || refreshingAllSkus || !skuStatusItems.length}
+                      >
+                        {refreshingAllSkus ? <LoaderCircle size={15} className="animate-spin" /> : <RefreshCw size={14} />}
+                        {refreshingAllSkus ? extractionProgress || "Atualizando" : "Atualizar"}
+                      </button>
+                    </div>
+                  </div>
+                  <div className={normalizedSkuDatabaseFilter
+                    ? "sku-database-table sku-database-table--filtered"
+                    : "sku-database-table"}
+                  >
+                    <div className="sku-status-table-head" aria-hidden="true">
+                      <span>SKU</span>
+                      <span>Ofertas</span>
+                      <span>Lojas</span>
+                      <span>Atualizado em</span>
+                      <span>Ações</span>
+                    </div>
+                    <div className="sku-status-list">
+                      {skuStatusLoading && !skuStatusItems.length ? (
+                        <p className="sku-status-empty">Carregando...</p>
+                      ) : visibleDatabaseSkuItems.length ? (
+                        visibleDatabaseSkuItems.map((item) => (
+                          <div key={item.sku} className="sku-status-row">
+                            <strong>{item.sku}</strong>
+                            <span className="sku-status-row__offers">{item.offer_count}</span>
+                            <span className="sku-status-row__stores">{item.store_count}</span>
+                            <time>{formatDateTime(item.last_update)}</time>
+                            <span className="sku-status-actions">
+                              <button
+                                type="button"
+                                className="table-action"
+                                onClick={() => void deleteLocalSku(item.sku)}
+                                disabled={extractionRunning || Boolean(deletingSku)}
+                                aria-label={`Excluir ${item.sku}`}
+                                title="Excluir SKU"
+                              >
+                                {deletingSku === item.sku
+                                  ? <LoaderCircle size={15} className="animate-spin" />
+                                  : <Trash2 size={15} />}
+                              </button>
+                              <button
+                                type="button"
+                                className="table-action"
+                                onClick={() => void refreshSingleSku(item.sku)}
+                                disabled={extractionRunning || Boolean(refreshingSku) || Boolean(deletingSku)}
+                                aria-label={`Atualizar ${item.sku}`}
+                                title="Atualizar SKU"
+                              >
+                                {refreshingSku === item.sku
+                                  ? <LoaderCircle size={15} className="animate-spin" />
+                                  : <RefreshCw size={15} />}
+                              </button>
+                            </span>
+                          </div>
+                        ))
+                      ) : (
+                        <p className="sku-status-empty">
+                          {skuStatusItems.length ? "Nenhum SKU encontrado." : "Nenhum SKU no banco local."}
+                        </p>
+                      )}
+                    </div>
                   </div>
                 </div>
                 {extractionError && <p className="auth-error">{extractionError}</p>}
               </div>
+            ) : (
+              <div className="extraction-panel" role="tabpanel">
+                <div className="crawler-control">
+                  <div className="crawler-stats" aria-label="Saúde das fontes">
+                    <div className="crawler-stat crawler-stat--sources">
+                      <span>Fontes ativas</span>
+                      <strong>{crawlerActiveCount}</strong>
+                      <button
+                        type="button"
+                        className="crawler-stat__info"
+                        onClick={() => {
+                          setCrawlerSourcesHistoryOpen(true);
+                          void loadCrawlerControl();
+                        }}
+                        aria-label="Ver fontes recentes"
+                        title="Ver fontes recentes"
+                      >
+                        <Info size={14} />
+                      </button>
+                    </div>
+                    <div className="crawler-stat">
+                      <span>Inválidas</span>
+                      <strong>{crawlerInvalidCount}</strong>
+                    </div>
+                    <div className="crawler-stat crawler-stat--date">
+                      <span>Última execução</span>
+                      <strong title={latestExtractionAt ? formatDateTime(latestExtractionAt) : "Sem execução"}>
+                        {formatCompactDateTime(latestExtractionAt)}
+                      </strong>
+                    </div>
+                  </div>
+
+                  <div className="crawler-control-grid">
+                    <label className="settings-field">
+                      <span>Modo</span>
+                      <StyledSelect
+                        value={crawlerControl.default_mode}
+                        ariaLabel="Modo"
+                        options={[
+                          { value: "quick", label: "Rápida" },
+                          { value: "precise", label: "Precisa" },
+                        ]}
+                        onChange={(defaultMode) => setCrawlerControl((current) => ({
+                          ...current,
+                          default_mode: defaultMode as ExtractionMode,
+                        }))}
+                      />
+                    </label>
+                    <label className="settings-field">
+                      <span>Requisições</span>
+                      <StyledSelect
+                        value={crawlerControl.concurrent_requests_per_domain}
+                        ariaLabel="Requisições por domínio"
+                        options={[1, 2, 3, 4].map((requestCount) => ({
+                          value: requestCount,
+                          label: String(requestCount),
+                        }))}
+                        onChange={(requestCount) => setCrawlerControl((current) => ({
+                          ...current,
+                          concurrent_requests_per_domain: requestCount,
+                        }))}
+                      />
+                    </label>
+                    <label className="settings-field">
+                      <span>Timeout</span>
+                      <StyledSelect
+                        value={crawlerControl.request_timeout_seconds}
+                        ariaLabel="Timeout"
+                        options={[10, 15, 20, 30, 45].map((timeout) => ({
+                          value: timeout,
+                          label: `${timeout} segundos`,
+                        }))}
+                        onChange={(timeout) => setCrawlerControl((current) => ({
+                          ...current,
+                          request_timeout_seconds: timeout,
+                        }))}
+                      />
+                    </label>
+                  </div>
+
+                  <div className="crawler-toggles">
+                    {[
+                      ["external_discovery_fallback", "Discovery externo"],
+                      ["playwright_shipping_fallback", "Playwright para logística"],
+                    ].map(([field, label]) => (
+                      <label key={field} className="crawler-toggle-row">
+                        <span>{label}</span>
+                        <span className="schedule-toggle">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(crawlerControl[field as keyof CrawlerControlSettings])}
+                            onChange={(event) => setCrawlerControl((current) => ({
+                              ...current,
+                              [field]: event.target.checked,
+                            }))}
+                          />
+                          <span className="schedule-toggle__track" aria-hidden="true">
+                            <span className="schedule-toggle__thumb" />
+                          </span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+
+                </div>
+                {extractionError && <p className="auth-error">{extractionError}</p>}
+              </div>
             )}
+            </div>
+
+            {extractionTab !== "database" && (
+              <div className="modal-action-footer extraction-action-footer">
+                {extractionTab === "extract" && (
+                  <button type="submit" form="extraction-run-form" className="button-primary" disabled={extractionRunning}>
+                    {extractionRunning ? <LoaderCircle size={15} className="animate-spin" /> : <Download size={15} />}
+                    {extractionRunning ? `Na fila ${extractionProgress}` : "Extrair"}
+                  </button>
+                )}
+                {extractionTab === "schedule" && (
+                  <button type="button" className="button-primary async-button" onClick={() => void saveSchedule()} disabled={scheduleSaving}>
+                    <span className={scheduleSaving ? "async-button__content async-button__content--hidden" : "async-button__content"}>
+                      <CheckCircle2 size={15} />
+                      Salvar
+                    </span>
+                    {scheduleSaving && <span className="async-button__loader" aria-hidden="true"><LoaderCircle size={16} className="animate-spin" /></span>}
+                  </button>
+                )}
+                {extractionTab === "control" && (
+                  <button type="button" className="button-primary async-button" onClick={() => void saveCrawlerControl()} disabled={crawlerControlSaving || crawlerControlLoading}>
+                    <span className={crawlerControlSaving ? "async-button__content async-button__content--hidden" : "async-button__content"}>
+                      <Wrench size={15} />
+                      Salvar
+                    </span>
+                    {crawlerControlSaving && <span className="async-button__loader"><LoaderCircle size={16} className="animate-spin" /></span>}
+                  </button>
+                )}
+              </div>
+            )}
+            </div>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {extractionsOpen && crawlerSourcesHistoryOpen && canUseExtractions && (
+        <div
+          className="dialog-backdrop dialog-backdrop--nested"
+          role="presentation"
+          onMouseDown={() => setCrawlerSourcesHistoryOpen(false)}
+        >
+          <section
+            className="workspace-dialog workspace-dialog--source-history"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="source-history-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="dialog-header source-history-header">
+              <div className="dialog-heading">
+                <span className="dialog-icon"><Info size={18} /></span>
+                <div>
+                  <h2 id="source-history-title">Fontes recentes</h2>
+                  <p>{crawlerSources.length} {crawlerSources.length === 1 ? "fonte registrada" : "fontes registradas"}</p>
+                </div>
+              </div>
+              <div className="source-history-header__actions">
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={() => void loadCrawlerControl()}
+                  disabled={crawlerControlLoading}
+                  aria-label="Atualizar fontes"
+                  title="Atualizar fontes"
+                >
+                  {crawlerControlLoading
+                    ? <LoaderCircle size={15} className="animate-spin" />
+                    : <RefreshCw size={15} />}
+                </button>
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={() => setCrawlerSourcesHistoryOpen(false)}
+                  aria-label="Fechar histórico"
+                >
+                  <X size={17} />
+                </button>
+              </div>
+            </div>
+
+            <div className="source-history-table">
+              <div className="source-history-row source-history-row--head" aria-hidden="true">
+                <span>Status</span>
+                <span>SKU</span>
+                <span>Loja</span>
+                <span>Lojista</span>
+                <span>Confiança</span>
+                <span>Ação</span>
+              </div>
+              <div className="source-history-list">
+                {crawlerSources.length ? crawlerSources.map((source) => (
+                  <div key={source.id} className="source-history-row">
+                    <span className="source-history-status">
+                      <span className={source.active ? "status-dot status-dot--updated" : "status-dot status-dot--error"} />
+                      {source.active ? "Ativa" : "Inválida"}
+                    </span>
+                    <strong title={source.sku}>{source.sku}</strong>
+                    <span title={source.store.replaceAll("_", " ")}>{source.store.replaceAll("_", " ")}</span>
+                    <span title={source.seller || "Não informado"}>{source.seller || "-"}</span>
+                    <span>{Math.round(source.match_confidence * 100)}%</span>
+                    <button
+                      type="button"
+                      className="table-action"
+                      onClick={() => void rediscoverSourceSku(source.sku)}
+                      disabled={extractionRunning || Boolean(rediscoveringSku)}
+                      aria-label={`Redescobrir ${source.sku}`}
+                      title="Redescobrir SKU"
+                    >
+                      {rediscoveringSku === source.sku
+                        ? <LoaderCircle size={14} className="animate-spin" />
+                        : <RefreshCw size={14} />}
+                    </button>
+                  </div>
+                )) : (
+                  <p className="source-history-empty">As fontes aparecerão após a primeira extração precisa.</p>
+                )}
+              </div>
+            </div>
           </section>
         </div>
       )}

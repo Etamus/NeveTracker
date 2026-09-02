@@ -14,6 +14,27 @@ from models.auth import AuthSession, AuthUser
 PASSWORD_ITERATIONS = 310_000
 SESSION_DURATION = timedelta(days=7)
 USERNAME_PATTERN = re.compile(r"^[A-Z0-9._-]{3,40}$")
+ROLE_DEVELOPER = "developer"
+ROLE_GOVERNOR = "governor"
+ROLE_VIEWER = "viewer"
+MANAGEMENT_ROLES = {ROLE_DEVELOPER, ROLE_GOVERNOR}
+
+
+def user_role(user):
+    if user.is_owner or user.username == "DEUSM2":
+        return ROLE_DEVELOPER
+    role = (getattr(user, "role", None) or "").strip().lower()
+    if role in {ROLE_DEVELOPER, ROLE_GOVERNOR, ROLE_VIEWER}:
+        return ROLE_GOVERNOR if role == ROLE_DEVELOPER else role
+    return ROLE_GOVERNOR if user.is_admin else ROLE_VIEWER
+
+
+def apply_user_role(user, role):
+    normalized_role = role if role in MANAGEMENT_ROLES | {ROLE_VIEWER} else ROLE_VIEWER
+    if user.is_owner or user.username == "DEUSM2":
+        normalized_role = ROLE_DEVELOPER
+    user.role = normalized_role
+    user.is_admin = normalized_role in MANAGEMENT_ROLES
 
 
 def normalize_username(value):
@@ -68,10 +89,13 @@ def create_session(db, user):
 
 
 def user_payload(user):
+    role = user_role(user)
     return {
         "id": user.id,
         "username": user.username,
-        "is_admin": bool(user.is_admin),
+        "avatar_data_url": user.avatar_data_url,
+        "role": role,
+        "is_admin": role in MANAGEMENT_ROLES,
         "is_owner": bool(user.is_owner),
         "created_at": user.created_at,
         "updated_at": user.updated_at,
@@ -110,19 +134,36 @@ def get_current_user(auth_session: AuthSession = Depends(get_auth_session)):
 
 
 def require_admin(user: AuthUser = Depends(get_current_user)):
-    if not user.is_admin:
+    if user_role(user) not in MANAGEMENT_ROLES:
         raise HTTPException(status_code=403, detail="Acesso restrito a administradores.")
+    return user
+
+
+def require_operator(user: AuthUser = Depends(get_current_user)):
+    if user_role(user) not in MANAGEMENT_ROLES:
+        raise HTTPException(status_code=403, detail="Acesso restrito a operacoes de extracao.")
+    return user
+
+
+def require_developer(user: AuthUser = Depends(get_current_user)):
+    if user_role(user) != ROLE_DEVELOPER:
+        raise HTTPException(status_code=403, detail="Acesso restrito ao desenvolvedor.")
     return user
 
 
 def ensure_owner_user(db):
     owner = db.query(AuthUser).filter(AuthUser.username == "DEUSM2").first()
     if not owner:
-        owner = AuthUser(username="DEUSM2", is_admin=True, is_owner=True)
+        owner = AuthUser(
+            username="DEUSM2",
+            role=ROLE_DEVELOPER,
+            is_admin=True,
+            is_owner=True,
+        )
         set_password(owner, "1234")
         db.add(owner)
     else:
-        owner.is_admin = True
         owner.is_owner = True
+        apply_user_role(owner, ROLE_DEVELOPER)
     db.commit()
     return owner

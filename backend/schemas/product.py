@@ -33,6 +33,8 @@ class SkuBatchRequest(BaseModel):
     refresh_if_stale: bool = False
     postal_code: Optional[str] = None
     scope: Literal["all", "sites", "retail"] = "all"
+    mode: Literal["quick", "precise"] = "quick"
+    local_only: bool = False
 
 
 class ExtractionDatabaseJobRequest(BaseModel):
@@ -40,6 +42,15 @@ class ExtractionDatabaseJobRequest(BaseModel):
     refresh_if_stale: bool = False
     postal_code: Optional[str] = None
     scope: Literal["all", "sites", "retail"] = "all"
+    mode: Literal["quick", "precise"] = "quick"
+
+
+class CrawlerControlRequest(BaseModel):
+    default_mode: Literal["quick", "precise"] = "quick"
+    external_discovery_fallback: bool = True
+    playwright_shipping_fallback: bool = False
+    concurrent_requests_per_domain: int = Field(default=2, ge=1, le=4)
+    request_timeout_seconds: int = Field(default=15, ge=5, le=45)
 
 
 class ExtractionScheduleRequest(BaseModel):

@@ -21,20 +21,10 @@ PROVIDER_QUOTAS = {
         "period": "monthly",
         "unit": "resultados",
     },
-    "serper": {
-        "limit": 2_500,
-        "period": "lifetime",
-        "unit": "consultas",
-    },
     "dataforseo": {
         "limit": 1_000,
         "period": "lifetime",
         "unit": "itens reservados",
-    },
-    "searchapi": {
-        "limit": 100,
-        "period": "lifetime",
-        "unit": "consultas",
     },
     "mercado_livre": {
         "limit": None,

@@ -20,7 +20,11 @@ DETAIL_WORKERS = 8
 
 
 def normalize_postal_code(value):
-    digits = re.sub(r"\D", "", value or "")
+    digits = re.sub(
+        r"\D",
+        "",
+        value or os.getenv("DEFAULT_SHIPPING_ZIP_CODE", ""),
+    )
     return digits if len(digits) == 8 else None
 
 

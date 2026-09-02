@@ -17,6 +17,7 @@ from services.extraction_queue import (
 )
 from services.extraction_scheduler import start_extraction_scheduler
 from services.scraper_service import KNOWN_SKUS
+from services.sku_metadata_seed import seed_sku_business_metadata
 
 Base.metadata.create_all(bind=engine)
 
@@ -81,15 +82,22 @@ def _ensure_sqlite_columns():
             "subfamily": "VARCHAR",
             "category": "VARCHAR",
             "cluster": "VARCHAR",
+            "portfolio": "VARCHAR",
             "market_type": "VARCHAR",
             "updated_at": "DATETIME",
+            "ean": "VARCHAR",
+            "mpn": "VARCHAR",
+            "model": "VARCHAR",
+            "brand": "VARCHAR",
         }
         for column_name, column_type in known_sku_additive_columns.items():
             if column_name not in known_sku_columns:
                 connection.exec_driver_sql(
                     f"ALTER TABLE known_skus ADD COLUMN {column_name} {column_type}"
                 )
-        for column_name in ("subfamily", "category", "cluster", "market_type"):
+        for column_name in (
+            "subfamily", "category", "cluster", "portfolio", "market_type", "ean", "mpn", "model", "brand"
+        ):
             connection.exec_driver_sql(
                 f"CREATE INDEX IF NOT EXISTS ix_known_skus_{column_name} "
                 f"ON known_skus ({column_name})"
@@ -119,6 +127,39 @@ def _ensure_sqlite_columns():
             "UPDATE extraction_schedule SET policy = 'custom' WHERE policy != 'custom'"
         )
 
+        job_columns = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(extraction_jobs)")
+        }
+        if "mode" not in job_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE extraction_jobs ADD COLUMN mode VARCHAR(20) NOT NULL DEFAULT 'quick'"
+            )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_extraction_jobs_mode ON extraction_jobs (mode)"
+        )
+
+        auth_user_columns = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(auth_users)")
+        }
+        if "role" not in auth_user_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE auth_users ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT 'viewer'"
+            )
+        if "avatar_data_url" not in auth_user_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE auth_users ADD COLUMN avatar_data_url TEXT"
+            )
+        connection.exec_driver_sql(
+            "UPDATE auth_users SET role = CASE "
+            "WHEN username = 'DEUSM2' OR is_owner = 1 THEN 'developer' "
+            "WHEN is_admin = 1 THEN 'governor' "
+            "ELSE 'viewer' END "
+            "WHERE role IS NULL OR role = '' OR "
+            "(role = 'viewer' AND (is_admin = 1 OR is_owner = 1))"
+        )
+
 
 _ensure_sqlite_columns()
 
@@ -144,6 +185,9 @@ def _seed_known_skus():
 
 
 _seed_known_skus()
+
+with SessionLocal() as metadata_db:
+    seed_sku_business_metadata(metadata_db)
 
 with SessionLocal() as auth_db:
     ensure_owner_user(auth_db)

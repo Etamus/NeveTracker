@@ -11,15 +11,18 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from database import Base
-from models.product import KnownSku, PriceHistory, Product
+from models.product import CrawlerControl, KnownSku, PriceHistory, Product
 from routes.products import (
     _register_skus,
     _search_sku_summary,
     _sku_status_map,
+    create_extraction_job,
     delete_local_sku,
     import_skus_file,
+    search_sku_batch,
 )
 from schemas.product import SkuBatchRequest
+from services.sku_metadata_seed import SKU_CATEGORIES, seed_sku_business_metadata
 
 
 def _workbook_bytes(rows):
@@ -91,6 +94,18 @@ class SkuImportTests(unittest.TestCase):
             [{"row": 3, "message": "Mercado deve ser Cativo ou Competitivo."}],
         )
 
+    def test_business_metadata_uses_category_and_clears_portfolio(self):
+        self.db.add(KnownSku(sku="W11509387", portfolio="CDP Bronze"))
+        self.db.commit()
+
+        seed_sku_business_metadata(self.db)
+
+        item = self.db.query(KnownSku).filter(KnownSku.sku == "W11509387").one()
+        self.assertEqual(item.category, SKU_CATEGORIES["W11509387"])
+        self.assertEqual(item.cluster, "CONSUMÍVEIS & ACESSÓRIOS")
+        self.assertEqual(item.subfamily, "Filtros")
+        self.assertIsNone(item.portfolio)
+
     def test_registers_and_reads_more_than_sqlite_parameter_limit(self):
         skus = [f"W{10600000 + index}" for index in range(1205)]
 
@@ -100,6 +115,31 @@ class SkuImportTests(unittest.TestCase):
         self.assertEqual(self.db.query(KnownSku).count(), 1205)
         self.assertEqual(len(statuses), 1205)
         self.assertTrue(all(not item["in_database"] for item in statuses.values()))
+
+    def test_manual_queue_uses_global_extraction_mode(self):
+        self.db.add(CrawlerControl(id=1, default_mode="precise"))
+        self.db.commit()
+        payload = SkuBatchRequest(skus=["W11509387"], mode="quick")
+
+        with patch("routes.products.enqueue_extraction_job", return_value={"id": "job"}) as enqueue:
+            response = create_extraction_job(payload=payload, _actor=None, db=self.db)
+
+        self.assertEqual(response["id"], "job")
+        self.assertEqual(enqueue.call_args.kwargs["mode"], "precise")
+
+    @patch("routes.products.run_all_scrapers")
+    def test_local_batch_search_accepts_more_than_30_without_scraping(self, run_all_scrapers):
+        skus = [f"W{11700000 + index}" for index in range(45)]
+        self.db.add_all(KnownSku(sku=sku) for sku in skus)
+        self.db.commit()
+
+        response = search_sku_batch(
+            payload=SkuBatchRequest(skus=skus, local_only=True),
+            db=self.db,
+        )
+
+        self.assertEqual(response["skus"], skus)
+        run_all_scrapers.assert_not_called()
 
     @patch("routes.products.run_all_scrapers")
     def test_queue_skips_sku_refreshed_after_job_creation(self, run_all_scrapers):

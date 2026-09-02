@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from database import Base
@@ -13,6 +13,8 @@ class AuthUser(Base):
     username = Column(String(40), unique=True, index=True, nullable=False)
     password_hash = Column(String(128), nullable=False)
     password_salt = Column(String(64), nullable=False)
+    role = Column(String(20), default="viewer", nullable=False)
+    avatar_data_url = Column(Text, nullable=True)
     is_admin = Column(Boolean, default=False, nullable=False)
     is_owner = Column(Boolean, default=False, nullable=False)
     created_by_id = Column(

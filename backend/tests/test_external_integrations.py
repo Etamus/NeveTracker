@@ -10,8 +10,6 @@ from services.external_market_providers import (
     search_apify,
     search_bright_data,
     search_dataforseo,
-    search_searchapi,
-    search_serper,
 )
 
 
@@ -26,21 +24,15 @@ INTEGRATION_ENV_KEYS = {
     "APIFY_ACTOR_ID",
     "APIFY_USAGE_MODE",
     "APIFY_MAX_RESULTS",
-    "SERPER_ENABLED",
-    "SERPER_API_KEY",
-    "SERPER_USAGE_MODE",
-    "SERPER_MAX_RESULTS",
     "DATAFORSEO_ENABLED",
     "DATAFORSEO_LOGIN",
     "DATAFORSEO_PASSWORD",
     "DATAFORSEO_USAGE_MODE",
     "DATAFORSEO_MAX_RESULTS",
-    "SEARCHAPI_ENABLED",
-    "SEARCHAPI_API_KEY",
-    "SEARCHAPI_USAGE_MODE",
-    "SEARCHAPI_MAX_RESULTS",
     "MERCADO_LIVRE_API_ENABLED",
     "MERCADO_LIVRE_ACCESS_TOKEN",
+    "MERCADO_LIVRE_USAGE_MODE",
+    "MERCADO_LIVRE_MAX_RESULTS",
 }
 
 
@@ -119,23 +111,27 @@ class IntegrationSettingsTests(unittest.TestCase):
                 ),
             )
 
-    def test_store_provider_does_not_require_search_options(self):
+    def test_store_provider_supports_search_options_and_larger_free_limit(self):
         result = integration_settings.update_integration_settings(
             "mercado_livre",
             IntegrationUpdateRequest(
                 enabled=True,
                 api_key="ml-token",
+                usage_mode="always",
+                max_results=500,
             ),
         )
 
         self.assertTrue(result["configured"])
-        self.assertFalse(result["supports_usage_mode"])
-        self.assertFalse(result["supports_limit"])
+        self.assertTrue(result["supports_usage_mode"])
+        self.assertTrue(result["supports_limit"])
+        self.assertEqual(result["usage_mode"], "always")
+        self.assertEqual(result["max_results"], 500)
 
     def test_every_provider_exposes_official_credential_link_and_cost_description(self):
         items = integration_settings.get_integration_settings()["items"]
 
-        self.assertEqual(len(items), 6)
+        self.assertEqual(len(items), 4)
         for item in items:
             self.assertTrue(item["credential_url"].startswith("https://"))
             self.assertTrue(
@@ -233,36 +229,6 @@ class ExternalProviderTests(unittest.TestCase):
         self.assertEqual(request.kwargs["json"]["country"], "br")
         self.assertEqual(request.kwargs["json"]["language"], "pt-br")
         self.assertEqual(request.kwargs["json"]["num"], "30")
-
-    @patch("services.external_market_providers.get_runtime_provider_settings")
-    @patch("services.external_market_providers.SESSION.post")
-    def test_serper_maps_store_shipping_and_installments(self, post, get_settings):
-        get_settings.return_value = {
-            "api_key": "serper-key",
-            "max_results": 20,
-        }
-        response = Mock(status_code=200)
-        response.json.return_value = {
-            "shopping": [
-                {
-                    "title": "Motor Whirlpool W10531315",
-                    "price": "R$ 100,00",
-                    "link": "https://loja.example/motor",
-                    "source": "Loja Exemplo",
-                    "delivery": "Frete R$ 12,00, entrega em 4 dias",
-                    "installments": "2x de R$ 52,50",
-                }
-            ]
-        }
-        post.return_value = response
-
-        result = search_serper("W10531315")
-
-        self.assertEqual(result[0]["shipping_cost"], 12)
-        self.assertEqual(result[0]["delivery_min_days"], 4)
-        self.assertEqual(result[0]["installment_price"], 105)
-        self.assertEqual(result[0]["payment_difference"], 5)
-        self.assertEqual(post.call_args.kwargs["json"]["gl"], "br")
 
     @patch("services.external_market_providers.time.sleep")
     @patch("services.external_market_providers.get_runtime_provider_settings")
@@ -406,77 +372,6 @@ class ExternalProviderTests(unittest.TestCase):
         self.assertEqual(result[0]["delivery_max_days"], 4)
         self.assertEqual(result[0]["installment_price"], 100)
         self.assertEqual(post.call_args_list[1].kwargs["json"][0]["product_id"], "google-product-123")
-
-    @patch("services.external_market_providers.get_runtime_provider_settings")
-    @patch("services.external_market_providers.SESSION.get")
-    def test_searchapi_combines_google_sellers_and_amazon_brazil(
-        self,
-        get,
-        get_settings,
-    ):
-        get_settings.return_value = {
-            "api_key": "search-api-key",
-            "max_results": 20,
-        }
-
-        def response_for_request(_url, **kwargs):
-            engine = kwargs["params"]["engine"]
-            response = Mock(status_code=200)
-            if engine == "google_shopping":
-                response.json.return_value = {
-                    "shopping_results": [
-                        {
-                            "title": "Peca W10531315",
-                            "link": "https://google.example/product",
-                            "extracted_price": 100,
-                            "seller": "Google Shopping",
-                            "product_token": "product-token-1",
-                        }
-                    ]
-                }
-            elif engine == "google_product_offers":
-                response.json.return_value = {
-                    "offers": [
-                        {
-                            "title": "Peca W10531315",
-                            "link": "https://lojista.example/peca",
-                            "extracted_price": 96.5,
-                            "extracted_delivery_price": 11.9,
-                            "details": ["Em estoque", "Entrega em 3 dias"],
-                            "merchant": {"name": "Lojista Google"},
-                        }
-                    ]
-                }
-            else:
-                response.json.return_value = {
-                    "organic_results": [
-                        {
-                            "title": "Peca W10531315",
-                            "link": "https://www.amazon.com.br/dp/ITEM123",
-                            "extracted_price": 99.9,
-                            "fulfillment": {
-                                "standard_delivery": {
-                                    "text": "Entrega gratis em 2 dias"
-                                }
-                            },
-                        }
-                    ]
-                }
-            return response
-
-        get.side_effect = response_for_request
-
-        result = search_searchapi("W10531315")
-        google_offer = next(item for item in result if item["store"] == "Lojista Google")
-        amazon_offer = next(item for item in result if item["store"] == "Amazon Brasil")
-
-        self.assertEqual(google_offer["shipping_cost"], 11.9)
-        self.assertEqual(google_offer["delivery_min_days"], 3)
-        self.assertEqual(amazon_offer["shipping_cost"], 0)
-        self.assertEqual(amazon_offer["delivery_max_days"], 2)
-        amazon_call = next(call for call in get.call_args_list if call.kwargs["params"]["engine"] == "amazon_search")
-        self.assertEqual(amazon_call.kwargs["params"]["amazon_domain"], "amazon.com.br")
-
 
 if __name__ == "__main__":
     unittest.main()

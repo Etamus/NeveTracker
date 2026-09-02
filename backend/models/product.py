@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, Integer, String, Float, DateTime, ForeignKey, Text
+from sqlalchemy import Boolean, Column, Integer, String, Float, DateTime, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from database import Base
 from datetime import datetime
@@ -57,7 +57,12 @@ class KnownSku(Base):
     subfamily = Column(String, index=True, nullable=True)
     category = Column(String, index=True, nullable=True)
     cluster = Column(String, index=True, nullable=True)
+    portfolio = Column(String, index=True, nullable=True)
     market_type = Column(String, index=True, nullable=True)
+    ean = Column(String, index=True, nullable=True)
+    mpn = Column(String, index=True, nullable=True)
+    model = Column(String, index=True, nullable=True)
+    brand = Column(String, index=True, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -90,6 +95,7 @@ class ExtractionJob(Base):
     priority = Column(Integer, default=20, nullable=False, index=True)
     request_key = Column(String(64), nullable=False, index=True)
     scope = Column(String(20), default="all", nullable=False)
+    mode = Column(String(20), default="quick", nullable=False, index=True)
     force_refresh = Column(Boolean, default=True, nullable=False)
     refresh_if_stale = Column(Boolean, default=False, nullable=False)
     postal_code = Column(String, nullable=True)
@@ -114,6 +120,51 @@ class ExtractionJob(Base):
         cascade="all, delete-orphan",
         order_by="ExtractionJobItem.position",
     )
+
+
+class ProductSource(Base):
+    __tablename__ = "product_sources"
+    __table_args__ = (
+        UniqueConstraint(
+            "sku", "store", "seller", "url", name="uq_product_source_identity"
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=True, index=True)
+    sku = Column(String, nullable=False, index=True)
+    store = Column(String, nullable=False, index=True)
+    seller = Column(String, nullable=True, index=True)
+    url = Column(Text, nullable=False)
+    external_product_id = Column(String, nullable=True, index=True)
+    asin = Column(String, nullable=True, index=True)
+    item_id = Column(String, nullable=True, index=True)
+    shop_id = Column(String, nullable=True, index=True)
+    ean = Column(String, nullable=True, index=True)
+    mpn = Column(String, nullable=True, index=True)
+    model = Column(String, nullable=True, index=True)
+    brand = Column(String, nullable=True, index=True)
+    match_confidence = Column(Float, nullable=False, default=0)
+    match_method = Column(String, nullable=False, default="unverified")
+    active = Column(Boolean, nullable=False, default=True, index=True)
+    validation_status = Column(String, nullable=False, default="valid", index=True)
+    failure_reason = Column(String, nullable=True)
+    first_seen_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_validated_at = Column(DateTime, nullable=True)
+    last_collected_at = Column(DateTime, nullable=True)
+    invalidated_at = Column(DateTime, nullable=True)
+
+
+class CrawlerControl(Base):
+    __tablename__ = "crawler_control"
+
+    id = Column(Integer, primary_key=True, default=1)
+    default_mode = Column(String(20), nullable=False, default="quick")
+    external_discovery_fallback = Column(Boolean, nullable=False, default=True)
+    playwright_shipping_fallback = Column(Boolean, nullable=False, default=False)
+    concurrent_requests_per_domain = Column(Integer, nullable=False, default=2)
+    request_timeout_seconds = Column(Integer, nullable=False, default=15)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class ExtractionJobItem(Base):

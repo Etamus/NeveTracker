@@ -47,7 +47,8 @@ const useHeroSection = () => {
             body: JSON.stringify({
               skus,
               force_refresh: false,
-              refresh_if_stale: true,
+              refresh_if_stale: false,
+              local_only: true,
               postal_code: getInterfacePreferences().logisticsPostalCode || null,
               scope: "all",
             }),

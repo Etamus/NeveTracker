@@ -25,16 +25,16 @@ class ProviderQuotaTests(unittest.TestCase):
     def test_blocks_before_crossing_free_limit(self):
         with patch.dict(
             provider_quota.PROVIDER_QUOTAS,
-            {"searchapi": {"limit": 3, "period": "lifetime", "unit": "consultas"}},
+            {"dataforseo": {"limit": 3, "period": "lifetime", "unit": "consultas"}},
         ):
-            provider_quota.reserve_provider_quota("searchapi", 2)
+            provider_quota.reserve_provider_quota("dataforseo", 2)
             with self.assertRaisesRegex(
                 provider_quota.ProviderQuotaExceeded,
                 "chamada foi bloqueada",
             ):
-                provider_quota.reserve_provider_quota("searchapi", 2)
+                provider_quota.reserve_provider_quota("dataforseo", 2)
 
-            status = provider_quota.get_provider_quota("searchapi")
+            status = provider_quota.get_provider_quota("dataforseo")
             self.assertEqual(status["used"], 2)
             self.assertEqual(status["remaining"], 1)
 
@@ -55,11 +55,11 @@ class ProviderQuotaTests(unittest.TestCase):
     def test_concurrent_reservations_cannot_cross_limit(self):
         with patch.dict(
             provider_quota.PROVIDER_QUOTAS,
-            {"serper": {"limit": 7, "period": "lifetime", "unit": "consultas"}},
+            {"dataforseo": {"limit": 7, "period": "lifetime", "unit": "consultas"}},
         ):
             def attempt_reservation(_index):
                 try:
-                    provider_quota.reserve_provider_quota("serper", 1)
+                    provider_quota.reserve_provider_quota("dataforseo", 1)
                     return True
                 except provider_quota.ProviderQuotaExceeded:
                     return False
@@ -69,7 +69,7 @@ class ProviderQuotaTests(unittest.TestCase):
 
             self.assertEqual(sum(accepted), 7)
             self.assertEqual(
-                provider_quota.get_provider_quota("serper")["used"],
+                provider_quota.get_provider_quota("dataforseo")["used"],
                 7,
             )
 

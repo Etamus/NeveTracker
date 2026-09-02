@@ -112,6 +112,102 @@ class AuthTests(unittest.TestCase):
         response = self.client.get("/auth/users", headers=user_headers)
         self.assertEqual(response.status_code, 403)
 
+    def test_governor_can_only_create_viewers_and_cannot_change_roles(self):
+        owner_headers = self.login()
+        governor = self.client.post(
+            "/auth/users",
+            headers=owner_headers,
+            json={"username": "governante", "password": "5678", "role": "governor"},
+        )
+        self.assertEqual(governor.status_code, 201)
+        self.assertEqual(governor.json()["role"], "governor")
+        governor_headers = self.login("GOVERNANTE", "5678")
+
+        viewer = self.client.post(
+            "/auth/users",
+            headers=governor_headers,
+            json={"username": "visualizador", "password": "9999", "role": "viewer"},
+        )
+        self.assertEqual(viewer.status_code, 201)
+        self.assertEqual(viewer.json()["role"], "viewer")
+
+        denied_create = self.client.post(
+            "/auth/users",
+            headers=governor_headers,
+            json={"username": "outrogestor", "password": "9999", "role": "governor"},
+        )
+        self.assertEqual(denied_create.status_code, 403)
+
+        denied_promote = self.client.patch(
+            f"/auth/users/{viewer.json()['id']}",
+            headers=governor_headers,
+            json={"role": "governor"},
+        )
+        self.assertEqual(denied_promote.status_code, 403)
+
+    def test_deusm2_is_the_only_developer(self):
+        owner_headers = self.login()
+        me = self.client.get("/auth/me", headers=owner_headers)
+        self.assertEqual(me.status_code, 200)
+        self.assertEqual(me.json()["role"], "developer")
+
+        denied = self.client.post(
+            "/auth/users",
+            headers=owner_headers,
+            json={"username": "dev2", "password": "9999", "role": "developer"},
+        )
+        self.assertEqual(denied.status_code, 403)
+
+    def test_owner_can_set_and_remove_profile_photo(self):
+        owner_headers = self.login()
+        created = self.client.post(
+            "/auth/users",
+            headers=owner_headers,
+            json={"username": "fotoperfil", "password": "5678"},
+        )
+        user_id = created.json()["id"]
+        avatar = "data:image/jpeg;base64,/9j/2Q=="
+
+        updated = self.client.patch(
+            f"/auth/users/{user_id}",
+            headers=owner_headers,
+            json={"avatar_data_url": avatar},
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()["avatar_data_url"], avatar)
+
+        removed = self.client.patch(
+            f"/auth/users/{user_id}",
+            headers=owner_headers,
+            json={"avatar_data_url": None},
+        )
+        self.assertEqual(removed.status_code, 200)
+        self.assertIsNone(removed.json()["avatar_data_url"])
+
+    def test_owner_can_create_user_with_profile_photo(self):
+        owner_headers = self.login()
+        avatar = "data:image/png;base64,iVBORw0KGgo="
+        created = self.client.post(
+            "/auth/users",
+            headers=owner_headers,
+            json={
+                "username": "fotocriacao",
+                "password": "5678",
+                "avatar_data_url": avatar,
+            },
+        )
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.json()["avatar_data_url"], avatar)
+
+    def test_rejects_invalid_profile_photo(self):
+        owner_headers = self.login()
+        response = self.client.patch(
+            "/auth/users/1",
+            headers=owner_headers,
+            json={"avatar_data_url": "data:text/plain;base64,SGVsbG8="},
+        )
+        self.assertEqual(response.status_code, 400)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -46,13 +46,16 @@ def configure_extraction_processor(processor):
     _processor = processor
 
 
-def _request_key(skus, kind, force_refresh, refresh_if_stale, postal_code, scope, run_key):
+def _request_key(
+    skus, kind, force_refresh, refresh_if_stale, postal_code, scope, mode, run_key
+):
     parts = [
         kind,
         str(bool(force_refresh)),
         str(bool(refresh_if_stale)),
         postal_code or "",
         scope,
+        mode,
         run_key or "",
         *sorted(skus),
     ]
@@ -77,6 +80,7 @@ def serialize_job(job, include_items=False):
         "kind": job.kind,
         "status": job.status,
         "scope": job.scope,
+        "mode": job.mode,
         "force_refresh": job.force_refresh,
         "refresh_if_stale": job.refresh_if_stale,
         "batch_size": job.batch_size,
@@ -140,6 +144,7 @@ def enqueue_extraction_job(
     refresh_if_stale=False,
     postal_code=None,
     scope="all",
+    mode="quick",
     schedule_run_key=None,
 ):
     normalized_skus = list(dict.fromkeys(sku for sku in skus if sku))
@@ -155,6 +160,7 @@ def enqueue_extraction_job(
         refresh_if_stale,
         postal_code,
         scope,
+        mode,
         schedule_run_key,
     )
     db = SessionLocal()
@@ -178,6 +184,7 @@ def enqueue_extraction_job(
             priority=_priority_for_kind(kind),
             request_key=request_key,
             scope=scope,
+            mode=mode if mode in {"quick", "precise"} else "quick",
             force_refresh=bool(force_refresh),
             refresh_if_stale=bool(refresh_if_stale),
             postal_code=postal_code,
@@ -318,6 +325,7 @@ def _mark_item_running(job_id, item_id):
         return {
             "sku": item.sku,
             "scope": job.scope,
+            "mode": job.mode,
             "force_refresh": job.force_refresh,
             "refresh_if_stale": job.refresh_if_stale,
             "postal_code": job.postal_code,

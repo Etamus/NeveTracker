@@ -3,7 +3,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from database import SessionLocal
-from models.product import ExtractionSchedule, KnownSku
+from models.product import CrawlerControl, ExtractionSchedule, KnownSku
 from services.extraction_queue import enqueue_extraction_job
 
 
@@ -49,6 +49,12 @@ def _schedule_snapshot():
             "repeat_every_hours": min(12, max(0, schedule.repeat_every_hours or 0)),
             "force_refresh": schedule.force_refresh,
             "last_run_key": schedule.last_run_key,
+            "mode": (
+                db.query(CrawlerControl.default_mode)
+                .filter(CrawlerControl.id == 1)
+                .scalar()
+                or "quick"
+            ),
         }
     finally:
         db.close()
@@ -94,7 +100,7 @@ def _known_skus():
         db.close()
 
 
-def _run_cycle(postal_code, run_key, force_refresh):
+def _run_cycle(postal_code, run_key, force_refresh, mode="quick"):
     skus = _known_skus()
     if not skus:
         return None
@@ -105,6 +111,7 @@ def _run_cycle(postal_code, run_key, force_refresh):
         refresh_if_stale=False,
         postal_code=postal_code,
         scope="all",
+        mode=mode,
         schedule_run_key=run_key,
     )
     print(
@@ -119,7 +126,12 @@ def _tick():
     run_key = _due_run_key(schedule)
     if not run_key or schedule.get("last_run_key") == run_key:
         return
-    _run_cycle(schedule.get("postal_code"), run_key, schedule.get("force_refresh", True))
+    _run_cycle(
+        schedule.get("postal_code"),
+        run_key,
+        schedule.get("force_refresh", True),
+        schedule.get("mode", "quick"),
+    )
 
 
 def _scheduler_loop():

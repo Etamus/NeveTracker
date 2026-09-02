@@ -1,8 +1,12 @@
-# NeveTracker
+<img width="1400" height="350" alt="teste" src="https://github.com/user-attachments/assets/5c528402-a843-44d6-a976-3216dd77097f" />
 
-NeveTracker é uma aplicação local para análise e comparação de preços de peças, SKUs e produtos em múltiplas fontes. O projeto combina um frontend React/Vite com um backend Python/FastAPI, banco SQLite local e dashboards de análise orientados pela IA **NeveAI**.
+---
 
-O foco atual do sistema é comparar ofertas por **lojistas reais** sempre que a fonte permite, em vez de tratar apenas marketainel de preços por item e tabelas comparativas por marketplace/fonte.
+NeveTracker é uma aplicação local para descoberta, coleta, análise e comparação de preços de peças, SKUs e produtos em múltiplas fontes. O projeto combina frontend React/Vite, backend Python/FastAPI, filas persistentes, banco SQLite local e dashboards de análise orientados pela LLM da **NeveAI**.
+
+O foco atual do sistema é comparar ofertas por **lojistas reais**, mantendo histórico, logística e tabelas comparativas por marketplace e seller.
+
+---
 
 ## Destaques
 
@@ -13,17 +17,17 @@ O foco atual do sistema é comparar ofertas por **lojistas reais** sempre que a 
 - Filtros por marcas, lojas, data, faixa de preço, frete, lead time e parcelamento.
 - Taxonomia opcional por subfamília, categoria, cluster e mercado Cativo/Competitivo.
 - Filtros por lojas/fontes: Mercado Livre, Magazine Luiza, Amazon Brasil, Shopee, Leroy Merlin, Dufrio, Friolar, Refrigeração Mota, MG Parts, Gold Service e ComClick.
-- Visualização "Design" em cards com imagem, preço e link de acesso ao produto.
+- Catálogo em cards com imagem, preço e link de acesso ao produto.
 - Dashboard por item com gráfico de preços e tabela comparativa por fonte.
 - Exportação do Analytics em Excel, com abas de resumo, lojistas e ofertas.
-- Pesquisa conjunta de até 30 SKUs, preservando a visão agregada no Analytics e no Excel.
+- Seleção conjunta dos SKUs existentes no banco, preservando a visão agregada no Analytics e no Excel.
 - Importação de XLSX, XLSM ou CSV com até 5.000 SKUs e metadados de catálogo.
 - Fila persistente para extrações grandes, com lotes automáticos de 30 SKUs, retomada após reinício, progresso e cancelamento.
 - Condições à vista/a prazo, diferença de pagamento, frete e prazo quando publicados pela fonte.
 - CEP logístico configurável e atualização individual dos SKUs do banco local.
 - Agendamento manual por dias, janela de horário e repetição configurável de 0 a 12 horas.
-- Análises de dados e dashboards gerados através da IA **NeveAI**.
-- Banco SQLite local, sem depender de Docker, serviços pagos ou programas externos.
+- Analytics determinístico com indicadores, distribuição de preços e comparação por lojista.
+- Banco SQLite local, sem Docker ou serviços pagos obrigatórios.
 - Scripts `.bat` para instalar e iniciar o projeto no Windows.
 
 ## Estrutura
@@ -61,6 +65,8 @@ Backend:
 - SQLite
 - Requests
 - BeautifulSoup
+- Scrapy
+- Playwright (fallback seletivo)
 
 ## Como Funciona
 
@@ -70,7 +76,16 @@ Backend:
 4. A comparação prioriza lojistas/ofertas, não apenas o nome do marketplace.
 5. Quando uma fonte sofre bloqueio temporário, a última oferta local daquela loja permanece disponível com sua data original.
 6. O frontend renderiza ranking, cards e dashboards.
-7. A camada **NeveAI** organiza a análise visual, os indicadores e os dashboards comparativos exibidos na interface.
+7. O frontend organiza os resultados em Ofertas, Catálogo e Analytics, com exportação consolidada para Excel.
+
+### Modos de extração
+
+- `Rápida`: preserva o pipeline de busca por SKU, comparadores, cache e enriquecimento.
+- `Precisa`: resolve EAN/MPN/modelo, reutiliza URLs validadas da tabela `product_sources`, coleta a página do produto via API/JSON/Scrapy e redescobre somente fontes ausentes ou invalidadas.
+
+No modo preciso, a ordem é API oficial, endpoint JSON da loja, Scrapy HTTP, Playwright seletivo para logística e integração externa como último fallback. Bing Shopping, DuckDuckGo, Buscapé e Zoom participam da descoberta; o preço final é persistido somente depois da coleta da página original quando ela está acessível.
+
+O painel `Extrações > Definições` configura globalmente o modo, a concorrência por domínio, o timeout, a descoberta externa e o fallback Playwright. `Extrações > Execução` aplica essas definições; `Agendamento` automatiza atualizações e `Dados` gerencia os SKUs persistidos.
 
 ## Lojas e Fontes
 
@@ -81,7 +96,7 @@ O projeto trabalha com as seguintes fontes:
 - Leroy Merlin
 - Amazon Brasil
 - Magazine Luiza
-- Dufrio
+- Dufrio/Duofrio
 - Friolar
 - Refrigeração Mota
 - MG Parts
@@ -91,11 +106,9 @@ O projeto trabalha com as seguintes fontes:
 - DuckDuckGo para descoberta de páginas de produto (fallback sem chave)
 - Bright Data SERP API (opcional, com chave e controle de consumo)
 - Apify Google Shopping Actor (opcional, com token e controle de consumo)
-- Serper Google Shopping (opcional, com chave e cota gratuita)
 - DataForSEO Merchant API (opcional, pay-as-you-go)
-- SearchAPI Google Shopping + Amazon Brasil (opcional, com chave)
 
-As fontes são gratuitas e podem bloquear, limitar ou omitir informações em alguns momentos. Quando não é possível obter o nome real do lojista, o sistema usa o melhor identificador gratuito disponível, como ID de anúncio, seller ID ou origem da oferta.
+As fontes diretas e os fallbacks sem chave podem bloquear, limitar ou omitir informações. Bright Data, Apify e DataForSEO são integrações opcionais e podem ter custo após suas franquias; o backend aplica travas locais antes de cada consumo. Quando não é possível obter o nome real do lojista, o sistema usa o melhor identificador disponível, como ID de anúncio, seller ID ou origem da oferta.
 
 ## Banco de Dados
 
@@ -121,6 +134,12 @@ cd backend
 .venv\Scripts\python.exe preload_skus.py --force
 ```
 
+### Arquivos locais
+
+O Git mantém apenas código, configuração de exemplo e documentação. Bancos SQLite, arquivos `.env`, ambientes virtuais, Node portátil, dependências, builds, logs, caches, perfis de navegador e capturas de teste ficam somente na máquina local por meio do `.gitignore`.
+
+Use `backend/.env.example` como referência de configuração. Nunca versione `backend/.env`, credenciais de provedores ou bancos gerados em execução.
+
 ## Preparar no Windows
 
 Execute na pasta raiz:
@@ -134,15 +153,20 @@ O script:
 - Detecta Python 3.11 e o instala automaticamente quando necessário.
 - Tenta primeiro o WinGet e usa o instalador oficial assinado do Python como fallback.
 - Reutiliza o Node.js portátil existente ou baixa automaticamente uma versão LTS compatível em `.tools/node/`.
+- Confere o SHA-256 do Node portátil com o arquivo oficial publicado em `nodejs.org` antes da extração.
 - Usa um Node/npm global compatível como alternativa quando o download portátil não estiver disponível.
 - Cria `backend\.venv` se necessário.
 - Atualiza o `pip` no ambiente virtual.
 - Instala dependências Python do backend.
+- Executa `pip check` e compila os módulos Python para detectar instalações incompletas.
+- Instala o Chromium gerenciado pelo Playwright e abre uma página de teste para validar o navegador.
 - Executa `npm ci` com fallback para `npm install`.
-- Valida o build do frontend e a importação completa do backend.
+- Executa lint e build do frontend e confirma a geração de `dist/index.html`.
+- Valida o backend e as migrações do banco por uma requisição HTTP local com `TestClient`.
 - Cria arquivos `.env` locais sem sobrescrever configurações válidas.
 - Registra diagnóstico em `.logs/install.log`.
 - Usa caminhos absolutos com tratamento de espaços no nome da pasta.
+- Registra hashes e artefatos instalados; o `iniciar.bat` chama o reparo automaticamente se algo desaparecer ou mudar.
 
 `.tools/` é ignorado pelo Git; o Node portátil fica apenas na máquina local.
 
@@ -161,7 +185,13 @@ Endereços locais:
 
 O script repara o ambiente automaticamente se necessário, escolhe portas alternativas quando há conflito, inicia frontend e backend, valida os dois serviços, abre o navegador e mantém o console aberto. Os logs ficam em `.logs/`.
 
-O acesso inicial é `DEUSM2` com senha `1234`. Essa conta é o perfil principal e pode criar usuários, redefinir senhas e conceder acesso administrativo. As senhas são derivadas e armazenadas no SQLite; sessões possuem token próprio e expiração.
+Em uma instalação nova, o acesso inicial é baseado em um perfil de desenvolvedor. Essa conta pode criar usuários, redefinir senhas e conceder permissões. Troque a senha inicial antes do uso real. As senhas são derivadas e armazenadas no SQLite; as sessões possuem token próprio e expiração.
+
+### Perfis de acesso
+
+- `Desenvolvedor`: reservado ao usuário principal; controla integrações, definições avançadas de extração, banco de dados e permissões.
+- `Governante`: acessa a operação e a administração, mas não acessa Integrações nem as áreas avançadas Definições e Dados; novos usuários criados por esse perfil são Visualizadores.
+- `Visualizador`: acessa as consultas e análises, sem acesso aos modais Integrações, Extrações e Administração.
 
 ## Variáveis de Ambiente
 
@@ -175,6 +205,7 @@ Backend:
 
 ```text
 DATABASE_URL=sqlite:///precos.db
+DEFAULT_SHIPPING_ZIP_CODE=
 MERCADO_LIVRE_ACCESS_TOKEN=
 NEVETRACKER_MAX_PARALLEL_SKUS=2
 NEVETRACKER_QUEUE_SKU_PAUSE_SECONDS=0.75
@@ -190,19 +221,11 @@ APIFY_API_TOKEN=
 APIFY_ACTOR_ID=damilo/google-shopping-apify
 APIFY_USAGE_MODE=fallback
 APIFY_MAX_RESULTS=20
-SERPER_ENABLED=false
-SERPER_API_KEY=
-SERPER_USAGE_MODE=fallback
-SERPER_MAX_RESULTS=20
 DATAFORSEO_ENABLED=false
 DATAFORSEO_LOGIN=
 DATAFORSEO_PASSWORD=
 DATAFORSEO_USAGE_MODE=fallback
 DATAFORSEO_MAX_RESULTS=20
-SEARCHAPI_ENABLED=false
-SEARCHAPI_API_KEY=
-SEARCHAPI_USAGE_MODE=fallback
-SEARCHAPI_MAX_RESULTS=20
 MERCADO_LIVRE_API_ENABLED=false
 ```
 
@@ -211,24 +234,22 @@ O token do Mercado Livre é opcional; quando informado, habilita a API oficial a
 Os fallbacks de Bing Shopping e DuckDuckGo não exigem configuração ou chave. Eles passam pelas mesmas validações de SKU e não substituem Mercado Livre, lojas diretas, Buscapé ou Zoom.
 As variáveis da fila são opcionais. Os padrões limitam a duas pesquisas de SKU simultâneas, aguardam 0,75 segundo entre SKUs e fazem uma pausa de 5 segundos a cada lote de 30.
 
-Administradores podem configurar todos os conectores em `Usuario > Integracoes`. As credenciais sao salvas apenas em `backend/.env`, ficam fora do Git e nunca retornam completas para o frontend. No modo `Completar lacunas`, a fonte de descoberta so e chamada quando falta alguma loja-alvo ou quando as fontes gratuitas retornam menos ofertas que o limite de fallback. No modo `Toda extracao`, ela e chamada em cada atualizacao com APIs. O limite de resultados e aplicado por SKU e por provedor.
+O perfil Desenvolvedor pode configurar os conectores em `Usuário > Integrações`. As credenciais são salvas apenas em `backend/.env`, ficam fora do Git e nunca retornam completas para o frontend. No modo `Completar lacunas`, a fonte de descoberta só é chamada quando falta alguma loja-alvo ou quando as fontes gratuitas retornam menos ofertas que o limite de fallback. No modo `Toda extração`, ela é chamada em cada atualização com APIs. O limite de resultados é aplicado por SKU e por provedor.
 
-O token do Mercado Livre alimenta somente a API oficial dessa loja. A SearchAPI consulta Google Shopping, expande até dois produtos em ofertas diretas por lojista e também pesquisa a Amazon Brasil; por isso pode consumir até quatro consultas por SKU. APIs oficiais de seller da Amazon, Magalu e Shopee não são usadas para inteligência competitiva porque restringem a consulta ao catálogo autorizado da própria conta.
+O token do Mercado Livre alimenta somente a API oficial dessa loja. APIs oficiais de seller da Amazon, Magalu e Shopee não são usadas para inteligência competitiva porque restringem a consulta ao catálogo autorizado da própria conta.
 
-### Protecao obrigatoria das cotas gratuitas
+### Proteção obrigatória das cotas
 
-Toda chamada paga em potencial passa primeiro por uma reserva atomica no arquivo local `backend/provider_quota.db`. Se nao houver saldo gratuito suficiente, o backend bloqueia a chamada antes de acessar o provedor. O contador e compartilhado entre filas e processos, persiste entre reinicializacoes e nao e estornado em falhas ou timeouts, pois uma tentativa pode ser faturada mesmo sem retornar dados.
+Toda chamada paga em potencial passa primeiro por uma reserva atômica no arquivo local `backend/provider_quota.db`. Se não houver saldo permitido, o backend bloqueia a chamada antes de acessar o provedor. O contador é compartilhado entre filas e processos, persiste entre reinicializações e não é estornado em falhas ou timeouts, pois uma tentativa pode ser faturada mesmo sem retornar dados.
 
-| Provedor | Trava local | Renovacao |
+| Provedor | Trava local | Renovação |
 | --- | ---: | --- |
-| Bright Data | 5.000 requisicoes | Mensal |
-| Apify | 1.400 resultados (ate US$ 4,90 no Actor padrao) | Mensal |
-| Serper | 2.500 consultas | Vitalicia |
-| DataForSEO | 1.000 itens reservados (ate US$ 1 de teste) | Vitalicia |
-| SearchAPI | 100 consultas | Vitalicia |
-| Mercado Livre | Sem tarifa de uso publicada | Nao se aplica |
+| Bright Data | 5.000 requisições | Mensal |
+| Apify | 1.400 resultados (até US$ 4,90 no Actor padrão) | Mensal |
+| DataForSEO | 1.000 itens reservados (até US$ 1 de teste) | Vitalícia |
+| Mercado Livre | Sem tarifa de uso publicada | Não se aplica |
 
-O saldo aparece em `Usuario > Integracoes`. As cotas vitalicias nao podem ser reiniciadas pela interface. Para contas que ja tenham sido usadas fora do NeveTracker, confirme o consumo anterior no painel do provedor antes de ativar a chave: a trava controla integralmente o que o NeveTracker consome, mas nao enxerga chamadas feitas por outros sistemas com a mesma credencial.
+O saldo aparece em `Usuário > Integrações`. As cotas vitalícias não podem ser reiniciadas pela interface. Para contas usadas fora do NeveTracker, confirme o consumo anterior no painel do provedor antes de ativar a chave: a trava controla o que o NeveTracker consome, mas não enxerga chamadas feitas por outros sistemas com a mesma credencial.
 
 ## Endpoints Principais
 
@@ -247,6 +268,9 @@ DELETE /products/skus/{sku}
 GET /products/import/skus/template
 POST /products/import/skus
 GET|PUT /products/schedule
+GET|PUT /products/crawler-control
+GET /products/sources
+POST /products/sources/{sku}/rediscover
 POST /products/export/analytics
 POST /auth/login
 POST /auth/logout

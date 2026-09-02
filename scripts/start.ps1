@@ -8,6 +8,7 @@ $BackendDir = Join-Path $Root "backend"
 $VenvPython = Join-Path $BackendDir ".venv\Scripts\python.exe"
 $LogsDir = Join-Path $Root ".logs"
 $InstallScript = Join-Path $PSScriptRoot "install.ps1"
+$InstallSchemaVersion = 2
 $script:StartedProcesses = New-Object System.Collections.Generic.List[System.Diagnostics.Process]
 
 New-Item -ItemType Directory -Path $LogsDir -Force | Out-Null
@@ -77,18 +78,32 @@ function Resolve-Node {
 
 function Test-ProjectReady {
     if (-not (Test-Path -LiteralPath $VenvPython)) { return $false }
-    if (-not (Resolve-Node)) { return $false }
+    $node = Resolve-Node
+    if (-not $node) { return $false }
     if (-not (Test-Path -LiteralPath (Join-Path $Root "node_modules\vite\bin\vite.js"))) { return $false }
+    if (-not (Test-Path -LiteralPath (Join-Path $Root "dist\index.html"))) { return $false }
     $statePath = Join-Path $Root ".tools\install-state.json"
     if (-not (Test-Path -LiteralPath $statePath)) { return $false }
     try {
         $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        if ([int]$state.schema_version -ne $InstallSchemaVersion) { return $false }
+        if (-not $state.playwright_executable -or -not (Test-Path -LiteralPath $state.playwright_executable)) { return $false }
+        if (-not $state.frontend_index -or -not (Test-Path -LiteralPath $state.frontend_index)) { return $false }
         $requirementsHash = (Get-FileHash -LiteralPath (Join-Path $BackendDir "requirements.txt") -Algorithm SHA256).Hash
         $packageLockHash = (Get-FileHash -LiteralPath (Join-Path $Root "package-lock.json") -Algorithm SHA256).Hash
         if ($state.requirements_sha256 -ne $requirementsHash -or $state.package_lock_sha256 -ne $packageLockHash) {
             return $false
         }
-        & $VenvPython -c "import fastapi, uvicorn, sqlalchemy, openpyxl, multipart" 2>$null
+        $package = Get-Content -LiteralPath (Join-Path $Root "package.json") -Raw | ConvertFrom-Json
+        $packageNames = @($package.dependencies.PSObject.Properties.Name) + @($package.devDependencies.PSObject.Properties.Name)
+        foreach ($packageName in $packageNames) {
+            if (-not (Test-Path -LiteralPath (Join-Path $Root "node_modules\$packageName\package.json"))) { return $false }
+        }
+        & $node --version 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { return $false }
+        & $VenvPython -m pip check 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { return $false }
+        & $VenvPython -c "import fastapi, uvicorn, sqlalchemy, openpyxl, multipart, scrapy, playwright; from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop()" 2>$null
         return ($LASTEXITCODE -eq 0)
     } catch { return $false }
 }

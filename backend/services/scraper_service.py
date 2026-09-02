@@ -17,7 +17,11 @@ from services.store_registry import STORE_BY_LABEL, TARGET_STORES, find_target_s
 from services.offer_enrichment import enrich_offers, normalize_postal_code
 from services.bing_shopping import search_bing_shopping
 from services.external_market_providers import run_external_market_provider
-from services.integration_settings import get_search_provider_names, should_run_provider
+from services.integration_settings import (
+    get_runtime_provider_settings,
+    get_search_provider_names,
+    should_run_provider,
+)
 
 STORE_ITEM_LIMIT = 100
 CATALOG_ROW_LIMIT = 30
@@ -477,7 +481,9 @@ def _offer_url_identity(url):
         (key, value)
         for key, value in parse_qsl(parsed_url.query, keep_blank_values=False)
         if key.lower()
-        in {"item_id", "offer_id", "oid", "seller", "seller_id", "shop_id"}
+        in {
+            "item_id", "offer_id", "oid", "seller", "seller_id", "shop_id", "m", "smid"
+        }
     ]
     return urlunsplit(
         (
@@ -1104,7 +1110,10 @@ def _save_result(item, db: Session):
     item = {**item, "url": _offer_url_identity(item["url"])}
     existing_price = (
         db.query(PriceHistory)
-        .filter(PriceHistory.url == item["url"])
+        .filter(
+            PriceHistory.url == item["url"],
+            PriceHistory.store == item["store"],
+        )
         .order_by(PriceHistory.timestamp.desc())
         .first()
     )
@@ -1245,8 +1254,22 @@ def _run_store_scrapers(store_config, product_query):
     store_results = []
     query_variants = _query_variants(product_query)
     scraper_functions = store_config.get("direct_scrapers", ())
+    mercado_livre_mode = "always"
+    if store_config.get("key") == "mercado_livre":
+        mercado_livre_mode = get_runtime_provider_settings("mercado_livre")["usage_mode"]
+        if mercado_livre_mode == "fallback":
+            scraper_functions = tuple(sorted(
+                scraper_functions,
+                key=lambda scraper: scraper.__name__ == "search_mercado_livre",
+            ))
 
     for scraper_func in scraper_functions:
+        if (
+            scraper_func.__name__ == "search_mercado_livre"
+            and mercado_livre_mode == "fallback"
+            and store_results
+        ):
+            continue
         normalized_results = []
         variants = (
             query_variants

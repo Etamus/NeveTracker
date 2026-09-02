@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import platform
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -14,6 +16,7 @@ from typing import Optional, Tuple
 
 
 Version = Tuple[int, int, int]
+DOWNLOAD_ATTEMPTS = 3
 
 
 def _version_tuple(value: str) -> Version:
@@ -111,8 +114,7 @@ def _windows_arch() -> str:
 
 
 def _latest_supported_lts() -> str:
-    with urllib.request.urlopen("https://nodejs.org/dist/index.json", timeout=30) as response:
-        releases = json.loads(response.read().decode("utf-8"))
+    releases = json.loads(_download_bytes("https://nodejs.org/dist/index.json").decode("utf-8"))
 
     for release in releases:
         version = release.get("version", "")
@@ -120,6 +122,54 @@ def _latest_supported_lts() -> str:
             return version
 
     raise RuntimeError("Nenhuma versao LTS compativel do Node foi encontrada.")
+
+
+def _download_bytes(url: str) -> bytes:
+    last_error = None
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "NeveTracker-Installer/1.0"})
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return response.read()
+        except Exception as error:
+            last_error = error
+            if attempt < DOWNLOAD_ATTEMPTS:
+                time.sleep(2 * attempt)
+    raise RuntimeError(f"Falha ao baixar {url} apos {DOWNLOAD_ATTEMPTS} tentativas: {last_error}")
+
+
+def _download_file(url: str, destination: Path) -> None:
+    last_error = None
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "NeveTracker-Installer/1.0"})
+            with urllib.request.urlopen(request, timeout=120) as response, destination.open("wb") as output:
+                shutil.copyfileobj(response, output)
+            return
+        except Exception as error:
+            last_error = error
+            destination.unlink(missing_ok=True)
+            if attempt < DOWNLOAD_ATTEMPTS:
+                time.sleep(2 * attempt)
+    raise RuntimeError(f"Falha ao baixar {url} apos {DOWNLOAD_ATTEMPTS} tentativas: {last_error}")
+
+
+def _expected_sha256(version: str, file_name: str) -> str:
+    checksums = _download_bytes(f"https://nodejs.org/dist/{version}/SHASUMS256.txt").decode("utf-8")
+    for line in checksums.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[-1].lstrip("*") == file_name:
+            return parts[0].lower()
+    raise RuntimeError(f"Checksum oficial do Node nao encontrado para {file_name}.")
+
+
+def _safe_extract(archive: zipfile.ZipFile, destination: Path) -> None:
+    root = destination.resolve()
+    for member in archive.infolist():
+        target = (destination / member.filename).resolve()
+        if target != root and root not in target.parents:
+            raise RuntimeError("O pacote do Node contem um caminho de extracao invalido.")
+    archive.extractall(destination)
 
 
 def _download_portable_node(root: Path) -> Tuple[Path, Path]:
@@ -133,12 +183,16 @@ def _download_portable_node(root: Path) -> Tuple[Path, Path]:
     print(f"Baixando Node.js portatil {version} ({arch})...")
     with tempfile.TemporaryDirectory() as temp_dir:
         zip_path = Path(temp_dir) / zip_name
-        urllib.request.urlretrieve(url, zip_path)
+        _download_file(url, zip_path)
+        expected_hash = _expected_sha256(version, zip_name)
+        actual_hash = hashlib.sha256(zip_path.read_bytes()).hexdigest().lower()
+        if actual_hash != expected_hash:
+            raise RuntimeError("O checksum do Node portatil nao confere com o publicado em nodejs.org.")
         extracted = node_root / zip_name[:-4]
         if extracted.exists():
             shutil.rmtree(extracted)
         with zipfile.ZipFile(zip_path) as archive:
-            archive.extractall(node_root)
+            _safe_extract(archive, node_root)
 
     node_exe = extracted / "node.exe"
     npm_cmd = extracted / "npm.cmd"
