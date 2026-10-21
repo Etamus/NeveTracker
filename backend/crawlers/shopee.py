@@ -88,7 +88,6 @@ def collect_shopee(source, identity, postal_code=None, timeout=15):
         "match_method": match.method,
         "captured_at": datetime.utcnow().isoformat(),
         "discovery_source": "shopee_internal_api",
-        "shipping_zip_code": postal_code,
     }
     print(f"[COLLECTION][SHOPEE] {source.shop_id}/{source.item_id} coletado; seller={seller}")
     return {"status": "OK", "item": item, "match": match}

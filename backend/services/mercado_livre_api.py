@@ -24,6 +24,8 @@ def extract_brand(item):
 def search_mercado_livre(product_query: str):
     try:
         integration = get_runtime_provider_settings("mercado_livre")
+        if not integration["enabled"] or not integration["configured"]:
+            return []
         max_results = min(500, max(10, int(integration["max_results"])))
         headers = {
             "User-Agent": (

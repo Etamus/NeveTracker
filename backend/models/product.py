@@ -22,7 +22,7 @@ class PriceHistory(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     product_id = Column(Integer, ForeignKey("products.id"))
-    price = Column(Float, nullable=False)
+    price = Column(Float, nullable=True)
     store = Column(String, index=True)
     source = Column(String, index=True, nullable=True)
     discovery_source = Column(String, index=True, nullable=True)
@@ -36,6 +36,7 @@ class PriceHistory(Base):
     shipping_method = Column(String, nullable=True)
     delivery_min_days = Column(Integer, nullable=True)
     delivery_max_days = Column(Integer, nullable=True)
+    delivery_days_type = Column(String, nullable=True)
     handling_min_days = Column(Integer, nullable=True)
     handling_max_days = Column(Integer, nullable=True)
     destination_zip = Column(String, nullable=True)
@@ -63,6 +64,9 @@ class KnownSku(Base):
     mpn = Column(String, index=True, nullable=True)
     model = Column(String, index=True, nullable=True)
     brand = Column(String, index=True, nullable=True)
+    internal_code = Column(String, nullable=True)
+    external_id = Column(String, nullable=True)
+    reference_price = Column(Float, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -146,13 +150,44 @@ class ProductSource(Base):
     brand = Column(String, nullable=True, index=True)
     match_confidence = Column(Float, nullable=False, default=0)
     match_method = Column(String, nullable=False, default="unverified")
+    listing_price = Column(Float, nullable=True)
+    listing_name = Column(Text, nullable=True)
+    listing_method = Column(String, nullable=True)
+    listing_seen_at = Column(DateTime, nullable=True)
     active = Column(Boolean, nullable=False, default=True, index=True)
     validation_status = Column(String, nullable=False, default="valid", index=True)
     failure_reason = Column(String, nullable=True)
     first_seen_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_attempted_at = Column(DateTime, nullable=True)
     last_validated_at = Column(DateTime, nullable=True)
     last_collected_at = Column(DateTime, nullable=True)
     invalidated_at = Column(DateTime, nullable=True)
+
+
+class ScrapeCursor(Base):
+    __tablename__ = "scrape_cursors"
+    __table_args__ = (
+        UniqueConstraint("sku", "store", "kind", "key", name="uq_scrape_cursor"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    sku = Column(String, nullable=False, index=True)
+    store = Column(String, nullable=False, index=True)
+    kind = Column(String, nullable=False)
+    key = Column(String, nullable=False)
+    initial_url = Column(Text, nullable=True)
+    next_url = Column(Text, nullable=False)
+    completed = Column(Boolean, nullable=False, default=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_attempted_at = Column(DateTime, nullable=True)
+    last_checked_at = Column(DateTime, nullable=True)
+    last_status = Column(String, nullable=True)
+    failure_reason = Column(String, nullable=True)
+    browser_attempted_at = Column(DateTime, nullable=True)
+    browser_attempted_url = Column(Text, nullable=True)
+    visited_urls = Column(Text, nullable=True)
+    pages_completed = Column(Integer, nullable=False, default=0)
+    candidates_found = Column(Integer, nullable=False, default=0)
 
 
 class CrawlerControl(Base):
@@ -161,7 +196,8 @@ class CrawlerControl(Base):
     id = Column(Integer, primary_key=True, default=1)
     default_mode = Column(String(20), nullable=False, default="quick")
     external_discovery_fallback = Column(Boolean, nullable=False, default=True)
-    playwright_shipping_fallback = Column(Boolean, nullable=False, default=False)
+    playwright_product_fallback = Column(Boolean, nullable=False, default=True)
+    playwright_shipping_fallback = Column(Boolean, nullable=False, default=True)
     concurrent_requests_per_domain = Column(Integer, nullable=False, default=2)
     request_timeout_seconds = Column(Integer, nullable=False, default=15)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

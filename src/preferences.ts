@@ -19,16 +19,10 @@ export const STORE_OPTIONS = [
   { label: "ComClick", aliases: ["comclick", "com click"] },
 ];
 
-export const currencyOptions = [
-  { value: "BRL", label: "Real brasileiro" },
-  { value: "USD", label: "Dólar americano" },
-  { value: "EUR", label: "Euro" },
-];
-
-export const localeOptions = [
-  { value: "pt-BR", label: "Brasil" },
-  { value: "en-US", label: "Estados Unidos" },
-  { value: "de-DE", label: "Europa" },
+export const regionFormatOptions = [
+  { value: "BRL", label: "Brasil (R$)", locale: "pt-BR" },
+  { value: "USD", label: "Estados Unidos (US$)", locale: "en-US" },
+  { value: "EUR", label: "Europa (EUR)", locale: "de-DE" },
 ];
 
 export type InterfacePreferences = {
@@ -42,11 +36,10 @@ export const defaultInterfacePreferences: InterfacePreferences = {
   currency: "BRL",
   locale: "pt-BR",
   defaultStores: STORE_OPTIONS.map((store) => store.label),
-  logisticsPostalCode: "",
+  logisticsPostalCode: "01001000",
 };
 
-const validCurrencies = new Set(currencyOptions.map((option) => option.value));
-const validLocales = new Set(localeOptions.map((option) => option.value));
+const validCurrencies = new Set(regionFormatOptions.map((option) => option.value));
 const validStores = new Set(STORE_OPTIONS.map((store) => store.label));
 
 export const getInterfacePreferences = (): InterfacePreferences => {
@@ -68,14 +61,16 @@ export const getInterfacePreferences = (): InterfacePreferences => {
       ? parsed.defaultStores.filter((store) => validStores.has(store))
       : defaultInterfacePreferences.defaultStores;
 
+    const currency = parsed.currency && validCurrencies.has(parsed.currency) ? parsed.currency : "BRL";
+    const regionFormat = regionFormatOptions.find((option) => option.value === currency)!;
     return {
-      currency: parsed.currency && validCurrencies.has(parsed.currency) ? parsed.currency : "BRL",
-      locale: parsed.locale && validLocales.has(parsed.locale) ? parsed.locale : "pt-BR",
+      currency,
+      locale: regionFormat.locale,
       defaultStores: defaultStores.length ? defaultStores : defaultInterfacePreferences.defaultStores,
       logisticsPostalCode:
-        typeof parsed.logisticsPostalCode === "string"
+        typeof parsed.logisticsPostalCode === "string" && parsed.logisticsPostalCode.replace(/\D/g, "").length === 8
           ? parsed.logisticsPostalCode.replace(/\D/g, "").slice(0, 8)
-          : "",
+          : defaultInterfacePreferences.logisticsPostalCode,
     };
   } catch {
     return defaultInterfacePreferences;

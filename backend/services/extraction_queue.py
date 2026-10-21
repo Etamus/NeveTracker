@@ -6,12 +6,16 @@ import threading
 import time
 import uuid
 from datetime import datetime, timedelta
+from sqlalchemy.orm import object_session
 
 from database import SessionLocal
-from models.product import ExtractionJob, ExtractionJobItem, ExtractionSchedule
+from models.product import ExtractionJob, ExtractionJobItem, ExtractionSchedule, ScrapeCursor, ProductSource
+from services.offer_enrichment import normalize_postal_code
 
 
 BATCH_SIZE = 30
+PRECISE_SKU_SLICE_SECONDS = 180
+PRECISE_SKU_SLICE_ROUNDS = 12
 MAX_JOB_SKUS = 5000
 MAX_ITEM_ATTEMPTS = 2
 ACTIVE_STATUSES = ("queued", "running")
@@ -33,6 +37,11 @@ SKU_PAUSE_SECONDS = _bounded_env_float(
 )
 BATCH_PAUSE_SECONDS = _bounded_env_float(
     "NEVETRACKER_QUEUE_BATCH_PAUSE_SECONDS", 5.0, 1.0, 60.0
+)
+PRECISE_BATCH_PAUSE_SECONDS = _bounded_env_float(
+    "NEVETRACKER_QUEUE_PRECISE_PAUSE_SECONDS",
+    BATCH_PAUSE_SECONDS if "NEVETRACKER_QUEUE_BATCH_PAUSE_SECONDS" in os.environ else 0.5,
+    0.25, 60.0,
 )
 
 _processor = None
@@ -75,6 +84,33 @@ def _job_progress(job):
 
 
 def serialize_job(job, include_items=False):
+    visited = sum(bool(item.attempts) for item in job.items)
+    rounds = sum(item.attempts or 0 for item in job.items)
+    completion = _job_progress(job)
+    work_progress = completion
+    checked = 0
+    stage_total = 0
+    if job.mode == 'precise':
+        from services.store_registry import TARGET_STORES
+        keys = {store['key'] for store in TARGET_STORES if job.scope == 'all' or store.get('scope') == job.scope}
+        stage_total = (job.total_skus or 0) * len(keys)
+        session = object_session(job)
+        if session is not None and job.created_at:
+            pairs = set(session.query(ScrapeCursor.sku, ScrapeCursor.store).join(
+                ExtractionJobItem, ExtractionJobItem.sku == ScrapeCursor.sku,
+            ).filter(ExtractionJobItem.job_id == job.id, ScrapeCursor.store.in_(keys),
+                     ScrapeCursor.last_checked_at >= job.created_at).distinct().all())
+            pairs.update(session.query(ProductSource.sku, ProductSource.store).join(
+                ExtractionJobItem, ExtractionJobItem.sku == ProductSource.sku,
+            ).filter(ExtractionJobItem.job_id == job.id, ProductSource.store.in_(keys),
+                     ProductSource.last_attempted_at >= job.created_at).distinct().all())
+            checked = len(pairs)
+        if job.total_skus:
+            # Starts, store checkpoints and final completion are separate milestones.
+            # This estimate cannot reach 100% while any SKU remains unfinished.
+            stage_fraction = min(1, checked / stage_total) if stage_total else 0
+            work_progress = round(5 * visited / job.total_skus + 45 * stage_fraction + .5 * completion, 1)
+            work_progress = max(completion, min(99.9, work_progress)) if completion < 100 else 100.0
     response = {
         "id": job.id,
         "kind": job.kind,
@@ -86,6 +122,11 @@ def serialize_job(job, include_items=False):
         "batch_size": job.batch_size,
         "total_skus": job.total_skus,
         "processed_skus": job.processed_skus,
+        "visited_skus": visited,
+        "started_rounds": rounds,
+        "store_steps_done": checked,
+        "store_steps_total": stage_total,
+        "work_progress_percent": work_progress,
         "success_count": job.success_count,
         "cached_count": job.cached_count,
         "error_count": job.error_count,
@@ -147,6 +188,7 @@ def enqueue_extraction_job(
     mode="quick",
     schedule_run_key=None,
 ):
+    postal_code = normalize_postal_code(postal_code)
     normalized_skus = list(dict.fromkeys(sku for sku in skus if sku))
     if not normalized_skus:
         raise ValueError("Informe ao menos um SKU valido.")
@@ -189,7 +231,7 @@ def enqueue_extraction_job(
             refresh_if_stale=bool(refresh_if_stale),
             postal_code=postal_code,
             schedule_run_key=schedule_run_key,
-            batch_size=BATCH_SIZE,
+            batch_size=1 if mode == "precise" else BATCH_SIZE,
             total_skus=len(normalized_skus),
             message=f"{len(normalized_skus)} SKUs aguardando processamento.",
         )
@@ -323,7 +365,9 @@ def _mark_item_running(job_id, item_id):
         item.started_at = now
         db.commit()
         return {
+            "job_id": job_id,
             "sku": item.sku,
+            "kind": job.kind,
             "scope": job.scope,
             "mode": job.mode,
             "force_refresh": job.force_refresh,
@@ -342,7 +386,9 @@ def _finish_item(job_id, item_id, result):
         job = db.query(ExtractionJob).filter(ExtractionJob.id == job_id).one()
         item = db.query(ExtractionJobItem).filter(ExtractionJobItem.id == item_id).one()
         result_status = result.get("status") or "error"
-        if result_status == "error":
+        if result_status == "partial":
+            item.status = "queued"
+        elif result_status == "error":
             item.status = "failed"
             job.error_count = (job.error_count or 0) + 1
         elif result_status == "cached":
@@ -364,8 +410,9 @@ def _finish_item(job_id, item_id, result):
             setattr(item, field, int(result.get(field) or 0))
         item.in_database = bool(result.get("in_database"))
         item.last_update = result.get("last_update")
-        item.completed_at = datetime.utcnow()
-        job.processed_skus = (job.processed_skus or 0) + 1
+        if result_status != "partial":
+            item.completed_at = datetime.utcnow()
+            job.processed_skus = (job.processed_skus or 0) + 1
         job.current_sku = None
         job.updated_at = datetime.utcnow()
         db.commit()
@@ -376,21 +423,56 @@ def _finish_item(job_id, item_id, result):
 def _job_item_ids(job_id):
     db = SessionLocal()
     try:
-        return [
-            row[0]
-            for row in (
-                db.query(ExtractionJobItem.id)
+        job = db.query(ExtractionJob).filter(ExtractionJob.id == job_id).one()
+        precise = job.mode == "precise"
+        rows = (
+                db.query(ExtractionJobItem.id, ExtractionJobItem.sku, ExtractionJobItem.attempts)
                 .filter(
                     ExtractionJobItem.job_id == job_id,
                     ExtractionJobItem.status == "queued",
                 )
-                .order_by(ExtractionJobItem.position.asc())
-                .limit(BATCH_SIZE)
+                .order_by(ExtractionJobItem.attempts.asc(), ExtractionJobItem.position.asc())
                 .all()
-            )
-        ]
+        )
+        if precise and any(row.attempts for row in rows):
+            from services.store_registry import TARGET_STORES
+            from services.precise_extraction import _source_due
+            from services.scrape_pagination import browser_retry_due
+            keys = {store['key'] for store in TARGET_STORES if job.scope == 'all' or store['scope'] == job.scope}
+            skus = [row.sku for row in rows]
+            checked, actionable, pending_sources = {}, set(), set()
+            for cursor in db.query(ScrapeCursor).filter(ScrapeCursor.sku.in_(skus), ScrapeCursor.store.in_(keys)):
+                if cursor.last_checked_at and cursor.last_checked_at >= job.created_at:
+                    checked.setdefault(cursor.sku, set()).add(cursor.store)
+                if not cursor.completed and (cursor.last_attempted_at is None or cursor.last_status in {'OK', 'OK_BROWSER'} or browser_retry_due(cursor)):
+                    actionable.add(cursor.sku)
+            now = datetime.utcnow()
+            for source in db.query(ProductSource).filter(ProductSource.sku.in_(skus), ProductSource.store.in_(keys), ProductSource.active.is_(True)):
+                if _source_due(source, job.created_at, now):
+                    pending_sources.add(source.sku)
+            ready = {sku for sku, stores in checked.items() if stores == keys and sku not in actionable and sku not in pending_sources}
+            # Finish already checked materials before starting more. Actual
+            # processing still validates completion; no counters are fabricated.
+            rows.sort(key=lambda row: (row.sku not in ready, row.attempts or 0))
+        ids = [row.id for row in rows[:1 if precise else BATCH_SIZE]]
+        return ids, precise
     finally:
         db.close()
+
+
+def update_job_progress(job_id, sku, message, db=None):
+    """Persist the current phase so long requests remain visible to the UI."""
+    owns_session = db is None
+    db = db or SessionLocal()
+    try:
+        job = db.query(ExtractionJob).filter(ExtractionJob.id == job_id).first()
+        if job and job.status == "running" and job.current_sku == sku:
+            job.message = str(message)[:400]
+            job.updated_at = datetime.utcnow()
+            db.commit()
+    finally:
+        if owns_session:
+            db.close()
 
 
 def _record_schedule_completion(db, job, completed_at):
@@ -450,7 +532,7 @@ def _finish_or_requeue_job(job_id):
 def _run_item(job_id, item_id):
     options = _mark_item_running(job_id, item_id)
     if not options:
-        return False
+        return None
 
     result = None
     for attempt in range(MAX_ITEM_ATTEMPTS):
@@ -466,16 +548,29 @@ def _run_item(job_id, item_id):
         time.sleep(min(4.0, 1.5 * (attempt + 1)))
 
     _finish_item(job_id, item_id, result or {"status": "error", "message": "Falha desconhecida."})
-    return True
+    return (result or {}).get("status") or "error"
 
 
 def _process_job_batch(job_id):
-    item_ids = _job_item_ids(job_id)
+    item_ids, precise = _job_item_ids(job_id)
     if not item_ids:
         return _finish_or_requeue_job(job_id)
 
     for index, item_id in enumerate(item_ids):
-        if not _run_item(job_id, item_id):
+        started = time.monotonic()
+        rounds = 0
+        while True:
+            status = _run_item(job_id, item_id)
+            if status is None:
+                break
+            rounds += 1
+            if (
+                not precise or status != "partial"
+                or rounds >= PRECISE_SKU_SLICE_ROUNDS
+                or time.monotonic() - started >= PRECISE_SKU_SLICE_SECONDS
+            ):
+                break
+        if status is None:
             break
         if index + 1 < len(item_ids):
             time.sleep(SKU_PAUSE_SECONDS)
@@ -525,7 +620,9 @@ def _worker_loop():
         try:
             status = _process_job_batch(job_id)
             if status == "queued":
-                _wake_event.wait(timeout=BATCH_PAUSE_SECONDS)
+                with SessionLocal() as pause_db:
+                    precise = pause_db.query(ExtractionJob.mode).filter(ExtractionJob.id == job_id).scalar() == 'precise'
+                _wake_event.wait(timeout=PRECISE_BATCH_PAUSE_SECONDS if precise else BATCH_PAUSE_SECONDS)
                 _wake_event.clear()
         except Exception as exc:
             print(f" WARNING: Fila de extracao falhou no job {job_id}: {exc}")

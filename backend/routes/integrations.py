@@ -12,6 +12,21 @@ from services.integration_settings import (
 integration_router = APIRouter()
 
 
+@integration_router.get('/mercado-livre/session')
+def mercado_livre_session(_actor: AuthUser = Depends(require_developer)):
+    from services.mercado_livre_session import session_status
+    return session_status()
+
+
+@integration_router.post('/mercado-livre/session')
+def validate_mercado_livre_session(_actor: AuthUser = Depends(require_developer)):
+    from services.mercado_livre_session import start_validation
+    try:
+        return start_validation()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
 @integration_router.get("")
 def list_integrations(_actor: AuthUser = Depends(require_developer)):
     return get_integration_settings()

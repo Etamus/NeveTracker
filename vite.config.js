@@ -28,6 +28,11 @@ export default defineConfig(({ mode }) => {
       port: 5173,
       strictPort: true,
       allowedHosts: ["localhost", "127.0.0.1"],
+      watch: {
+        // Chromium locks its session databases while scraping. These runtime
+        // files and backend outputs are not frontend sources or HMR inputs.
+        ignored: [/(?:^|[/\\])(?:\.tools|\.logs|backend|\.artifacts|\.iniciar\.lock|\.install\.lock|playwright-report|test-results)(?:[/\\]|$)/],
+      },
     },
   };
 });

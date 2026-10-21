@@ -81,11 +81,44 @@ Backend:
 ### Modos de extração
 
 - `Rápida`: preserva o pipeline de busca por SKU, comparadores, cache e enriquecimento.
-- `Precisa`: resolve EAN/MPN/modelo, reutiliza URLs validadas da tabela `product_sources`, coleta a página do produto via API/JSON/Scrapy e redescobre somente fontes ausentes ou invalidadas.
+- `Precisa`: resolve EAN/MPN/modelo, reutiliza URLs da tabela `product_sources`, coleta a página do produto via API/JSON/Scrapy e redescobre lojas sem coleta bem-sucedida. O scraping de busca de Amazon, Mercado Livre e Magalu avança uma página por termo a cada execução; as páginas de vendedores da Amazon também são percorridas com cursor persistido. Fontes encontradas ficam salvas e entram em lotes rotativos de coleta, inclusive após reiniciar o backend.
 
-No modo preciso, a ordem é API oficial, endpoint JSON da loja, Scrapy HTTP, Playwright seletivo para logística e integração externa como último fallback. Bing Shopping, DuckDuckGo, Buscapé e Zoom participam da descoberta; o preço final é persistido somente depois da coleta da página original quando ela está acessível.
+No modo preciso, a ordem é API oficial, endpoint JSON da loja, Scrapy HTTP, Playwright seletivo para logística e integração externa como último fallback. Bing Shopping, DuckDuckGo, Buscapé e Zoom participam da descoberta; o preço final é persistido somente depois da coleta da página original quando ela está acessível. Ofertas de vendedores diferentes da mesma loja ou da mesma página permanecem separadas na comparação.
+
+Cada lote preciso coleta até 40 URLs, com até 12 por loja; as demais continuam ativas e são priorizadas nos lotes seguintes pela data da última tentativa. Um job na fila continua o SKU em novos lotes enquanto houver fontes por tentar ou páginas de scraping avançando. Os cursores de páginas concluídas reiniciam a busca depois de 24 horas ou quando a redescoberta é solicitada.
 
 O painel `Extrações > Definições` configura globalmente o modo, a concorrência por domínio, o timeout, a descoberta externa e o fallback Playwright. `Extrações > Execução` aplica essas definições; `Agendamento` automatiza atualizações e `Dados` gerencia os SKUs persistidos.
+
+### Revisão de precisão e diagnóstico
+
+A coleta precisa lê JSON-LD, microdata e RDFa, resolve referências entre produto e oferta e valida identificadores antes de salvar. Produtos recomendados, ofertas agregadas, quantidades incompatíveis, preços condicionados e moedas diferentes de BRL não completam automaticamente a oferta pesquisada.
+
+O fallback de navegador pode recuperar a página do produto e cotar CEP pelos formulários públicos das lojas. Loja Integrada e WooCommerce utilizam seus cálculos de frete em uma sessão anônima; Shopify seleciona a variante correspondente. Atualizações renovam preço e logística, enquanto dados reutilizados mantêm sua data. O modo preciso não chama provedores de descoberta pagos.
+
+Cada lojista permanece associado à sua loja principal, inclusive quando aparece em vários marketplaces. Os lotes continuam enquanto houver trabalho acionável; páginas em pausa e buscas antigas não bloqueiam a retomada. Os controles de navegador para produtos e logística ficam em `Extrações > Definições`.
+
+A [revisão completa](docs/scraping-review.md) registra os métodos pesquisados, as correções, os testes e as limitações observadas. Uma auditoria de amostras sem modificar ofertas no banco pode ser executada com:
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe diagnose_scraping.py --browser --shipping --cep 01001-000
+```
+
+O relatório padrão é `.logs/scraping-audit.json`. Uma amostra por SKU e loja não representa todos os anúncios disponíveis.
+
+A [auditoria do W11199342](docs/W11199342-coverage.md) detalha vendedores que
+faltavam, verificações nas 11 lojas e bloqueios ainda presentes. A descoberta
+complementar agora amplia os resultados mesmo quando já existe uma oferta;
+buscas públicas por domínio também têm paginação e cursores retomáveis.
+
+A [revisão do Mercado Livre](docs/mercado-livre-review.md) registra a integração
+de Patchright e ChompJS, os resultados gravados para três SKUs e a ação
+**Integrações > Mercado Livre > Validar navegador** para verificações exigidas pelo site.
+
+Ofertas confirmadas como **Sem estoque** também são armazenadas e exibidas,
+inclusive sem preço publicado. Preço ausente permanece vazio, sem virar zero;
+essas ofertas ficam fora do menor preço e da média, mas aparecem em Database,
+nos resultados e na exportação para Excel. O histórico de preços é preservado.
 
 ## Lojas e Fontes
 

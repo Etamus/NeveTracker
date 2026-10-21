@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import threading
+from types import SimpleNamespace
 import time
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from twisted.internet import reactor
 
 from crawlers.base import parse_product_response
 from crawlers.profiles import DEFAULT_PROFILE, STORE_PROFILES
+from services.http_client import recover_public_html
 
 
 CACHE_DIR = Path(__file__).resolve().parents[1] / ".scrapy-cache"
@@ -48,8 +50,12 @@ class ProductSourceSpider(scrapy.Spider):
         if response.status in {404, 410}:
             self.output[source_id] = {"status": "NOT_FOUND", "reason": f"HTTP {response.status}"}
             return
+        if response.status == 403 and not response.headers.get("Retry-After"):
+            from twisted.internet.threads import deferToThread
+            return deferToThread(self.recover_source, response, source_id)
         if response.status in {401, 403, 429}:
-            self.output[source_id] = {"status": "BLOCKED", "reason": f"HTTP {response.status}"}
+            self.output[source_id] = {"status": "BLOCKED", "reason": f"HTTP {response.status}",
+                                      "_retry_after": response.headers.get("Retry-After")}
             return
         if response.status != 200:
             self.output[source_id] = {"status": "PARSER_ERROR", "reason": f"HTTP {response.status}"}
@@ -61,6 +67,22 @@ class ProductSourceSpider(scrapy.Spider):
             self.identity,
             profile,
         )
+
+    def recover_source(self, response, source_id):
+        from scrapy.http import HtmlResponse
+        recovered = recover_public_html(SimpleNamespace(status_code=403), response.url,
+                                        self.crawler.settings.getfloat("DOWNLOAD_TIMEOUT", 15))
+        if recovered.status_code != 200:
+            self.output[source_id] = {"status": "BLOCKED", "reason": "HTTP 403; transporte compativel tambem indisponivel"}
+            return
+        source = self.sources[source_id]
+        page = HtmlResponse(url=recovered.url, body=recovered.content, encoding=recovered.encoding or "utf-8")
+        self.output[source_id] = parse_product_response(page, source, self.identity,
+                                                      STORE_PROFILES.get(source.store, DEFAULT_PROFILE))
+        from services.magalu_public import is_public_storefront
+        if source.store == "magalu" and is_public_storefront(recovered.url):
+            for item in self.output[source_id].get("items", []):
+                item["discovery_source"] = "magalu_public_storefront"
 
     def parse_error(self, failure):
         source_id = failure.request.meta.get("source_id")
@@ -106,12 +128,12 @@ def _settings(per_domain, timeout):
             "RANDOMIZE_DOWNLOAD_DELAY": True,
             "RETRY_ENABLED": True,
             "RETRY_TIMES": 2,
-            "RETRY_HTTP_CODES": [408, 425, 429, 500, 502, 503, 504],
+            "RETRY_HTTP_CODES": [408, 425, 500, 502, 503, 504],
             "AUTOTHROTTLE_ENABLED": True,
             "AUTOTHROTTLE_START_DELAY": 0.25,
             "AUTOTHROTTLE_MAX_DELAY": 5,
             "AUTOTHROTTLE_TARGET_CONCURRENCY": float(per_domain),
-            "HTTPCACHE_ENABLED": True,
+            "HTTPCACHE_ENABLED": False,
             "HTTPCACHE_EXPIRATION_SECS": 900,
             "HTTPCACHE_DIR": str(CACHE_DIR),
             "LOG_ENABLED": False,
@@ -129,15 +151,18 @@ def collect_sources_with_scrapy(sources, identity, per_domain=2, timeout=15):
     output = {}
     completed = threading.Event()
     failure = []
+    pending = []
 
     def run():
         runner = CrawlerRunner(_settings(per_domain, timeout))
+        crawler = runner.create_crawler(ProductSourceSpider)
         deferred = runner.crawl(
-            ProductSourceSpider,
+            crawler,
             sources=sources,
             identity=identity,
             output=output,
         )
+        pending.append(crawler)
 
         def finish(result):
             if hasattr(result, "value"):
@@ -148,13 +173,21 @@ def collect_sources_with_scrapy(sources, identity, per_domain=2, timeout=15):
         deferred.addBoth(finish)
 
     reactor.callFromThread(run)
-    batches = math.ceil(len(sources) / max(1, per_domain))
-    wait_seconds = min(300, max(20, timeout * batches + 10))
+    from collections import Counter
+    from urllib.parse import urlparse
+    domain_counts = Counter(urlparse(source.url).hostname for source in sources)
+    batches = max(math.ceil(count / max(1, per_domain)) for count in domain_counts.values())
+    wait_seconds = min(90, max(20, timeout * batches + 10))
     if not completed.wait(wait_seconds):
-        return {
-            source.id: {"status": "TIMEOUT", "reason": "Tempo global do Scrapy excedido"}
-            for source in sources
-        }
+        for crawler in pending:
+            reactor.callFromThread(crawler.stop)
+        partial = dict(output)
+        for source in sources:
+            partial.setdefault(
+                source.id,
+                {"status": "TIMEOUT", "reason": "Tempo global do Scrapy excedido"},
+            )
+        return partial
     if failure:
         print(f"[COLLECTION][SCRAPY] PARSER_ERROR: {failure[0]}")
     for source in sources:

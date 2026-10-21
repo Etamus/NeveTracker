@@ -15,6 +15,7 @@ def serialize_control(control):
     return {
         "default_mode": control.default_mode,
         "external_discovery_fallback": control.external_discovery_fallback,
+        "playwright_product_fallback": control.playwright_product_fallback,
         "playwright_shipping_fallback": control.playwright_shipping_fallback,
         "concurrent_requests_per_domain": control.concurrent_requests_per_domain,
         "request_timeout_seconds": control.request_timeout_seconds,

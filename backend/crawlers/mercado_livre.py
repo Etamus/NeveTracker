@@ -6,18 +6,37 @@ from datetime import datetime
 from services.http_client import create_resilient_session
 from services.offer_enrichment import enrich_offer
 from services.product_resolver import resolve_candidate
+from services.integration_settings import get_runtime_provider_settings
+from crawlers.mercado_livre_public import collect_public_product, _item_id as public_item_id
 
 
 API_ROOT = "https://api.mercadolibre.com"
 
 
 def _item_id(source):
+    selected = public_item_id(source.url)
+    if selected:
+        return selected
+    if "/p/" in source.url:
+        return None
     value = source.item_id or source.external_product_id or source.url
     match = re.search(r"MLB-?(\d+)", str(value or ""), re.I)
     return f"MLB{match.group(1)}" if match else None
 
 
 def collect_mercado_livre(source, identity, postal_code=None, timeout=15):
+    result = collect_public_product(source, identity, postal_code, timeout)
+    if result["status"] in {"OK", "INVALID_MATCH", "OUT_OF_STOCK"}:
+        return result
+    settings = get_runtime_provider_settings("mercado_livre")
+    if settings["enabled"] and settings["configured"] and _item_id(source):
+        official = _collect_official_item(source, identity, postal_code, timeout)
+        if official["status"] == "OK":
+            return official
+    return result
+
+
+def _collect_official_item(source, identity, postal_code=None, timeout=15):
     item_id = _item_id(source)
     if not item_id:
         return {"status": "PARSER_ERROR", "reason": "item_id ausente"}
@@ -79,6 +98,7 @@ def collect_mercado_livre(source, identity, postal_code=None, timeout=15):
     }
     if postal_code:
         item = enrich_offer(item, postal_code)
-        item["shipping_zip_code"] = postal_code
+        if item.get("destination_zip") == postal_code:
+            item["shipping_zip_code"] = postal_code
     print(f"[COLLECTION][MERCADO_LIVRE] {item_id} coletado")
     return {"status": "OK", "item": item, "match": match}

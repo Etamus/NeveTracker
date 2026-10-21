@@ -50,6 +50,7 @@ test-results/
 blob-report/
 
 # Local project state
+docs/
 .tools/
 .iniciar.lock/
 .install.lock/

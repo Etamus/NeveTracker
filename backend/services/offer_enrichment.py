@@ -1,29 +1,34 @@
-import json
 import math
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from threading import RLock
-from urllib.parse import urljoin, urlparse
+from threading import BoundedSemaphore, RLock
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
-from cachetools import TTLCache, cached
+from cachetools import TTLCache
 
 from services.http_client import create_resilient_session
+from services.product_resolver import ProductIdentity
+from services.structured_products import (
+    LOGISTICS_FIELDS, delivery_range, merge_offer_details, number, offer_price, payment_text, product_nodes, product_offers, select_offer, select_product,
+    shipping_details, types,
+)
 
 
 DETAIL_CACHE = TTLCache(maxsize=600, ttl=3600)
 DETAIL_CACHE_LOCK = RLock()
 DETAIL_WORKERS = 8
+DEFAULT_REFERENCE_POSTAL_CODE = "01001000"
 
 
 def normalize_postal_code(value):
     digits = re.sub(
         r"\D",
         "",
-        value or os.getenv("DEFAULT_SHIPPING_ZIP_CODE", ""),
+        value or os.getenv("DEFAULT_SHIPPING_ZIP_CODE") or DEFAULT_REFERENCE_POSTAL_CODE,
     )
     return digits if len(digits) == 8 else None
 
@@ -49,7 +54,7 @@ def _blocked_page_response(response):
     if response.status_code in {401, 403, 408, 425, 429, 500, 502, 503, 504}:
         return True
     text = response.text or ""
-    if response.status_code != 200 or len(text) < 500:
+    if response.status_code != 200 or not text.strip():
         return True
     title_match = re.search(r"<title[^>]*>(.*?)</title>", text, re.I | re.S)
     title = re.sub(r"\s+", " ", title_match.group(1) if title_match else "")
@@ -63,22 +68,7 @@ def _blocked_page_response(response):
 
 
 def _as_float(value):
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-
-    cleaned = re.sub(r"[^\d,.]", "", str(value))
-    if not cleaned:
-        return None
-    if "," in cleaned:
-        cleaned = cleaned.replace(".", "").replace(",", ".")
-    elif cleaned.count(".") > 1:
-        cleaned = cleaned.replace(".", "")
-    try:
-        return float(cleaned)
-    except ValueError:
-        return None
+    return number(value, allow_zero=True)
 
 
 def _valid_price(value, reference):
@@ -160,113 +150,47 @@ def _parse_payment_details(text, current_price):
     }
 
 
-def _jsonld_items(soup):
-    items = []
-    for script in soup.select('script[type="application/ld+json"]'):
-        raw = script.string or script.get_text()
-        if not raw:
-            continue
-        try:
-            data = json.loads(raw)
-        except (TypeError, ValueError):
-            continue
-        values = data if isinstance(data, list) else [data]
-        for value in values:
-            if not isinstance(value, dict):
-                continue
-            graph = value.get("@graph")
-            items.extend(graph if isinstance(graph, list) else [value])
-    return items
+def _structured_offer(soup, item=None, url=""):
+    nodes = product_nodes(str(soup), url)
+    products = [node for node in nodes if "Product" in types(node)]
+    if item and products:
+        sku = item.get("sku") or item.get("mpn") or item.get("model")
+        if not sku:
+            match = re.search(r"\bW\d{8}\b", item.get("name") or "", re.I)
+            sku = match.group() if match else ""
+        identity = ProductIdentity(
+            sku=str(sku), model=item.get("model") or str(sku),
+            mpn=item.get("mpn"), ean=item.get("ean"),
+            name=item.get("name"), brand=item.get("brand"),
+        )
+        product, _ = select_product(nodes, identity)
+        if not product:
+            return None, True
+    elif len(products) == 1:
+        product = products[0]
+    elif products:
+        return None, True
+    else:
+        return None, False
+    offers = product_offers(product, nodes)
+    selected = select_offer(offers, (item or {}).get("seller") or (item or {}).get("store"), url)
+    if selected and str(selected.get("priceCurrency") or "BRL").upper() != "BRL":
+        return None, True
+    return selected, bool(offers and selected is None)
 
 
-def _as_list(value):
-    if value is None:
-        return []
-    return value if isinstance(value, list) else [value]
-
-
-def _quantity_days(value):
-    if not isinstance(value, dict):
-        return (None, None)
-    minimum = _as_float(value.get("minValue") or value.get("value"))
-    maximum = _as_float(value.get("maxValue") or value.get("value"))
-    unit = str(value.get("unitCode") or value.get("unitText") or "day").lower()
-    factor = 1 / 24 if unit in {"h", "hour", "hours", "hora", "horas"} else 1
-    return (
-        math.ceil(minimum * factor) if minimum is not None else None,
-        math.ceil(maximum * factor) if maximum is not None else None,
-    )
-
-
-def _jsonld_offer_details(soup):
-    offers = []
-    for item in _jsonld_items(soup):
-        item_type = item.get("@type") if isinstance(item, dict) else None
-        if item_type == "Product" or (isinstance(item_type, list) and "Product" in item_type):
-            offers.extend(_as_list(item.get("offers")))
-        elif item_type in {"Offer", "AggregateOffer"}:
-            offers.append(item)
-
-    availability = None
-    shipping_options = []
-    for offer in offers:
-        if not isinstance(offer, dict):
-            continue
-        availability_value = offer.get("availability")
-        if availability_value:
-            availability = str(availability_value).rsplit("/", 1)[-1]
-        for details in _as_list(offer.get("shippingDetails")):
-            if not isinstance(details, dict) or details.get("doesNotShip") is True:
-                continue
-            rate = details.get("shippingRate")
-            if isinstance(rate, dict):
-                rate = rate.get("value") or rate.get("maxValue")
-            rate = _as_float(rate)
-            delivery = details.get("deliveryTime") or {}
-            handling_min, handling_max = _quantity_days(delivery.get("handlingTime"))
-            transit_min, transit_max = _quantity_days(delivery.get("transitTime"))
-            delivery_min = sum(value or 0 for value in (handling_min, transit_min)) or None
-            delivery_max = sum(value or 0 for value in (handling_max, transit_max)) or None
-            shipping_options.append(
-                {
-                    "shipping_cost": rate,
-                    "delivery_min_days": delivery_min,
-                    "delivery_max_days": delivery_max,
-                    "handling_min_days": handling_min,
-                    "handling_max_days": handling_max,
-                    "logistics_source": "jsonld",
-                }
-            )
-
-    selected = min(
-        shipping_options,
-        key=lambda option: (
-            option.get("shipping_cost") is None,
-            option.get("shipping_cost") or 0,
-            option.get("delivery_max_days") or 9999,
-        ),
-        default={},
-    )
-    if availability:
-        selected["availability"] = availability
+def _jsonld_offer_details(soup, item=None, postal_code=None, url=""):
+    offer, _ = _structured_offer(soup, item, url)
+    if not offer:
+        return {}
+    selected = shipping_details(offer, postal_code)
+    if offer.get("availability"):
+        selected["availability"] = str(offer["availability"]).rsplit("/", 1)[-1]
     return selected
 
 
 def _payment_scope_text(soup):
-    selectors = (
-        ".product-form",
-        ".product-info-main",
-        ".product__info-container",
-        ".produto-principal",
-        "main .product-info",
-    )
-    for selector in selectors:
-        node = soup.select_one(selector)
-        if node:
-            text = node.get_text(" ", strip=True)
-            if "R$" in text:
-                return text
-    return soup.get_text(" ", strip=True)
+    return payment_text(soup)
 
 
 def _loja_integrada_shipping(session, soup, html, url, postal_code):
@@ -293,6 +217,10 @@ def _loja_integrada_shipping(session, soup, html, url, postal_code):
         rates = response.json()
     except ValueError:
         return {}
+    return _loja_integrada_rate_details(rates)
+
+
+def _loja_integrada_rate_details(rates):
     if not isinstance(rates, list):
         return {}
 
@@ -304,17 +232,17 @@ def _loja_integrada_shipping(session, soup, html, url, postal_code):
         if re.search(r"retir|pickup|coleta", method_name, re.I):
             continue
         cost = _as_float(rate.get("price"))
-        days = _as_float(rate.get("deliveryTime"))
-        options.append((cost if cost is not None else math.inf, days or math.inf, rate))
+        _minimum, maximum = delivery_range(rate.get("deliveryTime"))
+        options.append((cost if cost is not None else math.inf, maximum if maximum is not None else math.inf, rate))
     if not options:
         return {}
     _, _, selected = min(options, key=lambda option: (option[0], option[1]))
-    days = _as_float(selected.get("deliveryTime"))
+    minimum, maximum = delivery_range(selected.get("deliveryTime"))
     return {
         "shipping_cost": _as_float(selected.get("price")),
         "shipping_method": selected.get("name") or selected.get("originalName"),
-        "delivery_min_days": math.ceil(days) if days is not None else None,
-        "delivery_max_days": math.ceil(days) if days is not None else None,
+        "delivery_min_days": minimum,
+        "delivery_max_days": maximum,
         "logistics_source": "loja_integrada",
     }
 
@@ -345,6 +273,9 @@ def _dufrio_shipping(session, soup, url, postal_code):
     except ValueError:
         return {}
     rates = [rate for values in groups.values() for rate in values] if isinstance(groups, dict) else []
+    rates = [rate for rate in rates if isinstance(rate, dict) and not re.search(
+        r"retir|pickup|coleta", str(rate.get("method_title") or "") + " " + str(rate.get("method_description") or ""), re.I,
+    )]
     if not rates:
         return {}
     selected = min(
@@ -355,14 +286,14 @@ def _dufrio_shipping(session, soup, url, postal_code):
         str(value or "")
         for value in (selected.get("method_title"), selected.get("method_description"))
     )
-    day_match = re.search(r"(\d+)\s*dias?", title, re.I)
-    days = int(day_match.group(1)) if day_match else None
+    minimum, maximum = delivery_range(title) if re.search(r"dias?|horas?", title, re.I) else (None, None)
     return {
         "shipping_cost": _as_float(selected.get("price")),
         "shipping_method": selected.get("method_title") or selected.get("carrier_title"),
-        "delivery_min_days": days,
-        "delivery_max_days": days,
+        "delivery_min_days": minimum,
+        "delivery_max_days": maximum,
         "logistics_source": "dufrio",
+        "delivery_days_type": "business" if re.search(r"[uú]teis", title, re.I) else None,
     }
 
 
@@ -382,7 +313,7 @@ def _postal_state(session, postal_code):
     return None
 
 
-def _shopify_shipping(session, url, postal_code):
+def _shopify_shipping(session, url, postal_code, sku=None):
     product_url = url.split("?", 1)[0].rstrip("/")
     product_response = session.get(
         f"{product_url}.js",
@@ -396,8 +327,16 @@ def _shopify_shipping(session, url, postal_code):
     except ValueError:
         return {}
     variants = product.get("variants") or []
-    variant = next((item for item in variants if item.get("available")), None)
-    if not variant:
+    variant_id = (parse_qs(urlparse(url).query).get("variant") or [None])[0]
+    variant = next((item for item in variants if (
+        variant_id and str(item.get("id")) == variant_id
+        or not variant_id and sku and str(item.get("sku") or "").upper() == str(sku).upper()
+    )), None)
+    if variant is None and len(variants) == 1:
+        variant = variants[0]
+    if variant is None:
+        return {}
+    if not variant.get("available"):
         return {"availability": "OutOfStock", "logistics_source": "shopify"}
 
     parsed = urlparse(url)
@@ -555,12 +494,7 @@ def _mercado_livre_shipping(session, url, postal_code):
     }
 
 
-@cached(
-    DETAIL_CACHE,
-    key=lambda url, current_price, postal_code=None: (url, round(current_price or 0, 2), postal_code),
-    lock=DETAIL_CACHE_LOCK,
-)
-def _fetch_details(url, current_price, postal_code=None):
+def _fetch_details_uncached(url, current_price, postal_code=None, item=None):
     parsed = urlparse(url or "")
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return {}
@@ -578,29 +512,40 @@ def _fetch_details(url, current_price, postal_code=None):
             return {}
 
         soup = BeautifulSoup(response.text, "html.parser")
+        _offer, ambiguous = _structured_offer(soup, item, response.url or url)
+        if ambiguous:
+            return {}
         text = _payment_scope_text(soup)
         details = {
-            **_parse_payment_details(text, current_price),
-            **_jsonld_offer_details(soup),
+            **_parse_payment_details(text, offer_price(_offer) if _offer and offer_price(_offer) is not None else current_price),
+            **_jsonld_offer_details(soup, item, postal_code, response.url or url),
         }
 
         if postal_code:
             shipping = {}
-            if re.search(r"friolar|goldservice", parsed.netloc, re.I):
-                shipping = _loja_integrada_shipping(
-                    session, soup, response.text, url, postal_code
-                )
-            elif "dufrio.com.br" in parsed.netloc:
-                shipping = _dufrio_shipping(session, soup, url, postal_code)
-            elif "mgparts.com.br" in parsed.netloc:
-                shipping = _shopify_shipping(session, url, postal_code)
-            elif "comclick.com.br" in parsed.netloc:
-                shipping = _tray_shipping(session, soup, url, postal_code)
-            elif "mercadolivre.com" in parsed.netloc:
-                shipping = _mercado_livre_shipping(session, url, postal_code)
+            try:
+                if re.search(r"friolar|goldservice", parsed.netloc, re.I):
+                    shipping = _loja_integrada_shipping(
+                        session, soup, response.text, url, postal_code
+                    )
+                elif "dufrio.com.br" in parsed.netloc:
+                    shipping = _dufrio_shipping(session, soup, url, postal_code)
+                elif "mgparts.com.br" in parsed.netloc:
+                    shipping = _shopify_shipping(session, url, postal_code, sku=(item or {}).get("sku"))
+                elif "comclick.com.br" in parsed.netloc:
+                    shipping = _tray_shipping(session, soup, url, postal_code)
+                elif "mercadolivre.com" in parsed.netloc:
+                    shipping = _mercado_livre_shipping(session, url, postal_code)
+            except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
+                print(f" WARNING: Nao foi possivel cotar frete em {parsed.netloc}: {exc}")
             details.update({key: value for key, value in shipping.items() if value is not None})
-            details["destination_zip"] = postal_code
-            if shipping or details.get("delivery_max_days") is not None:
+            if any(shipping.get(field) is not None for field in (
+                "shipping_cost", "delivery_min_days", "delivery_max_days",
+            )):
+                for field in LOGISTICS_FIELDS:
+                    details.pop(field, None)
+                details.update({key: value for key, value in shipping.items() if value is not None})
+                details["destination_zip"] = postal_code
                 details["logistics_captured_at"] = datetime.utcnow().isoformat()
 
         return {key: value for key, value in details.items() if value is not None}
@@ -611,10 +556,32 @@ def _fetch_details(url, current_price, postal_code=None):
         session.close()
 
 
-def enrich_offer(item, postal_code=None):
+def _fetch_details(url, current_price, postal_code=None, item=None, force_refresh=False):
+    key = (url, round(current_price or 0, 2), postal_code,
+           (item or {}).get("sku"), (item or {}).get("seller") or (item or {}).get("store"))
+    with DETAIL_CACHE_LOCK:
+        cached_details = DETAIL_CACHE.get(key)
+    if cached_details is not None and not force_refresh:
+        return cached_details
+
+    details = (
+        _fetch_details_uncached(url, current_price, postal_code, item=item)
+        if item is not None else _fetch_details_uncached(url, current_price, postal_code)
+    )
+    has_logistics = any(
+        details.get(field) is not None
+        for field in ("shipping_cost", "delivery_min_days", "delivery_max_days")
+    )
+    if details and (not postal_code or has_logistics):
+        with DETAIL_CACHE_LOCK:
+            DETAIL_CACHE[key] = details
+    return details
+
+
+def enrich_offer(item, postal_code=None, force_refresh=False):
     postal_code = normalize_postal_code(postal_code)
-    details = _fetch_details(item.get("url"), item.get("price"), postal_code)
-    enriched = {**item, **details}
+    details = _fetch_details(item.get("url"), item.get("price"), postal_code, item=item, force_refresh=force_refresh)
+    enriched = merge_offer_details(item, details)
     if enriched.get("cash_price"):
         enriched["price"] = enriched["cash_price"]
     if enriched.get("installment_price") and enriched.get("cash_price"):
@@ -624,9 +591,17 @@ def enrich_offer(item, postal_code=None):
     return enriched
 
 
-def enrich_offers(items, postal_code=None):
+def enrich_offers(items, postal_code=None, force_refresh=False, per_domain=2):
     if not items:
         return []
     worker_count = min(DETAIL_WORKERS, len(items))
+    slots = {urlparse(item.get("url") or "").netloc: BoundedSemaphore(max(1, per_domain)) for item in items}
+    def enrich_safely(item):
+        try:
+            with slots[urlparse(item.get("url") or "").netloc]:
+                return enrich_offer(item, postal_code, force_refresh=True) if force_refresh else enrich_offer(item, postal_code)
+        except Exception as exc:
+            print(f" WARNING: Nao foi possivel enriquecer {item.get('url')}: {exc}")
+            return item
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        return list(executor.map(lambda item: enrich_offer(item, postal_code), items))
+        return list(executor.map(enrich_safely, items))

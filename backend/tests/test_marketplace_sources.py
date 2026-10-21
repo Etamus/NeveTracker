@@ -18,7 +18,8 @@ class MercadoLivreSourceTests(unittest.TestCase):
         search_mercado_livre.cache_clear()
 
     @patch("services.mercado_livre_api.session.get")
-    def test_official_search_maps_payment_shipping_and_availability(self, get):
+    @patch("services.mercado_livre_api.get_runtime_provider_settings", return_value={"enabled": True, "configured": True, "max_results": 100})
+    def test_official_search_maps_payment_shipping_and_availability(self, settings, get):
         response = Mock(status_code=200)
         response.json.return_value = {
             "paging": {"total": 1},

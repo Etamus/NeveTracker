@@ -14,6 +14,7 @@ class PriceHistoryCreate(BaseModel):
     shipping_cost: Optional[float] = None
     delivery_min_days: Optional[int] = None
     delivery_max_days: Optional[int] = None
+    delivery_days_type: Optional[str] = None
     destination_zip: Optional[str] = None
 
 class ProductCreate(BaseModel):
@@ -48,7 +49,8 @@ class ExtractionDatabaseJobRequest(BaseModel):
 class CrawlerControlRequest(BaseModel):
     default_mode: Literal["quick", "precise"] = "quick"
     external_discovery_fallback: bool = True
-    playwright_shipping_fallback: bool = False
+    playwright_product_fallback: bool = True
+    playwright_shipping_fallback: bool = True
     concurrent_requests_per_domain: int = Field(default=2, ge=1, le=4)
     request_timeout_seconds: int = Field(default=15, ge=5, le=45)
 
@@ -83,7 +85,7 @@ class ExtractionScheduleRequest(BaseModel):
 class AnalyticsOfferExport(BaseModel):
     store: str
     source: Optional[str] = None
-    current_price: float
+    current_price: Optional[float] = None
     url: str
     last_update: Optional[datetime] = None
     discovery_source: Optional[str] = None
@@ -96,6 +98,7 @@ class AnalyticsOfferExport(BaseModel):
     shipping_method: Optional[str] = None
     delivery_min_days: Optional[int] = None
     delivery_max_days: Optional[int] = None
+    delivery_days_type: Optional[str] = None
     destination_zip: Optional[str] = None
     availability: Optional[str] = None
     logistics_source: Optional[str] = None
@@ -103,6 +106,11 @@ class AnalyticsOfferExport(BaseModel):
 
 
 class AnalyticsRowExport(BaseModel):
+    highest_price: Optional[float] = None
+    reference_price: Optional[float] = None
+    reference_difference: Optional[float] = None
+    internal_code: Optional[str] = None
+    external_id: Optional[str] = None
     sku: Optional[str] = None
     name: str
     description: Optional[str] = None
@@ -112,11 +120,11 @@ class AnalyticsRowExport(BaseModel):
     market_type: Optional[str] = None
     store_count: int
     offer_count: int
-    pma: float
-    cheapest_price: float
+    pma: Optional[float] = None
+    cheapest_price: Optional[float] = None
     cheapest_store: str
-    difference_value: float = 0
-    difference_percent: float = 0
+    difference_value: Optional[float] = None
+    difference_percent: Optional[float] = None
     offers: List[AnalyticsOfferExport]
 
 

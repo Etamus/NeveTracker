@@ -184,6 +184,22 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(removed.status_code, 200)
         self.assertIsNone(removed.json()["avatar_data_url"])
 
+    def test_governor_cannot_change_administrator_photo(self):
+        owner_headers = self.login()
+        owner_id = self.client.get("/auth/me", headers=owner_headers).json()["id"]
+        created = self.client.post(
+            "/auth/users", headers=owner_headers,
+            json={"username": "gestorfoto", "password": "5678", "role": "governor"},
+        )
+        self.assertEqual(created.status_code, 201)
+        governor_headers = self.login("GESTORFOTO", "5678")
+        denied = self.client.patch(
+            f"/auth/users/{owner_id}", headers=governor_headers,
+            json={"avatar_data_url": "data:image/png;base64,iVBORw0KGgo="},
+        )
+        self.assertEqual(denied.status_code, 403)
+        self.assertIsNone(self.client.get("/auth/me", headers=owner_headers).json()["avatar_data_url"])
+
     def test_owner_can_create_user_with_profile_photo(self):
         owner_headers = self.login()
         avatar = "data:image/png;base64,iVBORw0KGgo="

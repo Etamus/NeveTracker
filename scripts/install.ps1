@@ -14,6 +14,7 @@ $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 $InstallLock = Join-Path $Root ".install.lock"
 $PythonVersion = "3.11.9"
 $InstallSchemaVersion = 2
+. (Join-Path $PSScriptRoot "node_environment.ps1")
 
 New-Item -ItemType Directory -Path $ToolsDir, $LogsDir -Force | Out-Null
 $LogFile = Join-Path $LogsDir "install.log"
@@ -234,7 +235,11 @@ function Resolve-NodeTools {
     if (Test-Path -LiteralPath $envJson) {
         try {
             $configured = Get-Content -LiteralPath $envJson -Raw | ConvertFrom-Json
-            if ((Test-Path -LiteralPath $configured.node_exe) -and (Test-Path -LiteralPath $configured.npm_cmd)) {
+            if (
+                (Test-Path -LiteralPath $configured.node_exe -PathType Leaf) -and
+                (Test-Path -LiteralPath $configured.npm_cmd -PathType Leaf) -and
+                ([IO.Path]::GetDirectoryName($configured.node_exe) -eq [IO.Path]::GetDirectoryName($configured.npm_cmd))
+            ) {
                 return @{ Node = $configured.node_exe; Npm = $configured.npm_cmd }
             }
         } catch {}
@@ -274,7 +279,9 @@ try {
     Invoke-Logged $python @($nodeHelper, $Root) 3
     $nodeTools = Resolve-NodeTools
     Write-Step "Node pronto: $($nodeTools.Node)"
+    Set-NodeEnvironment $nodeTools.Node
     Invoke-Logged $nodeTools.Node @("--version") 1
+    Invoke-Logged "node.exe" @("--version") 1
     Invoke-Logged $nodeTools.Npm @("--version") 1
 
     if (-not (Test-Python311 $VenvPython)) {
@@ -290,6 +297,11 @@ try {
     Invoke-Logged $VenvPython @("-m", "pip", "install", "--disable-pip-version-check", "--retries", "5", "--timeout", "60", "-r", (Join-Path $BackendDir "requirements.txt")) 3
     Invoke-Logged $VenvPython @("-m", "pip", "check") 1
     Invoke-Logged $VenvPython @("-m", "playwright", "install", "chromium") 3
+    Invoke-Logged $VenvPython @("-m", "patchright", "install", "chromium") 3
+    Invoke-Logged $VenvPython @(
+        "-c",
+        "from patchright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); page=b.new_page(); page.set_content('<title>ok</title>'); assert page.title() == 'ok'; b.close(); p.stop(); print('Chromium Mercado Livre validado')"
+    ) 1
     Invoke-Logged $VenvPython @(
         "-c",
         "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); page=b.new_page(); page.set_content('<title>ok</title>'); assert page.title() == 'ok'; b.close(); p.stop(); print('Chromium validado')"

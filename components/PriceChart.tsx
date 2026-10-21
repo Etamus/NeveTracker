@@ -9,6 +9,7 @@ import {
 } from "recharts";
 import { useEffect, useMemo, useState } from "react";
 import type { Product } from "../models/product.model";
+import { offerIsAvailable } from "../src/offerAvailability";
 import {
   createCurrencyFormatter,
   getInterfacePreferences,
@@ -36,6 +37,7 @@ export const PriceChart = ({ products }: PriceChartProps) => {
   }, []);
 
   products.forEach((product) => {
+    if (product.current_price == null || !offerIsAvailable(product)) return;
     const price = Number(product.current_price);
     if (!Number.isFinite(price) || price <= 0) return;
 

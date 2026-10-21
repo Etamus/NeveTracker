@@ -535,39 +535,24 @@ a {
   display: none;
 }
 
-.search-submit {
+.header-search-clear {
   display: flex;
-  height: 32px;
-  width: 32px;
-  min-width: 32px;
   align-items: center;
   justify-content: center;
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: var(--search-icon);
-  padding: 0;
-  font-size: 12px;
-  font-weight: 700;
-  transition: background-color 160ms ease, color 160ms ease, opacity 160ms ease;
+  color: var(--muted);
+  padding: 4px;
 }
 
-.search-submit:hover:not(:disabled) {
+.header-search-clear:hover:not(:disabled) {
   background: var(--surface-muted);
   color: var(--foreground);
 }
 
-.search-submit:disabled {
+.header-search-clear:disabled {
   opacity: 0.55;
-}
-
-.button-spinner {
-  width: 14px;
-  height: 14px;
-  border: 2px solid rgba(255, 255, 255, 0.45);
-  border-top-color: #fff;
-  border-radius: 999px;
-  animation: spin 700ms linear infinite;
 }
 
 svg.animate-spin {
@@ -578,11 +563,6 @@ svg.animate-spin {
   transform-origin: 50% 50%;
   backface-visibility: hidden;
   will-change: transform;
-}
-
-.search-submit .button-spinner {
-  border-color: var(--border-strong);
-  border-top-color: var(--search-icon);
 }
 
 .metrics-grid {
@@ -1452,22 +1432,146 @@ svg.animate-spin {
   min-width: 0;
 }
 
-.analytics-export-control {
-  display: flex;
+.analytics-sheet {
   min-width: 0;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
 }
 
-.analytics-export-control > span {
-  max-width: 260px;
-  overflow: hidden;
-  color: var(--danger);
+.analytics-sheet-toolbar {
+  flex: 0 0 auto;
+  padding-right: 16px;
+}
+
+.analytics-sheet-toolbar__search {
+  width: min(260px, 100%);
+}
+
+.analytics-sheet__filter-popover {
+  width: min(340px, calc(100vw - 32px));
+}
+
+.analytics-sheet__filter-list {
+  max-height: 210px;
+  overflow-y: auto;
+}
+
+.analytics-sheet-toolbar .sku-select-trigger {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  padding: 0;
+}
+
+@media (max-width: 1050px) {
+  .analytics-sheet-toolbar { flex-wrap: wrap; }
+}
+
+@media (max-width: 600px) {
+  .analytics-sheet-toolbar { padding-right: 0; }
+  .analytics-sheet-toolbar__search { width: 100%; }
+  .analytics-sheet-toolbar .relative.ml-auto { margin-left: 0; }
+}
+
+.analytics-sheet__status,
+.analytics-sheet__error {
+  padding: 10px 16px;
+  color: var(--muted-strong);
   font-size: 12px;
-  font-weight: 550;
-  text-overflow: ellipsis;
+}
+
+.analytics-sheet__views {
+  display: flex;
+  gap: 4px;
+  padding: 10px 16px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.analytics-sheet__views button {
+  padding: 9px 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.analytics-sheet__views button.is-active {
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+}
+
+.analytics-sheet__error {
+  color: var(--danger);
+}
+
+.analytics-sheet__scroll {
+  max-height: min(64vh, 700px);
+  overflow: auto;
+  border-top: 1px solid var(--border);
+}
+
+:root[data-theme="dark"] .analytics-sheet__scroll::-webkit-scrollbar-corner,
+:root[data-theme="dark"] .sku-database-table::-webkit-scrollbar-corner {
+  background: var(--surface);
+}
+
+.analytics-sheet__table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.analytics-sheet__table th,
+.analytics-sheet__table td {
+  max-width: 280px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
   white-space: nowrap;
+}
+
+.analytics-sheet__table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: 42px;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.analytics-sheet__table td {
+  overflow: hidden;
+  color: var(--foreground);
+  text-overflow: ellipsis;
+}
+
+.analytics-sheet__table tbody tr:hover td {
+  background: var(--row-hover);
+}
+
+.analytics-sheet__table .analytics-sheet__sku,
+.analytics-sheet__table .analytics-sheet__seller {
+  font-weight: 700;
+}
+
+.analytics-sheet__table .analytics-sheet__number {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.analytics-sheet__table .analytics-sheet__empty {
+  padding: 28px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.analytics-sheet__table a {
+  color: var(--accent);
 }
 
 .analytics-export-button {
@@ -1475,10 +1579,15 @@ svg.animate-spin {
   color: var(--success);
 }
 
-.analytics-export-button:hover {
+.analytics-export-button:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--success) 35%, var(--border));
   background: color-mix(in srgb, var(--success) 8%, var(--surface));
   color: var(--success);
+}
+
+.analytics-export-button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
 }
 
 .analytics-product-row {
@@ -1633,7 +1742,7 @@ svg.animate-spin {
 
 .workspace-dialog--integrations {
   width: min(800px, 100%);
-  height: min(660px, calc(100vh - 40px));
+  height: min(720px, calc(100vh - 40px));
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -3909,7 +4018,9 @@ svg.animate-spin {
   display: flex;
   flex-direction: column;
   overflow-x: auto;
-  overflow-y: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--surface);
@@ -3929,7 +4040,8 @@ svg.animate-spin {
 }
 
 .sku-status-table-head {
-  position: relative;
+  position: sticky;
+  top: 0;
   z-index: 1;
   min-height: 36px;
   flex: 0 0 36px;
@@ -3940,7 +4052,7 @@ svg.animate-spin {
   font-weight: 750;
   text-transform: uppercase;
   box-sizing: border-box;
-  padding-right: 10px;
+  padding-right: 0;
 }
 
 .sku-status-table-head span,
@@ -3965,15 +4077,12 @@ svg.animate-spin {
 
 .sku-status-list {
   min-height: 0;
-  flex: 1;
+  flex: none;
   max-height: none;
-  overflow-x: hidden;
-  overflow-y: auto;
-  scrollbar-gutter: stable;
-  scrollbar-width: thin;
+  overflow: visible;
 }
 
-.sku-status-list::-webkit-scrollbar {
+.sku-database-table::-webkit-scrollbar {
   width: 8px;
 }
 
@@ -4927,6 +5036,7 @@ svg.animate-spin {
   .sku-status-list {
     max-height: 320px;
   }
+  .sku-database-table .sku-status-list { max-height: none; }
 }
 
 @media (max-width: 520px) {

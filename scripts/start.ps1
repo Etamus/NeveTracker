@@ -9,6 +9,8 @@ $VenvPython = Join-Path $BackendDir ".venv\Scripts\python.exe"
 $LogsDir = Join-Path $Root ".logs"
 $InstallScript = Join-Path $PSScriptRoot "install.ps1"
 $InstallSchemaVersion = 2
+. (Join-Path $PSScriptRoot "node_environment.ps1")
+. (Join-Path $PSScriptRoot "project_browser.ps1")
 $script:StartedProcesses = New-Object System.Collections.Generic.List[System.Diagnostics.Process]
 
 New-Item -ItemType Directory -Path $LogsDir -Force | Out-Null
@@ -65,7 +67,10 @@ function Resolve-Node {
     if (Test-Path -LiteralPath $envJson) {
         try {
             $configured = Get-Content -LiteralPath $envJson -Raw | ConvertFrom-Json
-            if (Test-Path -LiteralPath $configured.node_exe) { return $configured.node_exe }
+            if (
+                (Test-Path -LiteralPath $configured.node_exe -PathType Leaf) -and
+                (Test-Path -LiteralPath (Join-Path ([IO.Path]::GetDirectoryName($configured.node_exe)) "npm.cmd") -PathType Leaf)
+            ) { return $configured.node_exe }
         } catch {}
     }
     $nodeRoot = Join-Path $Root ".tools\node"
@@ -80,6 +85,7 @@ function Test-ProjectReady {
     if (-not (Test-Path -LiteralPath $VenvPython)) { return $false }
     $node = Resolve-Node
     if (-not $node) { return $false }
+    Set-NodeEnvironment $node
     if (-not (Test-Path -LiteralPath (Join-Path $Root "node_modules\vite\bin\vite.js"))) { return $false }
     if (-not (Test-Path -LiteralPath (Join-Path $Root "dist\index.html"))) { return $false }
     $statePath = Join-Path $Root ".tools\install-state.json"
@@ -89,6 +95,7 @@ function Test-ProjectReady {
         if ([int]$state.schema_version -ne $InstallSchemaVersion) { return $false }
         if (-not $state.playwright_executable -or -not (Test-Path -LiteralPath $state.playwright_executable)) { return $false }
         if (-not $state.frontend_index -or -not (Test-Path -LiteralPath $state.frontend_index)) { return $false }
+        if ($state.node -ne $node -or $state.frontend_index -ne (Join-Path $Root "dist\index.html")) { return $false }
         $requirementsHash = (Get-FileHash -LiteralPath (Join-Path $BackendDir "requirements.txt") -Algorithm SHA256).Hash
         $packageLockHash = (Get-FileHash -LiteralPath (Join-Path $Root "package-lock.json") -Algorithm SHA256).Hash
         if ($state.requirements_sha256 -ne $requirementsHash -or $state.package_lock_sha256 -ne $packageLockHash) {
@@ -100,6 +107,10 @@ function Test-ProjectReady {
             if (-not (Test-Path -LiteralPath (Join-Path $Root "node_modules\$packageName\package.json"))) { return $false }
         }
         & $node --version 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { return $false }
+        $esbuild = Join-Path $Root "node_modules\esbuild\bin\esbuild"
+        if (-not (Test-Path -LiteralPath $esbuild -PathType Leaf)) { return $false }
+        & $node $esbuild --version 2>$null | Out-Null
         if ($LASTEXITCODE -ne 0) { return $false }
         & $VenvPython -m pip check 2>$null | Out-Null
         if ($LASTEXITCODE -ne 0) { return $false }
@@ -138,6 +149,7 @@ try {
     }
 
     $node = Resolve-Node
+    Set-NodeEnvironment $node
     $backendPort = 8000
     $backendUrl = "http://127.0.0.1:$backendPort"
     $backendAlreadyRunning = Test-HttpService "$backendUrl/" "API Online"
@@ -212,7 +224,7 @@ try {
 
     if (-not $env:NEVETRACKER_NO_BROWSER) {
         try {
-            Start-Process $frontendUrl
+            Open-ProjectBrowser $frontendUrl $Root
         } catch {
             Write-Step "Nao foi possivel abrir o navegador automaticamente. Acesse $frontendUrl manualmente."
         }
@@ -224,7 +236,10 @@ try {
     while ($true) {
         foreach ($process in $script:StartedProcesses) {
             if ($process.HasExited) {
-                throw "Um processo do NeveTracker encerrou inesperadamente (PID $($process.Id), codigo $($process.ExitCode))."
+                $component = if ($backendProcess -and $process.Id -eq $backendProcess.Id) { "Backend" } else { "Frontend" }
+                $errorLog = if ($component -eq "Backend") { "backend.error.log" } else { "frontend.error.log" }
+                Show-LogTail (Join-Path $LogsDir $errorLog)
+                throw "$component encerrou inesperadamente (PID $($process.Id), codigo $($process.ExitCode)). Consulte $errorLog."
             }
         }
         Start-Sleep -Seconds 2

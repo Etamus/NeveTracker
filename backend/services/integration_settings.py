@@ -17,7 +17,7 @@ PROVIDER_CONFIG = {
         "label": "Bright Data",
         "description": (
             "Grátis: 5 mil requisições/mês; depois US$ 1,50 por 1 mil "
-            "requisições bem-sucedidas."
+            "requisições."
         ),
         "credential_url": "https://brightdata.com/cp/zones",
         "category": "discovery",

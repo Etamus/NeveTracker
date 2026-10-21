@@ -1,10 +1,13 @@
 export interface Product {
+  internal_code?: string | null;
+  external_id?: string | null;
+  reference_price?: number | null;
   id: number;
   name: string;
   brand: string;
   category: string;
   sku?: string | null;
-  current_price: number;
+  current_price: number | null;
   store: string;
   source?: string | null;
   discovery_source?: string | null;
@@ -25,6 +28,7 @@ export interface Product {
   shipping_method?: string | null;
   delivery_min_days?: number | null;
   delivery_max_days?: number | null;
+  delivery_days_type?: "business" | "calendar" | string | null;
   handling_min_days?: number | null;
   handling_max_days?: number | null;
   destination_zip?: string | null;
@@ -135,6 +139,7 @@ export interface ExtractionJob {
   batch_size: number;
   total_skus: number;
   processed_skus: number;
+  visited_skus: number;
   success_count: number;
   cached_count: number;
   error_count: number;
@@ -142,6 +147,10 @@ export interface ExtractionJob {
   message?: string | null;
   cancel_requested: boolean;
   progress_percent: number;
+  work_progress_percent?: number;
+  started_rounds?: number;
+  store_steps_done?: number;
+  store_steps_total?: number;
   batches_total: number;
   batches_completed: number;
   created_at: string;
@@ -154,6 +163,7 @@ export interface ExtractionJob {
 export interface CrawlerControlSettings {
   default_mode: "quick" | "precise";
   external_discovery_fallback: boolean;
+  playwright_product_fallback: boolean;
   playwright_shipping_fallback: boolean;
   concurrent_requests_per_domain: number;
   request_timeout_seconds: number;

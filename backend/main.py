@@ -27,6 +27,11 @@ def _ensure_sqlite_columns():
         return
 
     with engine.begin() as connection:
+        control_columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(crawler_control)")}
+        if "playwright_product_fallback" not in control_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE crawler_control ADD COLUMN playwright_product_fallback BOOLEAN NOT NULL DEFAULT 1"
+            )
         product_columns = {
             row[1] for row in connection.exec_driver_sql("PRAGMA table_info(products)")
         }
@@ -56,6 +61,7 @@ def _ensure_sqlite_columns():
             "shipping_method": "VARCHAR",
             "delivery_min_days": "INTEGER",
             "delivery_max_days": "INTEGER",
+            "delivery_days_type": "VARCHAR",
             "handling_min_days": "INTEGER",
             "handling_max_days": "INTEGER",
             "destination_zip": "VARCHAR",
@@ -79,6 +85,9 @@ def _ensure_sqlite_columns():
             row[1] for row in connection.exec_driver_sql("PRAGMA table_info(known_skus)")
         }
         known_sku_additive_columns = {
+            "internal_code": "VARCHAR",
+            "external_id": "VARCHAR",
+            "reference_price": "FLOAT",
             "subfamily": "VARCHAR",
             "category": "VARCHAR",
             "cluster": "VARCHAR",
@@ -139,6 +148,46 @@ def _ensure_sqlite_columns():
             "CREATE INDEX IF NOT EXISTS ix_extraction_jobs_mode ON extraction_jobs (mode)"
         )
 
+        source_columns = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(product_sources)")
+        }
+        if "last_attempted_at" not in source_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE product_sources ADD COLUMN last_attempted_at DATETIME"
+            )
+        for column_name, column_type in {
+            "listing_price": "FLOAT",
+            "listing_name": "TEXT",
+            "listing_method": "VARCHAR",
+            "listing_seen_at": "DATETIME",
+        }.items():
+            if column_name not in source_columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE product_sources ADD COLUMN {column_name} {column_type}"
+                )
+
+        cursor_columns = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(scrape_cursors)")
+        }
+        for column_name, column_type in {
+            "initial_url": "TEXT",
+            "last_attempted_at": "DATETIME",
+            "last_checked_at": "DATETIME",
+            "last_status": "VARCHAR",
+            "failure_reason": "VARCHAR",
+            "browser_attempted_at": "DATETIME",
+            "browser_attempted_url": "TEXT",
+            "visited_urls": "TEXT",
+            "pages_completed": "INTEGER NOT NULL DEFAULT 0",
+            "candidates_found": "INTEGER NOT NULL DEFAULT 0",
+        }.items():
+            if column_name not in cursor_columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE scrape_cursors ADD COLUMN {column_name} {column_type}"
+                )
+
         auth_user_columns = {
             row[1]
             for row in connection.exec_driver_sql("PRAGMA table_info(auth_users)")
@@ -162,6 +211,8 @@ def _ensure_sqlite_columns():
 
 
 _ensure_sqlite_columns()
+from services.availability_migration import ensure_nullable_price
+ensure_nullable_price(engine)
 
 
 def _seed_known_skus():

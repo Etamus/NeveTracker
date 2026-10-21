@@ -13,6 +13,7 @@ import {
   Eye,
   EyeOff,
   ExternalLink,
+  FileSpreadsheet,
   FileDown,
   Grid2X2,
   Github,
@@ -61,9 +62,9 @@ import useHeroSection, { getApiBaseUrl } from "./viewModel";
 import logoUrl from "../../static/logo.png";
 import logoWhiteUrl from "../../static/logowhite.png";
 import {
-  currencyOptions,
+  defaultInterfacePreferences,
   getInterfacePreferences,
-  localeOptions,
+  regionFormatOptions,
   saveInterfacePreferences,
   type InterfacePreferences,
 } from "../../src/preferences";
@@ -96,6 +97,7 @@ const navigation = [
   { label: "Ofertas", description: "Comparação de preços", icon: PackageSearch },
   { label: "Catálogo", description: "Visualização em grade", icon: Grid2X2 },
   { label: "Analytics", description: "Leitura de mercado", icon: BarChart3 },
+  { label: "Database", description: "Análise de extrações", icon: FileSpreadsheet },
 ];
 
 type ThemeMode = "light" | "dark";
@@ -108,7 +110,8 @@ type AdminEditorTab = "access" | "profile";
 const defaultCrawlerControl: CrawlerControlSettings = {
   default_mode: "quick",
   external_discovery_fallback: true,
-  playwright_shipping_fallback: false,
+  playwright_product_fallback: true,
+  playwright_shipping_fallback: true,
   concurrent_requests_per_domain: 2,
   request_timeout_seconds: 15,
 };
@@ -263,9 +266,12 @@ const parseSkuInput = (value: string) => {
   return [...new Set(candidates)];
 };
 
+const parseApiDateTime = (value: string) =>
+  new Date(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : `${value}Z`);
+
 const formatDateTime = (value?: string | null) => {
   if (!value) return "Nunca";
-  const date = new Date(value);
+  const date = parseApiDateTime(value);
   if (Number.isNaN(date.getTime())) return "Nunca";
   return new Intl.DateTimeFormat("pt-BR", {
     day: "2-digit",
@@ -278,7 +284,7 @@ const formatDateTime = (value?: string | null) => {
 
 const formatCompactDateTime = (value?: string | null) => {
   if (!value) return "Sem execução";
-  const date = new Date(value);
+  const date = parseApiDateTime(value);
   if (Number.isNaN(date.getTime())) return "Sem execução";
   return new Intl.DateTimeFormat("pt-BR", {
     day: "2-digit",
@@ -457,6 +463,8 @@ export const HeroSection = () => {
   const [integrationsLoading, setIntegrationsLoading] = useState(false);
   const [integrationsSaving, setIntegrationsSaving] = useState(false);
   const [integrationsError, setIntegrationsError] = useState("");
+  const [mercadoBrowserStatus, setMercadoBrowserStatus] = useState("idle");
+  const [mercadoBrowserMessage, setMercadoBrowserMessage] = useState("");
   const [skuInput, setSkuInput] = useState("");
   const [extractionMode, setExtractionMode] = useState<ExtractionMode>("quick");
   const [crawlerControl, setCrawlerControl] = useState<CrawlerControlSettings>(defaultCrawlerControl);
@@ -474,6 +482,7 @@ export const HeroSection = () => {
   const [extractionRunning, setExtractionRunning] = useState(false);
   const [extractionProgress, setExtractionProgress] = useState("");
   const [activeExtractionJob, setActiveExtractionJob] = useState<ExtractionJob | null>(null);
+  const [extractionConnectionLost, setExtractionConnectionLost] = useState(false);
   const [extractionResults, setExtractionResults] = useState<SkuBatchResult[]>([]);
   const [extractionError, setExtractionError] = useState("");
   const [skuImporting, setSkuImporting] = useState(false);
@@ -781,6 +790,37 @@ export const HeroSection = () => {
     }
   };
 
+  useEffect(() => {
+    if (mercadoBrowserStatus !== "opening" && mercadoBrowserStatus !== "waiting") return;
+    const timer = window.setInterval(() => {
+      void fetch(`${getApiBaseUrl()}/integrations/mercado-livre/session`, { headers: authorizedHeaders() })
+        .then(async (response) => {
+          if (!response.ok) throw new Error("Não foi possível consultar a validação do navegador.");
+          return response.json() as Promise<{ status: string; message: string }>;
+        })
+        .then((data) => { setMercadoBrowserStatus(data.status); setMercadoBrowserMessage(data.message); })
+        .catch(() => { setMercadoBrowserStatus("error"); setMercadoBrowserMessage("Não foi possível consultar a validação do navegador."); });
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [mercadoBrowserStatus]);
+
+  const validateMercadoBrowser = async () => {
+    setMercadoBrowserStatus("opening");
+    setMercadoBrowserMessage("Abrindo a janela do Mercado Livre...");
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/integrations/mercado-livre/session`, {
+        method: "POST", headers: authorizedHeaders(),
+      });
+      const data = await response.json() as { status?: string; message?: string; detail?: string };
+      if (!response.ok) throw new Error(data.detail || "Não foi possível abrir o navegador.");
+      setMercadoBrowserStatus(data.status || "waiting");
+      setMercadoBrowserMessage(data.message || "Conclua a verificação na janela do Mercado Livre.");
+    } catch (error) {
+      setMercadoBrowserStatus("error");
+      setMercadoBrowserMessage(error instanceof Error ? error.message : "Não foi possível abrir o navegador.");
+    }
+  };
+
   const updateIntegrationProvider = (
     provider: IntegrationProviderSettings["provider"],
     changes: Partial<IntegrationProviderSettings>,
@@ -1068,7 +1108,7 @@ export const HeroSection = () => {
       ) {
         payload.role = adminRole;
       }
-      if (adminAvatarDraft !== undefined) payload.avatar_data_url = adminAvatarDraft;
+      if (!(resolvedUserRole(currentUser) !== "developer" && resolvedUserRole(editingUser) !== "viewer" && editingUser.id !== currentUser?.id) && adminAvatarDraft !== undefined) payload.avatar_data_url = adminAvatarDraft;
       if (!Object.keys(payload).length) {
         setAdminError("Altere a foto, a senha ou as permissões.");
         return;
@@ -1177,7 +1217,9 @@ export const HeroSection = () => {
           days: scheduleSettings.days,
           repeat_every_hours: scheduleSettings.repeatEveryHours,
           force_refresh: true,
-          postal_code: interfacePreferences.logisticsPostalCode || null,
+          postal_code: interfacePreferences.logisticsPostalCode.length === 8
+            ? interfacePreferences.logisticsPostalCode
+            : defaultInterfacePreferences.logisticsPostalCode,
         }),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1215,7 +1257,9 @@ export const HeroSection = () => {
           skus,
           force_refresh: true,
           refresh_if_stale: false,
-          postal_code: interfacePreferences.logisticsPostalCode || null,
+          postal_code: interfacePreferences.logisticsPostalCode.length === 8
+            ? interfacePreferences.logisticsPostalCode
+            : defaultInterfacePreferences.logisticsPostalCode,
           scope: "all",
           mode: extractionMode,
         }),
@@ -1276,6 +1320,7 @@ export const HeroSection = () => {
     setExtractionRunning(true);
     setExtractionProgress("0 de 1");
     setExtractionError("");
+    setExtractionResults([]);
     try {
       const response = await fetch(`${getApiBaseUrl()}/products/extraction-jobs`, {
         method: "POST",
@@ -1283,7 +1328,9 @@ export const HeroSection = () => {
         body: JSON.stringify({
           skus: [sku],
           force_refresh: true,
-          postal_code: interfacePreferences.logisticsPostalCode || null,
+          postal_code: interfacePreferences.logisticsPostalCode.length === 8
+            ? interfacePreferences.logisticsPostalCode
+            : defaultInterfacePreferences.logisticsPostalCode,
           scope: "all",
           mode: extractionMode,
         }),
@@ -1328,7 +1375,7 @@ export const HeroSection = () => {
 
   const refreshAllSkus = async () => {
     const skus = skuStatusItems.map((item) => item.sku).filter(Boolean);
-    if (!skus.length || refreshingAllSkus || extractionRunning) return;
+    if (!skus.length || refreshingAllSkus || extractionRunning || (activeExtractionJob && isExtractionJobActive(activeExtractionJob))) return;
 
     setRefreshingAllSkus(true);
     setExtractionRunning(true);
@@ -1343,7 +1390,9 @@ export const HeroSection = () => {
         body: JSON.stringify({
           force_refresh: true,
           refresh_if_stale: false,
-          postal_code: interfacePreferences.logisticsPostalCode || null,
+          postal_code: interfacePreferences.logisticsPostalCode.length === 8
+            ? interfacePreferences.logisticsPostalCode
+            : defaultInterfacePreferences.logisticsPostalCode,
           scope: "all",
           mode: extractionMode,
         }),
@@ -1381,6 +1430,7 @@ export const HeroSection = () => {
 
   useEffect(() => {
     let disposed = false;
+    let retryTimer: number | undefined;
 
     const restoreJob = async () => {
       const storedJobId = window.localStorage.getItem(EXTRACTION_JOB_STORAGE_KEY);
@@ -1404,23 +1454,27 @@ export const HeroSection = () => {
           }
         }
         if (disposed || !job) return;
+        setExtractionConnectionLost(false);
         setActiveExtractionJob(job);
         if (isExtractionJobActive(job)) {
           setExtractionRunning(true);
-          setExtractionProgress(`${job.processed_skus} de ${job.total_skus}`);
+          setExtractionProgress(job.mode === "precise"
+            ? `${job.visited_skus} visitados`
+            : `${job.processed_skus} de ${job.total_skus}`);
           setRefreshingAllSkus(job.kind === "database");
           window.localStorage.setItem(EXTRACTION_JOB_STORAGE_KEY, job.id);
         } else {
           window.localStorage.removeItem(EXTRACTION_JOB_STORAGE_KEY);
         }
       } catch {
-        window.localStorage.removeItem(EXTRACTION_JOB_STORAGE_KEY);
+        if (!disposed) retryTimer = window.setTimeout(() => void restoreJob(), 3000);
       }
     };
 
     void restoreJob();
     return () => {
       disposed = true;
+      if (retryTimer) window.clearTimeout(retryTimer);
     };
   }, []);
 
@@ -1438,18 +1492,20 @@ export const HeroSection = () => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         let job = await response.json() as ExtractionJob;
         if (disposed) return;
-
-        setActiveExtractionJob(job);
-        setExtractionRunning(isExtractionJobActive(job));
-        setExtractionProgress(`${job.processed_skus} de ${job.total_skus}`);
-        setRefreshingAllSkus(isExtractionJobActive(job) && job.kind === "database");
+        setExtractionConnectionLost(false);
+        setExtractionError("");
 
         if (!isExtractionJobActive(job)) {
-          const completedResponse = await fetch(
-            `${getApiBaseUrl()}/products/extraction-jobs/${jobId}?include_items=true`,
-            { headers: authorizedHeaders() },
-          );
-          if (completedResponse.ok) job = await completedResponse.json() as ExtractionJob;
+          try {
+            const completedResponse = await fetch(
+              `${getApiBaseUrl()}/products/extraction-jobs/${jobId}?include_items=true`,
+              { headers: authorizedHeaders() },
+            );
+            if (completedResponse.ok) job = await completedResponse.json() as ExtractionJob;
+            else setExtractionError("A extração terminou, mas os detalhes do resultado não puderam ser carregados.");
+          } catch {
+            setExtractionError("A extração terminou, mas os detalhes do resultado não puderam ser carregados.");
+          }
           if (disposed) return;
           const items = job.items || [];
           const orderedItems = [
@@ -1457,7 +1513,7 @@ export const HeroSection = () => {
             ...items.filter((item) => item.status !== "error"),
           ];
           setActiveExtractionJob(job);
-          setExtractionResults(orderedItems.slice(0, 300));
+          setExtractionResults(job.kind === "single" ? [] : orderedItems.slice(0, 300));
           setExtractionRunning(false);
           setExtractionProgress("");
           setRefreshingAllSkus(false);
@@ -1466,10 +1522,20 @@ export const HeroSection = () => {
           await loadSkuStatus();
           return;
         }
+        setActiveExtractionJob(job);
+        setExtractionRunning(true);
+        setExtractionProgress(job.mode === "precise"
+          ? `${job.visited_skus} visitados`
+          : `${job.processed_skus} de ${job.total_skus}`);
+        setRefreshingAllSkus(job.kind === "database");
       } catch (error) {
         if (!disposed) {
           console.error("Erro ao acompanhar fila de extracao:", error);
-          setExtractionError("A fila continua no backend, mas o progresso nao pode ser consultado agora.");
+          setExtractionConnectionLost(true);
+          setExtractionRunning(false);
+          setRefreshingAllSkus(false);
+          setRefreshingSku(null);
+          setExtractionError("Sem conexao com o backend. Aguardando reconexao para consultar a fila.");
         }
       }
       if (!disposed) timer = window.setTimeout(pollJob, 1400);
@@ -1552,8 +1618,8 @@ export const HeroSection = () => {
   );
   const latestExtractionAt = skuStatusItems.reduce<string | null>((latest, item) => {
     if (!item.last_update) return latest;
-    const currentTimestamp = new Date(item.last_update).getTime();
-    const latestTimestamp = latest ? new Date(latest).getTime() : Number.NaN;
+    const currentTimestamp = parseApiDateTime(item.last_update).getTime();
+    const latestTimestamp = latest ? parseApiDateTime(latest).getTime() : Number.NaN;
     if (Number.isNaN(currentTimestamp)) return latest;
     return Number.isNaN(latestTimestamp) || currentTimestamp > latestTimestamp
       ? item.last_update
@@ -1589,6 +1655,12 @@ export const HeroSection = () => {
   const canManageIntegrations = currentUserRole === "developer";
   const canManageUsers = Boolean(currentUser && currentUserRole !== "viewer");
   const canManageAdvancedExtraction = currentUserRole === "developer";
+  const pendingPreciseSku = activeExtractionJob?.kind === "single" &&
+    activeExtractionJob.mode === "precise" &&
+    !isExtractionJobActive(activeExtractionJob) &&
+    activeExtractionJob.items?.[0]?.message.includes("Cobertura parcial")
+      ? activeExtractionJob.items[0].sku
+      : null;
   const adminTargetLocked = Boolean(
     selectedAdminUser &&
     currentUserRole !== "developer" &&
@@ -1750,7 +1822,7 @@ export const HeroSection = () => {
               className={selectedSearchSkus.length ? "sku-select-trigger sku-select-trigger--active" : "sku-select-trigger"}
               onClick={openSkuSelector}
               aria-label="Selecionar SKUs do banco local"
-              title="Selecionar vários SKUs"
+              title="Selecionar SKUs"
             >
               <SquareCheckBig size={17} />
               {selectedSearchSkus.length > 0 && <span>{selectedSearchSkus.length}</span>}
@@ -1766,20 +1838,27 @@ export const HeroSection = () => {
               disabled={loading}
               aria-label="Buscar produtos"
             />
-            <button
-              type="submit"
-              disabled={loading || !productName.trim()}
-              className="search-submit"
-              aria-label="Buscar"
-            >
-              {loading ? <span className="button-spinner" /> : <Search size={17} />}
-            </button>
+            {selectedSearchSkus.length > 0 && (
+              <button
+                type="button"
+                className="header-search-clear"
+                onClick={() => {
+                  setSelectedSearchSkus([]);
+                  setProductName("");
+                }}
+                disabled={loading}
+                aria-label="Limpar SKUs selecionados"
+                title="Limpar SKUs"
+              >
+                <X size={14} />
+              </button>
+            )}
           </form>
 
           <div className="header-actions" aria-hidden="true" />
         </header>
 
-        <main className={activeTab === 1 || activeTab === 2 ? "app-content app-content--fixed" : "app-content"}>
+        <main className={activeTab === 1 || activeTab === 2 || activeTab === 3 ? "app-content app-content--fixed" : "app-content"}>
           <SlidingTabs
             activeTab={activeTab}
             onTabChange={setActiveTab}
@@ -1799,34 +1878,41 @@ export const HeroSection = () => {
         >
           <div className="extraction-job-card__head">
             <span className="extraction-job-card__icon">
-              <LoaderCircle size={16} className="animate-spin" />
+              <LoaderCircle size={16} className={extractionConnectionLost ? "" : "animate-spin"} />
             </span>
             <span className="extraction-job-card__copy">
               <strong>{extractionJobTitle(activeExtractionJob)}</strong>
               <small>
-                {activeExtractionJob.processed_skus} de {activeExtractionJob.total_skus} SKUs
-                {activeExtractionJob.batches_total > 1
+                {activeExtractionJob.mode === "precise"
+                  ? `${activeExtractionJob.visited_skus} de ${activeExtractionJob.total_skus} SKUs iniciados · ${activeExtractionJob.processed_skus} finalizados`
+                  : `${activeExtractionJob.processed_skus} de ${activeExtractionJob.total_skus} SKUs concluídos`}
+                {activeExtractionJob.mode !== "precise" && activeExtractionJob.batches_total > 1
                   ? ` · lotes de ${activeExtractionJob.batch_size}`
                   : ""}
               </small>
             </span>
-            {!activeExtractionJob.cancel_requested && (
+            {!extractionConnectionLost && !activeExtractionJob.cancel_requested && (
               <button type="button" className="button-quiet" onClick={() => void cancelActiveExtraction()}>
                 Cancelar
               </button>
             )}
           </div>
-          <div className="extraction-job-progress" aria-hidden="true">
-            <span style={{ width: `${Math.min(100, Math.max(0, activeExtractionJob.progress_percent))}%` }} />
+          <div className="extraction-job-progress" role="progressbar" aria-label={activeExtractionJob.mode === "precise" ? "Progresso estimado das etapas de extração" : "SKUs concluídos"}
+            aria-valuemin={0} aria-valuemax={100} aria-valuenow={activeExtractionJob.work_progress_percent ?? activeExtractionJob.progress_percent}>
+            <span style={{ width: `${Math.min(100, Math.max(0, activeExtractionJob.work_progress_percent ?? activeExtractionJob.progress_percent))}%` }} />
           </div>
           <div className="extraction-job-card__meta">
             <span>
-              {activeExtractionJob.current_sku
-                ? `Processando ${activeExtractionJob.current_sku}`
-                : activeExtractionJob.message}
+              {extractionConnectionLost
+                ? "Backend indisponivel. Tentando reconectar..."
+                : activeExtractionJob.message || (activeExtractionJob.current_sku
+                  ? `Processando ${activeExtractionJob.current_sku}`
+                  : "Aguardando inicio da fila")}
             </span>
             <span>
-              {activeExtractionJob.success_count} concluídos
+              {activeExtractionJob.mode === "precise"
+                ? `${activeExtractionJob.started_rounds ?? 0} rodadas iniciadas · ${activeExtractionJob.store_steps_done ?? 0}/${activeExtractionJob.store_steps_total ?? 0} etapas de lojas`
+                : `${activeExtractionJob.success_count} concluídos`}
               {activeExtractionJob.error_count > 0 ? ` · ${activeExtractionJob.error_count} erros` : ""}
             </span>
           </div>
@@ -2100,6 +2186,7 @@ export const HeroSection = () => {
                       <button
                         type="button"
                         className="admin-avatar-edit-button admin-avatar-edit-button--compact"
+                        disabled={adminTargetLocked}
                         onClick={() => {
                           if (adminAvatarValue) {
                             setAdminAvatarDraft(null);
@@ -2477,21 +2564,16 @@ export const HeroSection = () => {
                           <input inputMode="numeric" value={interfacePreferences.logisticsPostalCode} onChange={(event) => updateInterfacePreferences((currentPreferences) => ({ ...currentPreferences, logisticsPostalCode: event.target.value.replace(/\D/g, "").slice(0, 8) }))} />
                         </label>
                         <label className="settings-field">
-                          <span>Moeda</span>
+                          <span>Formato monetário</span>
                           <StyledSelect
                             value={interfacePreferences.currency}
-                            ariaLabel="Moeda"
-                            options={currencyOptions}
-                            onChange={(currency) => updateInterfacePreferences((currentPreferences) => ({ ...currentPreferences, currency }))}
-                          />
-                        </label>
-                        <label className="settings-field">
-                          <span>Formato numérico</span>
-                          <StyledSelect
-                            value={interfacePreferences.locale}
-                            ariaLabel="Formato numérico"
-                            options={localeOptions}
-                            onChange={(locale) => updateInterfacePreferences((currentPreferences) => ({ ...currentPreferences, locale }))}
+                            ariaLabel="Formato monetário"
+                            options={regionFormatOptions}
+                            onChange={(currency) => updateInterfacePreferences((currentPreferences) => ({
+                              ...currentPreferences,
+                              currency,
+                              locale: regionFormatOptions.find((option) => option.value === currency)?.locale || "pt-BR",
+                            }))}
                           />
                         </label>
                       </div>
@@ -2627,7 +2709,9 @@ export const HeroSection = () => {
                           <label className="schedule-toggle">
                             <input type="checkbox" checked={provider.enabled} onChange={(event) => updateIntegrationProvider(provider.provider, { enabled: event.target.checked })} />
                             <span className="schedule-toggle__track" aria-hidden="true"><span className="schedule-toggle__thumb" /></span>
-                            {provider.enabled ? "Ativo" : "Inativo"}
+                            {provider.provider === "mercado_livre"
+                              ? (provider.enabled ? "API ativa" : "API inativa")
+                              : (provider.enabled ? "Ativo" : "Inativo")}
                           </label>
                           {provider.provider !== "mercado_livre" && (
                             <div
@@ -2646,6 +2730,21 @@ export const HeroSection = () => {
                         </div>
 
                         <div className="integration-config">
+                          {provider.provider === "mercado_livre" && (
+                            <section className="integration-config-section">
+                              <div className="integration-config-section__head">
+                                <strong>Scraping pelo navegador</strong>
+                                <span>Valide o acesso na janela do Mercado Livre quando o site solicitar verificação. Se ele pedir login, entre diretamente nele.</span>
+                              </div>
+                              <button type="button" className="button-secondary" onClick={() => void validateMercadoBrowser()}
+                                disabled={mercadoBrowserStatus === "opening" || mercadoBrowserStatus === "waiting"}>
+                                {mercadoBrowserStatus === "opening" || mercadoBrowserStatus === "waiting"
+                                  ? <LoaderCircle size={15} className="animate-spin" /> : <ExternalLink size={15} />}
+                                Validar navegador
+                              </button>
+                              {mercadoBrowserMessage && <p role="status">{mercadoBrowserMessage}</p>}
+                            </section>
+                          )}
                           <section className="integration-config-section">
                             <div className="integration-config-section__head">
                               <strong>Credenciais</strong>
@@ -3032,7 +3131,7 @@ export const HeroSection = () => {
                         type="button"
                         className="button-secondary sku-refresh-all"
                         onClick={() => void refreshAllSkus()}
-                        disabled={extractionRunning || refreshingAllSkus || !skuStatusItems.length}
+                        disabled={extractionRunning || refreshingAllSkus || (activeExtractionJob !== null && isExtractionJobActive(activeExtractionJob)) || !skuStatusItems.length}
                       >
                         {refreshingAllSkus ? <LoaderCircle size={15} className="animate-spin" /> : <RefreshCw size={14} />}
                         {refreshingAllSkus ? extractionProgress || "Atualizando" : "Atualizar"}
@@ -3047,7 +3146,7 @@ export const HeroSection = () => {
                       <span>SKU</span>
                       <span>Ofertas</span>
                       <span>Lojas</span>
-                      <span>Atualizado em</span>
+                      <span>Verificado em</span>
                       <span>Ações</span>
                     </div>
                     <div className="sku-status-list">
@@ -3078,8 +3177,8 @@ export const HeroSection = () => {
                                 className="table-action"
                                 onClick={() => void refreshSingleSku(item.sku)}
                                 disabled={extractionRunning || Boolean(refreshingSku) || Boolean(deletingSku)}
-                                aria-label={`Atualizar ${item.sku}`}
-                                title="Atualizar SKU"
+                                aria-label={`${pendingPreciseSku === item.sku ? "Continuar varredura de" : "Atualizar"} ${item.sku}`}
+                                title={pendingPreciseSku === item.sku ? "Continuar varredura de vendedores" : "Atualizar SKU"}
                               >
                                 {refreshingSku === item.sku
                                   ? <LoaderCircle size={15} className="animate-spin" />
@@ -3181,6 +3280,7 @@ export const HeroSection = () => {
                   <div className="crawler-toggles">
                     {[
                       ["external_discovery_fallback", "Discovery externo"],
+                      ["playwright_product_fallback", "Navegador para produtos"],
                       ["playwright_shipping_fallback", "Playwright para logística"],
                     ].map(([field, label]) => (
                       <label key={field} className="crawler-toggle-row">

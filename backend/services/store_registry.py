@@ -54,7 +54,7 @@ TARGET_STORES = (
     {
         "key": "magalu",
         "label": "Magazine Luiza",
-        "aliases": ("Magalu", "magazineluiza", "magazineluiza.com.br"),
+        "aliases": ("Magalu", "magazineluiza", "magazineluiza.com.br", "magazinevoce.com.br"),
         "scope": "retail",
         "cadence": "3x_daily",
         "direct_scrapers": (),

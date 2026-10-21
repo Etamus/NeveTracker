@@ -1,4 +1,5 @@
 import csv
+import math
 from datetime import datetime, timedelta
 from io import BytesIO, StringIO
 from typing import Optional
@@ -11,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, case, exists, func, or_, literal
 from sqlalchemy.orm import Session
 
 from database import SessionLocal, get_db
@@ -24,6 +25,7 @@ from models.product import (
     PriceHistory,
     Product,
     ProductSource,
+    ScrapeCursor,
 )
 from schemas.product import (
     AnalyticsExportRequest,
@@ -46,13 +48,18 @@ from services.offer_enrichment import normalize_postal_code
 from services.crawler_control import get_control, serialize_control, update_control
 from services.auth_service import require_developer, require_operator
 from services.product_sources import serialize_source
+from services.scrape_pagination import coverage_by_store
 from services.precise_extraction import run_precise_extraction
+from services.product_resolver import canonical_brand
+from services.structured_products import UNAVAILABLE_STATES, offer_available, seller_scope_key
+from services.store_registry import TARGET_STORES
 from services.extraction_queue import (
     MAX_JOB_SKUS,
     cancel_extraction_job,
     enqueue_extraction_job,
     get_active_extraction_job,
     get_extraction_job,
+    update_job_progress,
 )
 
 product_router = APIRouter()
@@ -63,9 +70,16 @@ DB_QUERY_CHUNK_SIZE = 500
 SKU_METADATA_FIELDS = (
     "description", "subfamily", "sku_category", "cluster", "market_type",
     "ean", "mpn", "model", "brand",
+    "internal_code", "external_id", "reference_price",
 )
 
 SKU_IMPORT_HEADERS = {
+    "codigo interno": "internal_code",
+    "meu codigo": "internal_code",
+    "id externo": "external_id",
+    "id webglobal": "external_id",
+    "meu preco": "reference_price",
+    "preco de referencia": "reference_price",
     "sku": "sku",
     "codigo": "sku",
     "codigo sku": "sku",
@@ -139,10 +153,12 @@ def _resolve_cached_offer(store, source, url):
 def _latest_products_query(db: Session):
     subquery = (
         db.query(
-            PriceHistory.product_id,
-            func.max(PriceHistory.timestamp).label("latest_timestamp"),
+            PriceHistory.id.label("price_id"),
+            func.row_number().over(
+                partition_by=PriceHistory.product_id,
+                order_by=(PriceHistory.timestamp.desc(), PriceHistory.id.desc()),
+            ).label("position"),
         )
-        .group_by(PriceHistory.product_id)
         .subquery()
     )
 
@@ -151,9 +167,15 @@ def _latest_products_query(db: Session):
         .join(PriceHistory, Product.id == PriceHistory.product_id)
         .join(
             subquery,
-            (PriceHistory.product_id == subquery.c.product_id)
-            & (PriceHistory.timestamp == subquery.c.latest_timestamp),
+            (PriceHistory.id == subquery.c.price_id)
+            & (subquery.c.position == 1),
         )
+        .filter(~exists().where(
+            (ProductSource.sku == Product.sku)
+            & (ProductSource.url == PriceHistory.url)
+            & (ProductSource.seller == PriceHistory.store)
+            & (ProductSource.validation_status.in_(("invalid_match", "not_found")))
+        ))
     )
 
 
@@ -215,7 +237,10 @@ def _known_sku_metadata_map(db: Session, skus=None):
             "ean": item.ean,
             "mpn": item.mpn,
             "model": item.model,
-            "brand": item.brand,
+            "brand": canonical_brand(item.brand),
+            "internal_code": item.internal_code,
+            "external_id": item.external_id,
+            "reference_price": item.reference_price,
         }
         for item in items
     }
@@ -258,7 +283,7 @@ def _apply_summary_metadata(summary, db: Session, fallback_sku=None, metadata_ma
     return summary
 
 
-def _serialize_results(results, db: Session = None, metadata_map=None, resolve_redirects=True):
+def _serialize_results(results, db: Session = None, metadata_map=None, resolve_redirects=True, fresh_after=None):
     if metadata_map is None:
         metadata_map = _known_sku_metadata_map(
             db,
@@ -281,7 +306,7 @@ def _serialize_results(results, db: Session = None, metadata_map=None, resolve_r
         item = {
                 "id": product.id,
                 "name": product.name,
-                "brand": product.brand,
+                "brand": canonical_brand(product.brand),
                 "category": product.category,
                 "sku": product_sku,
                 "image_url": product.image_url,
@@ -291,7 +316,7 @@ def _serialize_results(results, db: Session = None, metadata_map=None, resolve_r
                 "url": resolved["url"],
                 "last_update": price.timestamp,
                 "cash_price": price.cash_price or price.price,
-                "is_cached": True,
+                "is_cached": not bool(fresh_after and price.timestamp and price.timestamp >= fresh_after and not price.is_cached),
             }
         for field in OFFER_DETAIL_FIELDS:
             value = getattr(price, field, None)
@@ -312,14 +337,14 @@ def _sku_status_map(db: Session, skus=None):
         for sku in requested_skus:
             results = _find_sku_products(db, sku)
             product_ids = {product.id for product, _price in results}
-            urls = {price.url for _product, price in results}
-            stores = {price.store for _product, price in results}
+            offers = {(price.url, price.store) for _product, price in results}
+            stores = {seller_scope_key({"source": price.source, "store": price.store}) for _product, price in results}
             last_update = max((price.timestamp for _product, price in results), default=None)
             statuses[sku] = {
                 "sku": sku,
                 "in_database": bool(results),
                 "product_count": len(product_ids),
-                "offer_count": len(urls),
+                "offer_count": len(offers),
                 "store_count": len(stores),
                 "last_update": last_update,
                 **metadata_map.get(sku, {}),
@@ -360,7 +385,7 @@ def _sku_status_map(db: Session, skus=None):
         return statuses
 
     aggregates = {
-        sku: {"products": set(), "urls": set(), "stores": set(), "last_update": None}
+        sku: {"products": set(), "offers": set(), "stores": set(), "last_update": None}
         for sku in all_skus
     }
     for product, price in _latest_products_query(db).all():
@@ -370,8 +395,8 @@ def _sku_status_map(db: Session, skus=None):
         for sku in row_skus.intersection(all_skus):
             aggregate = aggregates[sku]
             aggregate["products"].add(product.id)
-            aggregate["urls"].add(price.url)
-            aggregate["stores"].add(price.store)
+            aggregate["offers"].add((price.url, price.store))
+            aggregate["stores"].add(seller_scope_key({"source": price.source, "store": price.store}))
             if not aggregate["last_update"] or (
                 price.timestamp and price.timestamp > aggregate["last_update"]
             ):
@@ -380,9 +405,9 @@ def _sku_status_map(db: Session, skus=None):
     for sku, aggregate in aggregates.items():
         statuses[sku] = {
             "sku": sku,
-            "in_database": bool(aggregate["urls"]),
+            "in_database": bool(aggregate["offers"]),
             "product_count": len(aggregate["products"]),
-            "offer_count": len(aggregate["urls"]),
+            "offer_count": len(aggregate["offers"]),
             "store_count": len(aggregate["stores"]),
             "last_update": aggregate["last_update"],
             **metadata_map.get(sku, {}),
@@ -418,7 +443,7 @@ def _find_sku_products(db: Session, sku: str):
     query = _latest_products_query(db).filter(
         or_(Product.sku == sku, Product.name.ilike(f"%{sku}%"))
     )
-    return query.order_by(PriceHistory.price.asc()).limit(250).all()
+    return query.order_by(PriceHistory.price.asc()).all()
 
 
 @product_router.get("/skus/status")
@@ -494,6 +519,9 @@ def delete_local_sku(
     if product_ids:
         source_filter = or_(source_filter, ProductSource.product_id.in_(product_ids))
     db.query(ProductSource).filter(source_filter).delete(synchronize_session=False)
+    db.query(ScrapeCursor).filter(ScrapeCursor.sku == normalized_sku).delete(
+        synchronize_session=False
+    )
     if product_ids:
         deleted_prices = (
             db.query(PriceHistory)
@@ -604,15 +632,16 @@ def download_sku_import_template():
     headers = [
         "SKU", "Descricao", "Subfamilia", "Categoria", "Cluster", "Mercado",
         "EAN", "MPN", "Modelo", "Marca",
+        "Codigo interno", "ID externo", "Meu preco",
     ]
     worksheet.append(headers)
     worksheet.freeze_panes = "A2"
-    worksheet.auto_filter.ref = "A1:J1"
+    worksheet.auto_filter.ref = "A1:M1"
 
     for cell in worksheet[1]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="0F7180")
-    for column, width in zip("ABCDEFGHIJ", (20, 42, 24, 24, 20, 20, 18, 18, 20, 22)):
+    for column, width in zip("ABCDEFGHIJKLM", (20, 42, 24, 24, 20, 20, 18, 18, 20, 22, 20, 20, 18)):
         worksheet.column_dimensions[column].width = width
 
     market_validation = DataValidation(
@@ -667,6 +696,21 @@ async def import_skus_file(
         if sku in seen:
             continue
 
+        reference = values.get("reference_price", "").strip()
+        if reference:
+            try:
+                # Spreadsheet numeric cells use '.', Brazilian CSV can use ','.
+                normalized = reference.replace("R$", "").replace(" ", "")
+                if "," in normalized:
+                    normalized = normalized.replace(".", "").replace(",", ".")
+                parsed_reference = float(normalized)
+                if not math.isfinite(parsed_reference) or parsed_reference < 0:
+                    raise ValueError()
+            except ValueError:
+                errors.append({"row": spreadsheet_row, "message": "Meu preco deve ser um valor monetario nao negativo."})
+                continue
+            values["reference_price"] = parsed_reference
+
         market_value = values.get("market_type", "")
         market_type = _normalize_market_type(market_value) if market_value else None
         if market_value and not market_type:
@@ -706,13 +750,17 @@ async def import_skus_file(
             updated_count += 1
 
         for field in (
-            "description", "subfamily", "category", "cluster", "ean", "mpn", "model", "brand"
+            "description", "subfamily", "category", "cluster", "ean", "mpn", "model", "brand",
+            "internal_code", "external_id",
         ):
             value = values.get(field, "").strip()
             if value:
-                setattr(known_sku, field, value[:250])
+                setattr(known_sku, field, canonical_brand(value[:250]) if field == "brand" else value[:250])
         if market_type:
             known_sku.market_type = market_type
+        if isinstance(values.get("reference_price"), (int, float)):
+            # Zero means no own price supplied, as in the reference JSON.
+            known_sku.reference_price = values["reference_price"] or None
         known_sku.updated_at = datetime.utcnow()
 
     db.commit()
@@ -829,7 +877,7 @@ def _register_skus(db: Session, skus):
     db.commit()
 
 
-def _search_sku_summary(sku, payload, db, refreshed_after=None):
+def _search_sku_summary(sku, payload, db, refreshed_after=None, collection_after=None, resume=False, progress=None):
     cached_results = _serialize_results(_find_sku_products(db, sku), db)
     latest = max(
         (item.get("last_update") for item in cached_results if item.get("last_update")),
@@ -838,11 +886,16 @@ def _search_sku_summary(sku, payload, db, refreshed_after=None):
     stale_hours = 1 if payload.scope == "sites" else 8
     stale = not latest or latest < datetime.utcnow() - timedelta(hours=stale_hours)
     should_refresh = (
-        not (latest and refreshed_after and latest >= refreshed_after)
-        and (
-            payload.force_refresh
-            or not cached_results
-            or (payload.refresh_if_stale and stale)
+        (payload.mode == "precise" and payload.force_refresh)
+        or
+        (resume and payload.mode == "precise")
+        or (
+            not (latest and refreshed_after and latest >= refreshed_after)
+            and (
+                payload.force_refresh
+                or not cached_results
+                or (payload.refresh_if_stale and stale)
+            )
         )
     )
     if not should_refresh:
@@ -854,6 +907,9 @@ def _search_sku_summary(sku, payload, db, refreshed_after=None):
             db,
             postal_code=payload.postal_code,
             scope=payload.scope,
+            collection_after=collection_after,
+            resume=resume,
+            progress=progress,
         )
     else:
         summary = run_all_scrapers(
@@ -867,13 +923,25 @@ def _search_sku_summary(sku, payload, db, refreshed_after=None):
 
 def _sku_batch_result(db, sku, summary, status):
     sku_status = _sku_status_map(db, [sku]).get(sku, {})
+    if status == "cached":
+        message = f"Cache local consultado; {len(summary['results'])} ofertas disponíveis."
+    elif not summary.get("fresh_count"):
+        message = (
+            "Coleta concluída sem ofertas novas nesta execução; "
+            f"{len(summary['results'])} ofertas permanecem no cache."
+        )
+    else:
+        fresh_count = summary["fresh_count"]
+        fresh_label = "oferta verificada" if fresh_count == 1 else "ofertas verificadas"
+        message = (
+            f"{fresh_count} {fresh_label}; "
+            f"{summary['processed_count']} ofertas novas ou com preço alterado. "
+            f"{len(summary['results'])} ofertas disponíveis no total."
+        )
     return {
         "sku": sku,
         "status": status,
-        "message": (
-            f"{len(summary['results'])} ofertas analisadas em "
-            f"{len(summary['comparison'])} linhas comparativas."
-        ),
+        "message": message,
         "results_count": len(summary["results"]),
         "stores_count": len(
             [store for store in summary["stores"] if store["available"]]
@@ -919,9 +987,55 @@ def process_extraction_queue_item(sku, options):
             sku,
             payload,
             db,
-            refreshed_after=options.get("job_created_at"),
+            refreshed_after=(
+                None if payload.mode == "precise" and options.get("attempt", 1) > 1
+                else options.get("job_created_at")
+            ),
+            collection_after=options.get("job_created_at") if payload.mode == "precise" else None,
+            resume=payload.mode == "precise" and options.get("attempt", 1) > 1,
+            progress=(
+                lambda message: update_job_progress(
+                    options["job_id"], sku,
+                    f"Rodada {options.get('attempt', 1)}: {message}", db,
+                )
+                if options.get("job_id") else None
+            ),
         )
-        return _sku_batch_result(db, sku, summary, status)
+        result = _sku_batch_result(db, sku, summary, status)
+        if payload.mode == "precise" and status == "updated" and summary.get("more_work"):
+            result["status"] = "partial"
+            result["message"] = (
+                f"Lote coletado; {summary.get('pending_sources', 0)} fontes aguardam coleta "
+                f"e {summary.get('pending_stores', 0)} lojas aguardam descoberta, "
+                "alem das paginas de vendedores pendentes."
+            )
+        elif payload.mode == "precise":
+            limitations = []
+            if summary.get("pending_pages"):
+                limitations.append(
+                    f"{summary['pending_pages']} paginas de loja nao avancaram"
+                )
+            if summary.get("failed_sources"):
+                limitations.append(
+                    f"{summary['failed_sources']} paginas de produto falharam "
+                    f"({summary.get('failed_sources_without_price', 0)} sem preco de listagem)"
+                )
+            if summary.get('limited_sources'):
+                limitations.append(f"{summary['limited_sources']} paginas nao expuseram todas as ofertas de vendedores")
+            if limitations:
+                result["message"] += (
+                    " " + "; ".join(limitations)
+                    + " por bloqueio ou falha de leitura; a cobertura pode estar incompleta."
+                )
+                affected = [
+                    f"{row['label']} ({row.get('failed_pages', 0)} paginas, "
+                    f"{row.get('failed_sources', 0)} produtos)"
+                    for row in summary.get("coverage_by_store") or []
+                    if row.get("failed_pages") or row.get("failed_sources") or row.get('limited_sources')
+                ]
+                if affected:
+                    result["message"] += " Lojas afetadas: " + ", ".join(affected) + "."
+        return result
     except Exception as exc:
         db.rollback()
         print(f" ERROR: Fila falhou ao processar {sku}: {exc}")
@@ -953,7 +1067,7 @@ def create_extraction_job(
         refresh_if_stale=payload.refresh_if_stale,
         postal_code=normalize_postal_code(payload.postal_code),
         scope=payload.scope,
-        mode=get_control(db).default_mode,
+        mode=(payload.mode if "mode" in payload.model_fields_set else get_control(db).default_mode),
     )
 
 
@@ -976,7 +1090,7 @@ def create_database_extraction_job(
         refresh_if_stale=payload.refresh_if_stale,
         postal_code=normalize_postal_code(payload.postal_code),
         scope=payload.scope,
-        mode=get_control(db).default_mode,
+        mode=(payload.mode if "mode" in payload.model_fields_set else get_control(db).default_mode),
     )
 
 
@@ -1022,6 +1136,7 @@ def list_product_sources(
         "items": [serialize_source(item) for item in items],
         "active_count": db.query(ProductSource).filter(ProductSource.active.is_(True)).count(),
         "invalid_count": db.query(ProductSource).filter(ProductSource.active.is_(False)).count(),
+        "coverage_by_store": coverage_by_store(db, _normalize_sku(sku), TARGET_STORES) if sku else [],
     }
 
 
@@ -1041,6 +1156,19 @@ def rediscover_product_sources(
             ProductSource.validation_status: "rediscovery_requested",
             ProductSource.failure_reason: "Redescoberta solicitada pelo usuario",
             ProductSource.invalidated_at: datetime.utcnow(),
+        },
+        synchronize_session=False,
+    )
+    db.query(ScrapeCursor).filter(ScrapeCursor.sku == normalized_sku).update(
+        {
+            ScrapeCursor.completed: True,
+            ScrapeCursor.updated_at: datetime.min,
+            ScrapeCursor.last_status: None,
+            ScrapeCursor.failure_reason: None,
+            ScrapeCursor.last_attempted_at: None,
+            ScrapeCursor.browser_attempted_at: None,
+            ScrapeCursor.browser_attempted_url: None,
+            ScrapeCursor.visited_urls: "[]",
         },
         synchronize_session=False,
     )
@@ -1112,7 +1240,7 @@ def _combine_summaries(summaries, skus):
             aggregate["available"] = bool(aggregate["products"])
             aggregate["product"] = min(
                 aggregate["products"],
-                key=lambda product: product["current_price"],
+                key=lambda product: product["current_price"] if product["current_price"] is not None else float("inf"),
                 default=None,
             )
             aggregate["message"] = None if aggregate["available"] else "Nao disponivel"
@@ -1217,11 +1345,232 @@ def export_analytics(payload: AnalyticsExportRequest):
     )
 
 
+@product_router.get("/analytics/sheet/options")
+def analytics_sheet_options(
+    source: Optional[list[str]] = Query(None),
+    db: Session = Depends(get_db),
+):
+    latest = _latest_products_query(db)
+    sources = sorted({value for (value,) in latest.with_entities(PriceHistory.source).distinct().all() if value})
+    selected_sources = _analytics_filter_values(source)
+    if selected_sources:
+        latest = latest.filter(PriceHistory.source.in_(selected_sources))
+    sellers = sorted({value for (value,) in latest.with_entities(PriceHistory.store).distinct().all() if value})
+    return {"sources": sources, "sellers": sellers}
+
+
+def _analytics_filter_values(values):
+    if isinstance(values, str):
+        values = [values]
+    return list(dict.fromkeys(value.strip() for value in (values or []) if value and value.strip()))
+
+
+def _analytics_sheet_query(db, skus, search, source, seller):
+    query = _latest_products_query(db)
+    requested_skus = _normalize_sku_list(re.split(r"[,;\s]+", skus))
+    if requested_skus:
+        query = query.filter(Product.sku.in_(requested_skus))
+    if search.strip():
+        term = f"%{search.strip()}%"
+        query = query.filter(or_(Product.name.ilike(term), Product.sku.ilike(term)))
+    selected_sources = _analytics_filter_values(source)
+    selected_sellers = _analytics_filter_values(seller)
+    if selected_sources:
+        query = query.filter(PriceHistory.source.in_(selected_sources))
+    if selected_sellers:
+        query = query.filter(PriceHistory.store.in_(selected_sellers))
+    return query
+
+
+@product_router.get("/analytics/sheet/summary")
+def analytics_sheet_summary(
+    skus: str = "",
+    search: str = "",
+    source: Optional[list[str]] = Query(None),
+    seller: Optional[list[str]] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    query = _analytics_sheet_query(db, skus, search, source, seller)
+    unavailable = func.lower(PriceHistory.availability).in_(tuple(UNAVAILABLE_STATES))
+    # The provider's min/max are cash prices; fall back only when cash is unknown.
+    priced = case((or_(PriceHistory.availability.is_(None), ~unavailable),
+                   func.coalesce(PriceHistory.cash_price, PriceHistory.price)), else_=None)
+    grouped = (
+        query.filter(Product.sku.isnot(None), Product.sku != "")
+        .with_entities(
+            Product.sku.label("sku"),
+            func.min(Product.name).label("name"),
+            func.count(Product.id).label("offer_count"),
+            func.count(func.distinct(func.coalesce(PriceHistory.source, PriceHistory.store))).label("store_count"),
+            func.count(func.distinct(func.coalesce(PriceHistory.source, PriceHistory.store) + "|" + PriceHistory.store)).label("seller_count"),
+            func.avg(priced).label("average_price"),
+            func.min(priced).label("lowest_price"),
+            func.max(priced).label("highest_price"),
+            func.sum(case((unavailable, 1), else_=0)).label('unavailable_count'),
+        )
+        .group_by(Product.sku)
+    )
+    if not _analytics_filter_values(source) and not _analytics_filter_values(seller):
+        # Keep requested/catalogued materials visible even when no storefront
+        # exposed an offer. Unknown availability is not a stock-out assertion.
+        missing = db.query(
+            KnownSku.sku.label("sku"), func.coalesce(KnownSku.description, KnownSku.sku).label("name"),
+            literal(0).label("offer_count"), literal(0).label("store_count"), literal(0).label("seller_count"),
+            literal(None).label("average_price"), literal(None).label("lowest_price"),
+            literal(None).label("highest_price"), literal(0).label("unavailable_count"),
+        ).filter(~query.filter(Product.sku == KnownSku.sku).exists())
+        requested = _normalize_sku_list(re.split(r"[,;\s]+", skus))
+        if requested:
+            missing = missing.filter(KnownSku.sku.in_(requested))
+        if search.strip():
+            term = f"%{search.strip()}%"
+            missing = missing.filter(or_(KnownSku.sku.ilike(term), KnownSku.description.ilike(term)))
+        grouped = grouped.union_all(missing)
+    total = grouped.count()
+    page_rows = grouped.order_by("sku").offset((page - 1) * page_size).limit(page_size).all()
+    metadata = _known_sku_metadata_map(db, [row.sku for row in page_rows])
+    items = []
+    for row in page_rows:
+        cheapest = (
+            query.filter(Product.sku == row.sku, priced == row.lowest_price)
+            .with_entities(PriceHistory.store)
+            .order_by(PriceHistory.store)
+            .first()
+        )
+        average = float(row.average_price) if row.average_price is not None else None
+        lowest = float(row.lowest_price) if row.lowest_price is not None else None
+        items.append({
+            "sku": row.sku,
+            "name": row.name,
+            **metadata.get(_normalize_sku(row.sku), {}),
+            "store_count": row.store_count,
+            "seller_count": row.seller_count,
+            "offer_count": row.offer_count,
+            "pma": average,
+            "cheapest_price": lowest,
+            "highest_price": float(row.highest_price) if row.highest_price is not None else None,
+            "reference_difference": (
+                metadata.get(_normalize_sku(row.sku), {}).get("reference_price") - lowest
+                if lowest is not None and metadata.get(_normalize_sku(row.sku), {}).get("reference_price") is not None
+                else None
+            ),
+            "cheapest_store": cheapest[0] if cheapest and lowest is not None else "",
+            "difference_value": average - lowest if average is not None and lowest is not None else None,
+            "difference_percent": (average - lowest) / lowest * 100 if lowest else None,
+            "availability": 'out_of_stock' if row.offer_count and row.unavailable_count == row.offer_count else None,
+        })
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+@product_router.get("/analytics/sheet/export")
+def export_analytics_sheet(
+    skus: str = "",
+    search: str = "",
+    source: Optional[list[str]] = Query(None),
+    seller: Optional[list[str]] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Export every matching saved offer, independently of the visible page."""
+    matches = _analytics_sheet_query(db, skus, search, source, seller).order_by(
+        Product.sku, PriceHistory.price, Product.id,
+    ).all()
+    grouped = {}
+    for offer in _serialize_results(matches, db, resolve_redirects=False):
+        key = offer.get("sku") or offer["name"]
+        group = grouped.setdefault(key, {"first": offer, "offers": []})
+        group["offers"].append(offer)
+
+    rows = []
+    for group in grouped.values():
+        offers = group["offers"]
+        first = group["first"]
+        available = [offer for offer in offers if offer_available(offer) and offer.get('current_price') is not None]
+        def cash_value(offer):
+            return offer["cash_price"] if offer.get("cash_price") is not None else offer["current_price"]
+        prices = [cash_value(offer) for offer in available]
+        cheapest = min(available, key=cash_value, default=None)
+        average = sum(prices) / len(prices) if prices else None
+        lowest = cash_value(cheapest) if cheapest else None
+        rows.append({
+            "sku": first.get("sku"), "name": first["name"],
+            "description": first.get("description"),
+            "subfamily": first.get("subfamily"),
+            "sku_category": first.get("sku_category"),
+            "cluster": first.get("cluster"),
+            "market_type": first.get("market_type"),
+            "store_count": len({offer.get("source") or offer["store"] for offer in available}),
+            "offer_count": len(available), "pma": average,
+            "cheapest_price": lowest, "cheapest_store": cheapest["store"] if cheapest else "",
+            "highest_price": max(prices) if prices else None,
+            "internal_code": first.get("internal_code"),
+            "external_id": first.get("external_id"),
+            "reference_price": first.get("reference_price"),
+            "reference_difference": first["reference_price"] - lowest if first.get("reference_price") is not None and lowest is not None else None,
+            "difference_value": average - lowest if average is not None and lowest is not None else 0,
+            "difference_percent": (average - lowest) / lowest * 100 if lowest else 0,
+            "offers": offers,
+        })
+
+    if not _analytics_filter_values(source) and not _analytics_filter_values(seller):
+        requested = _normalize_sku_list(re.split(r"[,;\s]+", skus))
+        known = db.query(KnownSku)
+        if requested:
+            known = known.filter(KnownSku.sku.in_(requested))
+        if search.strip():
+            term = f"%{search.strip()}%"
+            known = known.filter(or_(KnownSku.sku.ilike(term), KnownSku.description.ilike(term)))
+        exported = {row.get('sku') for row in rows}
+        for material in known.order_by(KnownSku.sku).all():
+            if material.sku not in exported:
+                rows.append({'sku': material.sku, 'name': material.description or material.sku,
+                             'store_count': 0, 'offer_count': 0, 'pma': None,
+                             'cheapest_price': None, 'cheapest_store': '',
+                             'difference_value': None, 'difference_percent': None, 'offers': [],
+                             'internal_code': material.internal_code, 'external_id': material.external_id,
+                             'reference_price': material.reference_price})
+
+    if not rows:
+        raise HTTPException(status_code=400, detail="Nao ha ofertas disponiveis para comparar.")
+    workbook = build_analytics_workbook(AnalyticsExportRequest(query=skus or search, rows=rows))
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M")
+    return StreamingResponse(
+        workbook,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="nevetracker-analytics-{timestamp}.xlsx"'},
+    )
+
+
+@product_router.get("/analytics/sheet")
+def analytics_sheet(
+    skus: str = "",
+    search: str = "",
+    source: Optional[list[str]] = Query(None),
+    seller: Optional[list[str]] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    """A paginated view of the latest saved offer for each product listing."""
+    query = _analytics_sheet_query(db, skus, search, source, seller)
+
+    total = query.count()
+    rows = (query.order_by(Product.sku.asc(), PriceHistory.price.asc(), Product.id.asc())
+            .offset((page - 1) * page_size).limit(page_size).all())
+    return {
+        "items": _serialize_results(rows, db, resolve_redirects=False),
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
 @product_router.post("/", status_code=201)
 def create_product(product_data: ProductCreate, db: Session = Depends(get_db)):
     new_product = Product(
         name=product_data.name,
-        brand=product_data.brand,
+        brand=canonical_brand(product_data.brand),
         description=product_data.description,
         category=product_data.category,
         image_url=product_data.image_url,

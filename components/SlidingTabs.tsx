@@ -9,13 +9,9 @@ import {
   Building2,
   Check,
   ChevronDown,
-  ChevronLeft,
-  ChevronRight,
   ExternalLink,
-  FileSpreadsheet,
   Funnel,
   ImageIcon,
-  LoaderCircle,
   PackageOpen,
   Search,
   Store,
@@ -24,7 +20,9 @@ import {
 } from "lucide-react";
 import type { ComparisonRow, Product } from "../models/product.model";
 import { PriceChart } from "./PriceChart";
-import { getApiBaseUrl } from "./HeroSection/viewModel";
+import AnalyticsSpreadsheet from "./AnalyticsSpreadsheet";
+import PaginationFooter from "./PaginationFooter";
+import { offerIsAvailable, offerSellerKey } from "../src/offerAvailability";
 import {
   createCompactFormatter,
   createCurrencyFormatter,
@@ -90,7 +88,7 @@ const offerDataOptions = [
   "Pagamento a prazo",
 ];
 
-const formatCurrency = (value: number) => createCurrencyFormatter(getInterfacePreferences()).format(value || 0);
+const formatCurrency = (value: number | null | undefined) => value == null || !Number.isFinite(value) ? "—" : createCurrencyFormatter(getInterfacePreferences()).format(value);
 
 const truncateText = (value: string, maxLength = 28) =>
   value.length > maxLength ? `${value.slice(0, maxLength - 3).trimEnd()}...` : value;
@@ -99,7 +97,8 @@ const normalize = (value?: string | null) =>
   (value || "")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase();
+    .toLowerCase()
+    .replace(/\bbrastem\b/g, "brastemp");
 
 const normalizeProductUnits = (name: string) =>
   normalize(name)
@@ -185,6 +184,7 @@ const escapeRegExp = (value: string) =>
   value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const detectBrandInText = (value?: string | null) => {
+  if (/\bbrastem\b/i.test(value || "")) return "Brastemp";
   const text = normalize(value);
   const matches = BRAND_FILTERS.map((brand) => {
     const match = text.match(new RegExp(`\\b${escapeRegExp(normalize(brand))}\\b`));
@@ -194,7 +194,7 @@ const detectBrandInText = (value?: string | null) => {
   return matches.sort((a, b) => a.index - b.index)[0]?.brand || null;
 };
 
-const detectProductBrand = (product: Pick<Product, "name" | "brand">) =>
+export const detectProductBrand = (product: Pick<Product, "name" | "brand">) =>
   detectBrandInText(product.name) || detectBrandInText(product.brand);
 
 const getRowBrand = (row: ComparisonRow) => {
@@ -221,13 +221,13 @@ const bestOffersByStore = (offers: Product[]) => {
   const stores = new Map<string, Product>();
 
   offers.forEach((offer) => {
-    const current = stores.get(offer.store);
-    if (!current || offer.current_price < current.current_price) {
-      stores.set(offer.store, offer);
+    const current = stores.get(offerSellerKey(offer));
+    if (!current || (offer.current_price ?? Infinity) < (current.current_price ?? Infinity)) {
+      stores.set(offerSellerKey(offer), offer);
     }
   });
 
-  return [...stores.values()].sort((a, b) => a.current_price - b.current_price);
+  return [...stores.values()].sort((a, b) => (a.current_price ?? Infinity) - (b.current_price ?? Infinity));
 };
 
 const roundCurrency = (value: number) => Math.round(value * 100) / 100;
@@ -237,15 +237,15 @@ const rebuildRowWithOffers = (
   offers: Product[],
 ): ComparisonRow | null => {
   const validOffers = offers
-    .filter((offer) => Number.isFinite(Number(offer.current_price)) && Number(offer.current_price) > 0)
-    .sort((a, b) => a.current_price - b.current_price);
+    .filter((offer) => offerIsAvailable(offer) && Number.isFinite(Number(offer.current_price)) && Number(offer.current_price) > 0)
+    .sort((a, b) => (a.current_price ?? Infinity) - (b.current_price ?? Infinity));
 
   if (!validOffers.length) return null;
 
   const storeOffers = bestOffersByStore(validOffers);
   const cheapest = storeOffers[0];
-  const pma = storeOffers.reduce((total, offer) => total + offer.current_price, 0) / storeOffers.length;
-  const differenceValue = cheapest.current_price - pma;
+  const pma = storeOffers.reduce((total, offer) => total + Number(offer.current_price), 0) / storeOffers.length;
+  const differenceValue = Number(cheapest.current_price) - pma;
   const differencePercent = pma > 0 ? Math.abs(differenceValue) / pma * 100 : 0;
 
   return {
@@ -260,12 +260,12 @@ const rebuildRowWithOffers = (
     store_count: storeOffers.length,
     offer_count: validOffers.length,
     pma: roundCurrency(pma),
-    cheapest_price: cheapest.current_price,
+    cheapest_price: Number(cheapest.current_price),
     cheapest_store: cheapest.store,
     cheapest_url: cheapest.url,
     difference_value: roundCurrency(differenceValue),
     difference_percent: roundCurrency(differencePercent),
-    offers: validOffers,
+    offers: [...storeOffers, ...offers.filter((offer) => !offerIsAvailable(offer))],
   };
 };
 
@@ -392,7 +392,8 @@ const productMatchesOfferData = (product: Product, selectedData: string[]) =>
   });
 
 const paymentLabel = (offer: Product) => {
-  const cash = offer.cash_price || offer.current_price;
+  if (offer.current_price == null) return "Preço não informado";
+  const cash = offer.cash_price ?? offer.current_price ?? 0;
   if (offer.installment_price && offer.installment_price > cash) {
     return `À vista · +${formatCurrency(offer.installment_price - cash)} a prazo`;
   }
@@ -410,7 +411,10 @@ const leadTimeLabel = (offer: Product) => {
   if (offer.delivery_min_days == null && offer.delivery_max_days == null) return "Prazo não informado";
   const minimum = offer.delivery_min_days ?? offer.delivery_max_days;
   const maximum = offer.delivery_max_days ?? offer.delivery_min_days;
-  return minimum === maximum ? `${minimum} dias úteis` : `${minimum}-${maximum} dias úteis`;
+  const unit = offer.delivery_days_type === "business" ? "dias úteis" : "dias";
+  if (offer.delivery_min_days == null) return `Até ${maximum} ${unit}`;
+  if (offer.delivery_max_days == null) return `A partir de ${minimum} ${unit}`;
+  return minimum === maximum ? `${minimum} ${unit}` : `${minimum}-${maximum} ${unit}`;
 };
 
 const analyticsShippingLabel = (offer: Product) => {
@@ -430,7 +434,10 @@ const tableLeadTimeLabel = (offer?: Product) => {
   if (!offer || (offer.delivery_min_days == null && offer.delivery_max_days == null)) return "—";
   const minimum = offer.delivery_min_days ?? offer.delivery_max_days;
   const maximum = offer.delivery_max_days ?? offer.delivery_min_days;
-  return minimum === maximum ? `${minimum} dias úteis` : `${minimum}-${maximum} dias úteis`;
+  const unit = offer.delivery_days_type === "business" ? "dias úteis" : "dias";
+  if (offer.delivery_min_days == null) return `Até ${maximum} ${unit}`;
+  if (offer.delivery_max_days == null) return `A partir de ${minimum} ${unit}`;
+  return minimum === maximum ? `${minimum} ${unit}` : `${minimum}-${maximum} ${unit}`;
 };
 
 const installmentDetails = (offers: Product[]) => {
@@ -438,7 +445,7 @@ const installmentDetails = (offers: Product[]) => {
     .filter((item) => Number(item.installment_price) > 0)
     .sort((left, right) => Number(left.installment_price) - Number(right.installment_price))[0];
   if (!offer?.installment_price) return null;
-  const cashPrice = offer.cash_price || offer.current_price;
+  const cashPrice = offer.cash_price ?? offer.current_price ?? 0;
   const difference = offer.payment_difference ?? Math.max(0, offer.installment_price - cashPrice);
   return { price: offer.installment_price, difference };
 };
@@ -490,8 +497,8 @@ const StoreRankingPreview = ({
       {offers.map((offer, index) => (
         <div key={`${offer.store}-${offer.url}`} className="store-ranking-popover__row">
           <span className="store-ranking-popover__position">{String(index + 1).padStart(2, "0")}</span>
-          <span className="min-w-0 flex-1 truncate">{offer.store}</span>
-          <strong>{formatCurrency(offer.current_price)}</strong>
+          <span className="min-w-0 flex-1 truncate" title={`${offer.store} · ${offer.source || offer.store}`}>{offer.store}{offer.source && offer.source !== offer.store ? ` · ${offer.source}` : ""}</span>
+          <strong>{formatCurrency(offer.current_price)}</strong>{!offerIsAvailable(offer) && <small>Sem estoque</small>}
         </div>
       ))}
     </div>
@@ -772,14 +779,14 @@ export default function SlidingTabs({
       const matchesDate = productMatchesDate(product, dateRange);
       const matchesOfferData = productMatchesOfferData(product, selectedOfferData);
       const price = Number(product.current_price);
-      const matchesPrice = price >= priceRange[0] && price <= priceRange[1];
+      const matchesPrice = product.current_price == null || (price >= priceRange[0] && price <= priceRange[1]);
       return matchesQuery && matchesBrand && matchesStore && matchesMetadata && matchesDate && matchesOfferData && matchesPrice;
     });
 
     return [...filtered].sort((a, b) => {
-      if (sortOrder === "price_desc") return b.current_price - a.current_price;
+      if (sortOrder === "price_desc") return (b.current_price ?? -Infinity) - (a.current_price ?? -Infinity);
       if (sortOrder === "stores_desc") return a.store.localeCompare(b.store, "pt-BR");
-      return a.current_price - b.current_price;
+      return (a.current_price ?? Infinity) - (b.current_price ?? Infinity);
     });
   }, [
     marketProducts,
@@ -834,7 +841,7 @@ export default function SlidingTabs({
       ranked.set(product.store, {
         name: product.store,
         offers: (current?.offers || 0) + 1,
-        lowest: Math.min(current?.lowest ?? Number.POSITIVE_INFINITY, product.current_price),
+        lowest: Math.min(current?.lowest ?? Number.POSITIVE_INFINITY, (offerIsAvailable(product) ? product.current_price ?? Infinity : Infinity)),
       });
     });
     return [...ranked.values()].sort((a, b) => b.offers - a.offers || a.lowest - b.lowest);
@@ -914,8 +921,8 @@ export default function SlidingTabs({
   ];
 
   return (
-    <div className={`sliding-tabs mx-auto w-full max-w-[1600px] ${activeTab === 1 || activeTab === 2 ? "sliding-tabs--fixed" : ""}`}>
-      {!selectedRow && activeTab !== 1 && (
+    <div className={`sliding-tabs mx-auto w-full max-w-[1600px] ${activeTab === 1 || activeTab === 2 || activeTab === 3 ? "sliding-tabs--fixed" : ""}`}>
+      {!selectedRow && activeTab !== 1 && activeTab !== 3 && (
         <section className="metrics-grid" aria-label="Resumo da pesquisa">
           {metricCards.map((metric) => {
             const Icon = metric.icon;
@@ -935,7 +942,9 @@ export default function SlidingTabs({
         </section>
       )}
 
-      {loading ? (
+      {activeTab === 3 ? (
+        <AnalyticsSpreadsheet />
+      ) : loading ? (
         <div className="mt-5"><LoadingState /></div>
       ) : selectedRow && activeTab === 2 ? (
         <ProductAnalytics row={selectedRow} onBack={() => setSelectedRow(null)} />
@@ -1154,7 +1163,6 @@ export default function SlidingTabs({
                 rows={filteredRows}
                 stores={marketStoreRanking}
                 searched={Boolean(lastQuery)}
-                query={lastQuery}
                 onOpenProduct={openAnalytics}
               />
             </div>
@@ -1460,60 +1468,6 @@ const OffersTable = ({
   </section>
 );
 
-const PaginationFooter = ({
-  page,
-  pageSize,
-  total,
-  onPageChange,
-}: {
-  page: number;
-  pageSize: number;
-  total: number;
-  onPageChange: (page: number) => void;
-}) => {
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const visibleCount = Math.min(5, totalPages);
-  const firstPage = Math.max(1, Math.min(page - 2, totalPages - visibleCount + 1));
-  const pages = Array.from({ length: visibleCount }, (_, index) => firstPage + index);
-  const rangeStart = total ? (page - 1) * pageSize + 1 : 0;
-  const rangeEnd = Math.min(page * pageSize, total);
-
-  return (
-    <div className="panel-footer panel-footer--pagination">
-      <p>Exibindo <strong>{rangeStart}-{rangeEnd}</strong> de <strong>{total}</strong></p>
-      <nav className="pagination" aria-label="Paginação de produtos">
-        <button
-          type="button"
-          onClick={() => onPageChange(page - 1)}
-          disabled={page <= 1}
-          aria-label="Página anterior"
-        >
-          <ChevronLeft size={15} />
-        </button>
-        {pages.map((pageNumber) => (
-          <button
-            key={pageNumber}
-            type="button"
-            className={pageNumber === page ? "pagination__page pagination__page--active" : "pagination__page"}
-            onClick={() => onPageChange(pageNumber)}
-            aria-current={pageNumber === page ? "page" : undefined}
-          >
-            {pageNumber}
-          </button>
-        ))}
-        <button
-          type="button"
-          onClick={() => onPageChange(page + 1)}
-          disabled={page >= totalPages}
-          aria-label="Próxima página"
-        >
-          <ChevronRight size={15} />
-        </button>
-      </nav>
-    </div>
-  );
-};
-
 const CatalogGrid = ({
   products,
   total,
@@ -1551,7 +1505,8 @@ const CatalogGrid = ({
               </div>
               <div className="flex flex-1 flex-col p-4">
                 <div className="flex items-center gap-2 text-xs font-semibold uppercase text-[var(--muted)]">
-                  <span>{product.brand || "Sem marca"}</span>
+                  <span>{detectProductBrand(product) || product.brand || "Sem marca"}</span>
+                  {!offerIsAvailable(product) && <span className="text-[var(--danger)]">Sem estoque</span>}
                 </div>
                 <h3 className="mt-2 line-clamp-2 min-h-[42px] text-[13px] font-semibold leading-[1.35rem] text-[var(--foreground)]">
                   {product.name}
@@ -1589,57 +1544,19 @@ const MarketAnalytics = ({
   rows,
   stores,
   searched,
-  query,
   onOpenProduct,
 }: {
   products: Product[];
   rows: ComparisonRow[];
   stores: Array<{ name: string; offers: number; lowest: number }>;
   searched: boolean;
-  query: string;
   onOpenProduct: (row: ComparisonRow) => void;
 }) => {
-  const [exporting, setExporting] = useState(false);
-  const [exportError, setExportError] = useState("");
 
   if (!products.length) return <section className="data-panel"><EmptyState searched={searched} /></section>;
 
   const maxOffers = Math.max(...stores.map((store) => store.offers), 1);
 
-  const exportAnalytics = async () => {
-    if (!rows.length || exporting) return;
-
-    setExporting(true);
-    setExportError("");
-    try {
-      const response = await fetch(`${getApiBaseUrl()}/products/export/analytics`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, rows }),
-      });
-
-      if (!response.ok) {
-        const error = await response.json().catch(() => null);
-        throw new Error(error?.detail || "Não foi possível exportar os dados.");
-      }
-
-      const blob = await response.blob();
-      const disposition = response.headers.get("Content-Disposition") || "";
-      const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || "nevetracker-analytics.xlsx";
-      const downloadUrl = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = downloadUrl;
-      anchor.download = filename;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(downloadUrl);
-    } catch (error) {
-      setExportError(error instanceof Error ? error.message : "Não foi possível exportar os dados.");
-    } finally {
-      setExporting(false);
-    }
-  };
 
   return (
     <div className="analytics-view">
@@ -1647,19 +1564,6 @@ const MarketAnalytics = ({
         <section className="data-panel analytics-chart-panel">
           <div className="data-panel__header">
             <div><h2>Preço mínimo por loja</h2><p>Melhor condição encontrada em cada fonte</p></div>
-            <div className="analytics-export-control">
-              {exportError && <span role="alert">{exportError}</span>}
-              <button
-                type="button"
-                className="icon-button analytics-export-button"
-                onClick={() => void exportAnalytics()}
-                disabled={exporting || !rows.length}
-                aria-label="Exportar analytics para Excel"
-                title="Exportar para Excel"
-              >
-                {exporting ? <LoaderCircle size={17} className="animate-spin" /> : <FileSpreadsheet size={17} />}
-              </button>
-            </div>
           </div>
           <div className="p-4 sm:p-5"><PriceChart products={products} /></div>
         </section>
@@ -1716,7 +1620,8 @@ const MarketAnalytics = ({
 
 const ProductAnalytics = ({ row, onBack }: { row: ComparisonRow; onBack: () => void }) => {
   const offers = bestOffersByStore(row.offers);
-  const spread = offers.length > 1 ? offers[offers.length - 1].current_price - offers[0].current_price : 0;
+  const pricedOffers = offers.filter((offer) => offerIsAvailable(offer) && offer.current_price != null);
+  const spread = pricedOffers.length > 1 ? Number(pricedOffers[pricedOffers.length - 1].current_price) - Number(pricedOffers[0].current_price) : 0;
 
   return (
     <div className="mt-5 animate-enter">
@@ -1732,14 +1637,14 @@ const ProductAnalytics = ({ row, onBack }: { row: ComparisonRow; onBack: () => v
           <div className="p-4 sm:p-5"><PriceChart products={offers} /></div>
         </section>
         <section className="data-panel">
-          <div className="data-panel__header"><div><h2>Ofertas por loja</h2><p>{offers.length} fontes com disponibilidade</p></div></div>
+          <div className="data-panel__header"><div><h2>Ofertas por loja</h2><p>{offers.length} fontes encontradas</p></div></div>
           <div className="divide-y divide-[var(--border)]">
             {offers.map((offer, index) => (
               <a key={`${offer.store}-${offer.url}`} href={offer.url} target="_blank" rel="noreferrer" className="detail-offer-row">
                 <span className="store-ranking-index">{String(index + 1).padStart(2, "0")}</span>
-                <span className="min-w-0 flex-1"><strong>{offer.store}</strong><small>{formatDate(offer.last_update)}</small></span>
+                <span className="min-w-0 flex-1"><strong>{offer.store}</strong><small>{offer.source && offer.source !== offer.store ? `${offer.source} · ` : ""}{formatDate(offer.last_update)}</small></span>
                 <span className="detail-offer-logistics"><strong>{analyticsShippingLabel(offer)}</strong><small>{analyticsLeadTimeLabel(offer)}</small></span>
-                <span className="text-right"><strong className={index === 0 ? "!text-[var(--success)]" : ""}>{formatCurrency(offer.current_price)}</strong><small>Ver produto</small></span>
+                <span className="text-right"><strong className={index === 0 && offerIsAvailable(offer) ? "!text-[var(--success)]" : ""}>{formatCurrency(offer.current_price)}</strong><small>{offerIsAvailable(offer) ? "Ver produto" : "Sem estoque"}</small></span>
                 <ExternalLink size={14} />
               </a>
             ))}
