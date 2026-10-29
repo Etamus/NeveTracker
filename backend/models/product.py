@@ -41,6 +41,9 @@ class PriceHistory(Base):
     handling_max_days = Column(Integer, nullable=True)
     destination_zip = Column(String, nullable=True)
     availability = Column(String, nullable=True)
+    fulfillment_type = Column(String, nullable=True)
+    fulfilled_by = Column(String, nullable=True)
+    fulfillment_evidence = Column(String, nullable=True)
     logistics_source = Column(String, nullable=True)
     logistics_captured_at = Column(DateTime, nullable=True)
     is_cached = Column(Boolean, default=False, nullable=False)
@@ -71,6 +74,30 @@ class KnownSku(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class LeadTimeQuote(Base):
+    __tablename__ = 'lead_time_quotes'
+    id = Column(Integer, primary_key=True)
+    quote_key = Column(String, unique=True, nullable=False, index=True)
+    sku = Column(String, nullable=False, index=True)
+    source = Column(String, nullable=False)
+    seller = Column(String, nullable=False)
+    url = Column(String, nullable=False)
+    uf = Column(String(2), nullable=False)
+    postal_code = Column(String(8), nullable=False)
+    item_json = Column(Text, nullable=False)
+    attempts = Column(Integer, nullable=False, default=0)
+    status = Column(String, nullable=False, default='queued', index=True)
+    shipping_cost = Column(Float, nullable=True)
+    delivery_min_days = Column(Integer, nullable=True)
+    delivery_max_days = Column(Integer, nullable=True)
+    delivery_days_type = Column(String, nullable=True)
+    shipping_method = Column(String, nullable=True)
+    logistics_source = Column(String, nullable=True)
+    error = Column(Text, nullable=True)
+    captured_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class ExtractionSchedule(Base):
     __tablename__ = "extraction_schedule"
 
@@ -83,6 +110,7 @@ class ExtractionSchedule(Base):
     days = Column(String, default="1", nullable=False)
     repeat_every_hours = Column(Integer, default=0, nullable=False)
     force_refresh = Column(Boolean, default=True, nullable=False)
+    only_stale = Column(Boolean, default=False, nullable=False)
     last_run_key = Column(String, nullable=True)
     last_run = Column(DateTime, nullable=True)
     last_site_run = Column(DateTime, nullable=True)

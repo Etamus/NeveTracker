@@ -1,4 +1,5 @@
 from __future__ import annotations
+from services.shipping_selection import shipping_sort_key
 
 import re
 import unicodedata
@@ -165,7 +166,7 @@ def _parse_shipping_quote(text):
         return {}
     costs = [_number(match.group(1)) for match in re.finditer(r"R\$\s*([\d.,]+)", text)]
     costs = [cost for cost in costs if cost is not None]
-    shipping = 0.0 if free else min(costs, default=None)
+    shipping = min((cost for cost in costs if cost > 0), default=0.0 if free else None)
     days_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().lower()
     days = re.search(r"\b(\d{1,3})(?:\s*(?:a|ate|-)\s*(\d{1,3}))?\s+dias?\b", days_text)
     if shipping is None and not days:
@@ -257,7 +258,7 @@ def _woocommerce_rate_details(cart):
                             "delivery_days_type": "business" if re.search(r"[uú]teis", str(days), re.I) else None})
         if not options:
             return {}
-        selected.append(min(options, key=lambda option: option["shipping_cost"]))
+        selected.append(min(options, key=lambda option: shipping_sort_key(option["shipping_cost"], option.get("delivery_max_days"))))
     if not selected:
         return {}
     return {"shipping_cost": round(sum(option["shipping_cost"] for option in selected), 2),
@@ -334,10 +335,7 @@ def collect_shipping_with_playwright(url, postal_code, timeout_seconds=15):
     options = [option for option in options if option]
     if not options:
         return {}
-    selected = min(options, key=lambda option: (
-        option.get("shipping_cost") is None, option.get("shipping_cost", float("inf")),
-        option.get("delivery_max_days", float("inf")),
-    ))
+    selected = min(options, key=lambda option: shipping_sort_key(option.get("shipping_cost"), option.get("delivery_max_days")))
     result = {
         **selected,
         "logistics_source": "playwright_pdp",

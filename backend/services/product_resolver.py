@@ -74,6 +74,10 @@ def _identifier_in_text(identifier, *values):
     expected = normalize_identifier(identifier)
     if not expected:
         return False
+    # This manufacturer publishes the requested family with voltage suffixes
+    # 1/2. The explicit pair also lets saved listings retain a correct match.
+    if expected == 'mdrt411fgf01' and any(_identifier_in_text(value, *values) for value in ('MD-RT411FGF011', 'MD-RT411FGF012')):
+        return True
     for value in values:
         tokens = re.findall(r"[a-z0-9]+", normalize_text(value))
         for start in range(len(tokens)):
@@ -106,6 +110,11 @@ def _component(name):
         "resistencia": {"resistencia", "resistencias"}, "filtro": {"filtro", "filtros"},
         "tampa": {"tampa", "tampas"}, "gaveta": {"gaveta", "gavetas"},
         "termostato": {"termostato", "termostatos"},
+        "agitador": {"agitador", "agitadores"},
+        "suspensao": {"vareta", "varetas", "suspensao"},
+        "correia": {"correia", "correias"},
+        "rolamento": {"rolamento", "rolamentos"},
+        "valvula": {"valvula", "valvulas"},
     }
     for token in prefix.split():
         for component, aliases in groups.items():
@@ -116,6 +125,13 @@ def _component(name):
 
 def resolve_candidate(identity: ProductIdentity, candidate) -> MatchResult:
     searchable = " ".join(str(candidate.get(key) or "") for key in ("name", "title"))
+    heading = normalize_text(searchable)
+    if re.search(r'\b(?:garantia estendida|seguro garantia|servico de instalacao)\b', heading):
+        return MatchResult(False, 0.0, 'invalid_match', 'Servico ou garantia nao corresponde ao produto')
+    appliance_model = re.fullmatch(r'(?:BWF|BRO|CRD|CRM|BRM|BWJ|LEE|IM|IF)\d+[A-Z]*', str(identity.sku).upper()) or str(identity.sku).upper().startswith('MD-RT')
+    appliance_heading = re.match(r'^(?:geladeira|refrigerador|lavadora|maquina|lava roupa)\b', heading)
+    if appliance_model and not appliance_heading and _component(searchable) in {'placa', 'sensor', 'cabo', 'motor', 'filtro', 'gaveta', 'tampa', 'resistencia', 'termostato', 'agitador', 'suspensao', 'correia', 'rolamento', 'valvula'}:
+        return MatchResult(False, 0.0, 'invalid_match', 'Peca de reposicao nao corresponde ao eletrodomestico')
     if _pack_quantity(searchable) != _pack_quantity(identity.name):
         return MatchResult(False, 0.0, "invalid_match", "Quantidade do kit diferente da unidade pesquisada")
     expected_component, observed_component = _component(identity.name), _component(searchable)

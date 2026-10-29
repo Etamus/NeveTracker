@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { MouseEvent as ReactMouseEvent } from "react";
+import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import {
   ArrowLeft,
   ArrowUpDown,
@@ -39,6 +39,7 @@ interface SlidingTabsProps {
   products: Product[];
   comparisonRows: ComparisonRow[];
   lastQuery: string;
+  analyticsMap?: (stores: string[]) => ReactNode;
 }
 
 type SortOrder = "stores_desc" | "price_asc" | "price_desc";
@@ -47,7 +48,7 @@ type StoreRankingState = { row: ComparisonRow; left: number; top: number };
 
 const OFFER_PAGE_SIZE = 5;
 const CATALOG_PAGE_SIZE = 12;
-const BRAND_FILTERS = ["Consul", "Brastemp", "Whirlpool"];
+const BRAND_FILTERS = ["Consul", "Brastemp", "Whirlpool", "Electrolux", "Midea"];
 const STORE_FILTERS = STORE_OPTIONS;
 const PRODUCT_STOP_WORDS = new Set([
   "a", "as", "com", "da", "de", "do", "dos", "e", "em", "na", "no", "os", "para", "por",
@@ -207,10 +208,17 @@ const productMatchesBrand = (product: Product, selectedBrands: string[]) =>
 
 const productMatchesStore = (product: Product, selectedStores: string[]) => {
   if (selectedStores.length === 0) return true;
-  const searchable = normalize(`${product.source || ""} ${product.store} ${product.url || ""}`);
+  const source = normalize(product.source);
+  const canonical = STORE_FILTERS.find((store) => [store.label, ...store.aliases].some((alias) => normalize(alias) === source));
+  if (canonical) return selectedStores.includes(canonical.label);
+  let host = "";
+  try { host = new URL(product.url).hostname.toLowerCase().replace(/[^a-z0-9]/g, ""); } catch { /* Legacy offers can lack a valid URL. */ }
   return selectedStores.some((store) => {
     const filter = STORE_FILTERS.find((item) => item.label === store);
-    return (filter?.aliases || [store]).some((alias) => searchable.includes(normalize(alias)));
+    return (filter?.aliases || [store]).some((alias) => {
+      const token = normalize(alias).replace(/[^a-z0-9]/g, "");
+      return token.length >= 4 && host.includes(token) || !host && normalize(product.store) === normalize(alias);
+    });
   });
 };
 
@@ -498,7 +506,7 @@ const StoreRankingPreview = ({
         <div key={`${offer.store}-${offer.url}`} className="store-ranking-popover__row">
           <span className="store-ranking-popover__position">{String(index + 1).padStart(2, "0")}</span>
           <span className="min-w-0 flex-1 truncate" title={`${offer.store} · ${offer.source || offer.store}`}>{offer.store}{offer.source && offer.source !== offer.store ? ` · ${offer.source}` : ""}</span>
-          <strong>{formatCurrency(offer.current_price)}</strong>{!offerIsAvailable(offer) && <small>Sem estoque</small>}
+          <strong>{(offerIsAvailable(offer) ? formatCurrency(offer.current_price) : "Sem estoque")}</strong>{!offerIsAvailable(offer) && <small>Sem estoque</small>}
         </div>
       ))}
     </div>
@@ -551,6 +559,7 @@ export default function SlidingTabs({
   products,
   comparisonRows,
   lastQuery,
+  analyticsMap,
 }: SlidingTabsProps) {
   const [resultSearch, setResultSearch] = useState("");
   const [sortOrder, setSortOrder] = useState<SortOrder>("stores_desc");
@@ -947,7 +956,7 @@ export default function SlidingTabs({
       ) : loading ? (
         <div className="mt-5"><LoadingState /></div>
       ) : selectedRow && activeTab === 2 ? (
-        <ProductAnalytics row={selectedRow} onBack={() => setSelectedRow(null)} />
+        <div className="tab-scroll-region"><ProductAnalytics row={selectedRow} onBack={() => setSelectedRow(null)} />{analyticsMap?.(selectedStores)}</div>
       ) : (
         <>
           <div className="workspace-toolbar">
@@ -1159,6 +1168,7 @@ export default function SlidingTabs({
           {activeTab === 2 && (
             <div className="tab-scroll-region">
               <MarketAnalytics
+                freightMap={analyticsMap?.(selectedStores)}
                 products={filteredProducts}
                 rows={filteredRows}
                 stores={marketStoreRanking}
@@ -1514,7 +1524,7 @@ const CatalogGrid = ({
                 <div className="mt-auto flex items-end justify-between gap-3 pt-5">
                   <div>
                     <p className="text-xs font-medium text-[var(--muted)]">Preço atual</p>
-                    <p className="mt-0.5 text-lg font-semibold tracking-tight text-[var(--foreground)]">{formatCurrency(product.current_price)}</p>
+                    <p className="mt-0.5 text-lg font-semibold tracking-tight text-[var(--foreground)]">{(offerIsAvailable(product) ? formatCurrency(product.current_price) : "Sem estoque")}</p>
                     <p className="mt-1 text-xs font-medium text-[var(--muted)]">{paymentLabel(product)}</p>
                     <p className="mt-0.5 text-xs text-[var(--muted)]">{shippingLabel(product)} · {leadTimeLabel(product)}</p>
                   </div>
@@ -1540,20 +1550,20 @@ const CatalogGrid = ({
 );
 
 const MarketAnalytics = ({
+  freightMap,
   products,
   rows,
   stores,
   searched,
   onOpenProduct,
 }: {
+  freightMap?: ReactNode;
   products: Product[];
   rows: ComparisonRow[];
   stores: Array<{ name: string; offers: number; lowest: number }>;
   searched: boolean;
   onOpenProduct: (row: ComparisonRow) => void;
 }) => {
-
-  if (!products.length) return <section className="data-panel"><EmptyState searched={searched} /></section>;
 
   const maxOffers = Math.max(...stores.map((store) => store.offers), 1);
 
@@ -1565,7 +1575,7 @@ const MarketAnalytics = ({
           <div className="data-panel__header">
             <div><h2>Preço mínimo por loja</h2><p>Melhor condição encontrada em cada fonte</p></div>
           </div>
-          <div className="p-4 sm:p-5"><PriceChart products={products} /></div>
+          <div className="p-4 sm:p-5">{products.length ? <PriceChart products={products} /> : <EmptyState searched={searched} />}</div>
         </section>
 
         <section className="data-panel">
@@ -1590,6 +1600,7 @@ const MarketAnalytics = ({
           </div>
         </section>
 
+        <div className="analytics-freight-panel">{freightMap}</div>
         <section className="data-panel analytics-products-panel">
           <div className="data-panel__header">
             <div><h2>Produtos em destaque</h2><p>Itens com maior cobertura entre lojas</p></div>
@@ -1644,7 +1655,7 @@ const ProductAnalytics = ({ row, onBack }: { row: ComparisonRow; onBack: () => v
                 <span className="store-ranking-index">{String(index + 1).padStart(2, "0")}</span>
                 <span className="min-w-0 flex-1"><strong>{offer.store}</strong><small>{offer.source && offer.source !== offer.store ? `${offer.source} · ` : ""}{formatDate(offer.last_update)}</small></span>
                 <span className="detail-offer-logistics"><strong>{analyticsShippingLabel(offer)}</strong><small>{analyticsLeadTimeLabel(offer)}</small></span>
-                <span className="text-right"><strong className={index === 0 && offerIsAvailable(offer) ? "!text-[var(--success)]" : ""}>{formatCurrency(offer.current_price)}</strong><small>{offerIsAvailable(offer) ? "Ver produto" : "Sem estoque"}</small></span>
+                <span className="text-right"><strong className={index === 0 && offerIsAvailable(offer) ? "!text-[var(--success)]" : ""}>{(offerIsAvailable(offer) ? formatCurrency(offer.current_price) : "Sem estoque")}</strong><small>{offerIsAvailable(offer) ? "Ver produto" : "Sem estoque"}</small></span>
                 <ExternalLink size={14} />
               </a>
             ))}

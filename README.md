@@ -326,7 +326,7 @@ A busca retorna:
 
 - O projeto é pensado para execução local e gratuita.
 - Não usa Docker por padrão.
-- Não exige permissões de administrador.
+- A execução local não exige permissões de administrador. No modo servidor, o Windows pode pedir autorização para liberar o firewall da rede local.
 - Não usa serviços pagos obrigatórios.
 - Scraping e consultas gratuitas podem sofrer bloqueios temporários por parte das lojas.
 - Frete e prazo dependem do CEP e da informação publicada pelo lojista; ausência é retornada como dado não informado.
@@ -336,3 +336,40 @@ A busca retorna:
 ## Licença
 
 Consulte [LICENSE.txt](LICENSE.txt).
+
+## Servidor na rede local
+
+Execute `servidor.bat`. O inicializador compila a interface, inicia ou reutiliza o backend local e mostra os endereços de acesso, como `http://192.168.1.10:8800`.
+
+- Compartilhe com as pessoas da mesma rede o endereço exibido no console. Mantenha o computador ligado e o console aberto.
+- Interface e API usam o mesmo endereço. O navegador dos outros computadores não precisa acessar `localhost` do servidor.
+- Os usuários continuam usando as contas e permissões já existentes. O banco de dados é compartilhado pelo backend central.
+- A interface compilada é servida diretamente, sem o servidor de desenvolvimento do Vite.
+- A regra do firewall permite somente conexões das sub-redes locais. Sua configuração inicial pode solicitar autorização do Windows.
+- Se a porta estiver ocupada, use `servidor.bat -Port 8801`.
+- Para ambientes cujo firewall é administrado separadamente, use `servidor.bat -NoFirewall`; nesse caso, a liberação da porta depende da regra da rede.
+- Logs: `.logs/server/`. `Ctrl+C` encerra os serviços iniciados por esse console; um backend que já existia não é encerrado.
+
+`iniciar.bat` continua disponível para o modo local.
+
+## Lead Time por loja e destino
+
+Na sidebar, abra **Lead Time** e informe o SKU na barra de pesquisa superior. A tabela mostra as 15 lojas por 26 estados e Distrito Federal, com filtro por região. Caso selecione vários SKUs na navbar, escolha qual deles visualizar no seletor da aba.
+
+Cada destino usa um CEP de referência da respectiva capital, exibido no cabeçalho; a cotação não representa todo o estado. Expanda a loja para conferir os lojistas, os tipos de prazo, o frete e a data da cotação. Prazos em dias úteis e corridos são identificados separadamente.
+
+**Consultar prazos** inicia uma fila persistente para os destinos exibidos e as ofertas salvas do SKU. A consulta exige uma conta com permissão de extração. Há progresso e cancelamento; fechar a aba não perde a fila. **Atualizar** apenas recarrega os dados salvos. As cotações por CEP são armazenadas separadamente e não sobrescrevem a logística registrada no histórico de preços.
+
+Resultados ausentes permanecem como não consultados ou não informados; falta de cotação não significa que a loja não entrega no estado. Cotações com mais de 24 horas são sinalizadas.
+
+## Agendamento incremental
+
+Em **Extração > Agendamento**, o toggle **Consultar apenas desatualizados** filtra os materiais antes de criar a fila. Fica desligado por padrão, preservando a extração de todos os SKUs. Quando ligado, considera as últimas observações de cada oferta: sem coleta confirmada nas últimas oito horas, cache, CEP divergente, falhas de fontes ou descoberta incompleta mantêm o SKU pendente. Preço inalterado e confirmação de falta de estoque contam como observações válidas. Alterações de cadastro não contam como coleta. Clique em **Salvar** para persistir a opção; o controle Ativo/Inativo continua independente.
+
+## Mapa de fretes no Analytics
+
+O gráfico **Frete por estado** acompanha o SKU da navbar e segue as lojas selecionadas no botão **Filtros** do Analytics e permite selecionar a UF para conferir valor, lojista, oferta, CEP e data. Para vários SKUs, escolha um no seletor do gráfico. Ausência de cotação permanece **Não cotado**; valores com mais de 24 horas são identificados. O valor corresponde ao CEP de referência da capital, não ao estado inteiro.
+
+O mapa fica abaixo de **Preço mínimo por loja**. **Atualizar** relê as cotações salvas. **Consultar fretes** usa a fila persistente para consultar as 27 UFs nas lojas selecionadas, reaproveitando cotações completas recentes. Apresenta o menor frete pago observado; zero somente se confirmado e sem alternativa paga. Um frete confirmado pode aparecer mesmo quando o prazo não foi informado pela loja.
+
+A geometria é incluída localmente a partir de [click_that_hood](https://github.com/codeforgermany/click_that_hood/blob/main/public/data/brazil-states.geojson), com licença em `src/data/brazilStates.LICENSE.txt`. Não depende de um serviço pago de mapas. Após atualizar o projeto, reinicie o backend para carregar a opção do agendamento e a rota do mapa.

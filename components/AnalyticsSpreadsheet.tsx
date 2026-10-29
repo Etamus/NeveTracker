@@ -60,6 +60,8 @@ export default function AnalyticsSpreadsheet() {
   const [exportError, setExportError] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
   const [sourceOpen, setSourceOpen] = useState(true);
+  const [fulfillment, setFulfillment] = useState<string[]>([]);
+  const [fulfillmentOpen, setFulfillmentOpen] = useState(false);
   const [sellerOpen, setSellerOpen] = useState(false);
   const [skuSelectorOpen, setSkuSelectorOpen] = useState(false);
   const [skuSelectorFilter, setSkuSelectorFilter] = useState("");
@@ -121,6 +123,7 @@ export default function AnalyticsSpreadsheet() {
     if (appliedSearch.trim()) params.set("search", appliedSearch);
     sources.forEach((value) => params.append("source", value));
     sellers.forEach((value) => params.append("seller", value));
+    fulfillment.forEach((value) => params.append("fulfillment", value));
     setLoading(true);
     setError("");
     if (view === "summary") setSummaryResult({ items: [], total: 0, page, page_size: PAGE_SIZE });
@@ -138,7 +141,7 @@ export default function AnalyticsSpreadsheet() {
       .catch((reason) => { if (!controller.signal.aborted) setError(String(reason)); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [appliedSkus, appliedSearch, sources, sellers, page, revision, view]);
+  }, [appliedSkus, appliedSearch, sources, sellers, fulfillment, page, revision, view]);
 
   const result = view === "summary" ? summaryResult : offerResult;
   const hasCodes = summaryResult.items.some((item) => item.internal_code || item.external_id);
@@ -190,6 +193,7 @@ export default function AnalyticsSpreadsheet() {
       if (search.trim()) params.set("search", search);
       sources.forEach((value) => params.append("source", value));
       sellers.forEach((value) => params.append("seller", value));
+    fulfillment.forEach((value) => params.append("fulfillment", value));
       const response = await fetch(`${getApiBaseUrl()}/products/analytics/sheet/export?${params}`);
       if (!response.ok) {
         const body = await response.json().catch(() => null);
@@ -231,14 +235,20 @@ export default function AnalyticsSpreadsheet() {
         </div>
         <div ref={filterRef} className="relative ml-auto">
           <button type="button" className={`toolbar-button ${filterOpen ? "toolbar-button--active" : ""}`} onClick={() => setFilterOpen((open) => !open)} aria-expanded={filterOpen}>
-            <Funnel size={15} /> Filtros {(sources.length + sellers.length > 0) && <span className="filter-count">{sources.length + sellers.length}</span>}
+            <Funnel size={15} /> Filtros {(sources.length + sellers.length + fulfillment.length > 0) && <span className="filter-count">{sources.length + sellers.length + fulfillment.length}</span>}
           </button>
           {filterOpen && <div className="filter-popover analytics-sheet__filter-popover">
             <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
               <p className="text-xs font-semibold text-[var(--foreground)]">Filtrar resultados</p>
-              {(sources.length + sellers.length > 0) && <button type="button" className="text-xs font-semibold text-[var(--accent)]" onClick={() => { setSources([]); setSellers([]); setPage(1); }}>Limpar</button>}
+              {(sources.length + sellers.length + fulfillment.length > 0) && <button type="button" className="text-xs font-semibold text-[var(--accent)]" onClick={() => { setSources([]); setSellers([]); setFulfillment([]); setPage(1); }}>Limpar</button>}
             </div>
             <div className="filter-sections">
+              <div className="filter-section">
+                <button type="button" className="filter-section__trigger" onClick={() => setFulfillmentOpen((open) => !open)} aria-expanded={fulfillmentOpen}><span>Entrega</span><span className="flex items-center gap-2">{fulfillment.length > 0 && <span className="filter-section__count">{fulfillment.length}</span>}<ChevronDown size={15} className={fulfillmentOpen ? "rotate-180" : ""} /></span></button>
+                {fulfillmentOpen && <div className="filter-section__content">
+                  {[{value: "2P", label: "2P · Plataforma"}, {value: "3P", label: "3P · Lojista"}, {value: "unknown", label: "Não informada"}].map(({value, label}) => <button type="button" key={value} className="filter-option" onClick={() => { setFulfillment((current) => current.includes(value) ? current.filter((item) => item !== value) : [...current, value]); setPage(1); }}><span className={`filter-checkbox ${fulfillment.includes(value) ? "filter-checkbox--active" : ""}`}>{fulfillment.includes(value) && <Check size={11} strokeWidth={3} />}</span><span>{label}</span></button>)}
+                </div>}
+              </div>
               <div className="filter-section">
                 <button type="button" className="filter-section__trigger" onClick={() => setSourceOpen((open) => !open)}><span>Lojas</span><span className="flex items-center gap-2">{sources.length > 0 && <span className="filter-section__count">{sources.length}</span>}<ChevronDown size={15} className={sourceOpen ? "rotate-180" : ""} /></span></button>
                 {sourceOpen && <div className="filter-section__content analytics-sheet__filter-list">
@@ -267,12 +277,8 @@ export default function AnalyticsSpreadsheet() {
         <button type="button" role="tab" aria-selected={view === "summary"} className={view === "summary" ? "is-active" : ""} onClick={() => { setView("summary"); setPage(1); }}>Resumo por SKU</button>
         <button type="button" role="tab" aria-selected={view === "offers"} className={view === "offers" ? "is-active" : ""} onClick={() => { setView("offers"); setPage(1); }}>Resumo por Lojista</button>
       </div>
-      <div className="analytics-sheet__status" role="status">
-        {loading ? "Carregando dados…" : `${result.total} ${view === "summary" ? (result.total === 1 ? "SKU encontrado" : "SKUs encontrados") : (result.total === 1 ? "oferta encontrada" : "ofertas encontradas")}`}
-        {sources.length > 0 && <span> · {sources.length} {sources.length === 1 ? "loja" : "lojas"}</span>}{sellers.length > 0 && <span> · {sellers.length} {sellers.length === 1 ? "lojista" : "lojistas"}</span>}
-      </div>
       {(error || exportError) && <p className="analytics-sheet__error" role="alert">{error || exportError}</p>}
-      <div className="analytics-sheet__scroll">
+      <div className={`analytics-sheet__scroll ${loading && !result.items.length ? "analytics-sheet__scroll--loading" : ""}`}>
         {view === "summary" ? (
         <table className="analytics-sheet__table">
           <thead><tr><th>SKU</th>{hasCodes && <><th>Código interno</th><th>ID externo</th></>}<th>Produto</th><th>Subfamília</th><th>Categoria</th><th>Cluster</th><th>Mercado</th><th>Lojas</th><th>Lojistas</th><th>Ofertas</th><th>Preço médio</th><th>Melhor preço</th><th>Maior preço</th><th>Melhor lojista</th><th title="Seu preço informado na importação de SKUs">Meu preço</th><th title="Meu preço menos o melhor preço encontrado">Meu preço − melhor preço</th><th title="Preço médio menos o melhor preço">Diferença</th><th>Diferença (%)</th></tr></thead>
@@ -281,28 +287,29 @@ export default function AnalyticsSpreadsheet() {
               <td className="analytics-sheet__sku">{item.sku}</td>{hasCodes && <><td>{item.internal_code || "—"}</td><td>{item.external_id || "—"}</td></>}<td title={item.name}>{item.name}{item.offer_count === 0 ? <small> · Sem ofertas localizadas</small> : !offerIsAvailable(item) && <small className="text-[var(--danger)]"> · Sem estoque</small>}</td><td>{item.subfamily || "—"}</td><td>{item.sku_category || "—"}</td><td>{item.cluster || "—"}</td><td>{item.market_type || "—"}</td>
               <td className="analytics-sheet__number">{item.store_count}</td><td className="analytics-sheet__number">{item.seller_count}</td><td className="analytics-sheet__number">{item.offer_count}</td><td className="analytics-sheet__number">{cellMoney(item.pma)}</td><td className="analytics-sheet__number">{cellMoney(item.cheapest_price)}</td><td className="analytics-sheet__number">{cellMoney(item.highest_price)}</td><td>{item.cheapest_store || "—"}</td><td className="analytics-sheet__number">{cellMoney(item.reference_price)}</td><td className="analytics-sheet__number">{cellMoney(item.reference_difference)}</td><td className="analytics-sheet__number">{cellMoney(item.difference_value)}</td><td className="analytics-sheet__number">{item.difference_percent == null ? "—" : `${item.difference_percent.toFixed(1)}%`}</td>
             </tr>)}
-            {!loading && !summaryResult.items.length && <tr><td colSpan={hasCodes ? 19 : 17} className="analytics-sheet__empty">Nenhum SKU encontrado para estes filtros.</td></tr>}
           </tbody>
         </table>
         ) : (
         <table className="analytics-sheet__table">
           <thead><tr>
-            <th>SKU</th><th>Produto</th><th>Subfamília</th><th>Categoria</th><th>Cluster</th><th>Mercado</th><th>Lojas</th><th>Lojistas</th><th>Preço</th><th>À vista</th><th>A prazo</th><th>Frete</th><th>Total + frete</th><th>Prazo</th><th>CEP</th><th>Atualizado em</th><th>Oferta</th>
+            <th>SKU</th><th>Produto</th><th>Subfamília</th><th>Categoria</th><th>Cluster</th><th>Mercado</th><th>Lojas</th><th>Lojistas</th><th>Preço</th><th>À vista</th><th>A prazo</th><th>Frete</th><th>Total + frete</th><th>Prazo</th><th>CEP</th><th title="2P: entrega pela plataforma; 3P: entrega pelo lojista">Logística 2P/3P</th><th>Entregue por</th><th>Atualizado em</th><th>Oferta</th>
           </tr></thead>
           <tbody>
             {offerResult.items.map((item) => <tr key={`${item.id}-${item.url}`}>
               <td className="analytics-sheet__sku">{item.sku || "—"}</td>
               <td title={item.name}>{item.name}{!offerIsAvailable(item) && <small className="text-[var(--danger)]"> · Sem estoque</small>}</td><td>{item.subfamily || "—"}</td><td>{item.sku_category || item.category || "—"}</td><td>{item.cluster || "—"}</td><td>{item.market_type || "—"}</td>
               <td>{item.source || item.store}</td><td className="analytics-sheet__seller">{item.store}</td>
-              <td className="analytics-sheet__number">{cellMoney(item.current_price)}</td><td className="analytics-sheet__number">{cellMoney(item.cash_price)}</td><td className="analytics-sheet__number">{cellMoney(item.installment_price)}</td>
-              <td className="analytics-sheet__number">{cellMoney(item.shipping_cost)}</td><td className="analytics-sheet__number">{item.shipping_cost == null || item.current_price == null ? "—" : cellMoney(item.current_price + item.shipping_cost)}</td>
-              <td>{formatDays(item.delivery_min_days, item.delivery_max_days, item.delivery_days_type)}</td><td>{item.destination_zip || "—"}</td><td>{formatUpdate(item.last_update)}</td>
+              <td className="analytics-sheet__number">{offerIsAvailable(item) ? cellMoney(item.current_price) : "Sem estoque"}</td><td className="analytics-sheet__number">{cellMoney(item.cash_price)}</td><td className="analytics-sheet__number">{cellMoney(item.installment_price)}</td>
+              <td className="analytics-sheet__number">{item.shipping_cost == null ? "Não cotado" : cellMoney(item.shipping_cost)}</td><td className="analytics-sheet__number">{item.shipping_cost == null || item.current_price == null ? "—" : cellMoney(item.current_price + item.shipping_cost)}</td>
+              <td>{formatDays(item.delivery_min_days, item.delivery_max_days, item.delivery_days_type)}</td><td>{item.destination_zip || "—"}</td>
+              <td title={item.fulfillment_evidence || "Responsabilidade da entrega não informada pela loja"}>{item.fulfillment_type === "2P" ? "2P · Plataforma" : item.fulfillment_type === "3P" ? "3P · Lojista" : "Não informado"}</td>
+              <td>{item.fulfilled_by || "—"}</td><td>{formatUpdate(item.last_update)}</td>
               <td><a href={item.url} target="_blank" rel="noreferrer" aria-label={`Abrir oferta de ${item.store}`}><ExternalLink size={15} /></a></td>
             </tr>)}
-            {!loading && !offerResult.items.length && <tr><td colSpan={17} className="analytics-sheet__empty">Nenhuma oferta encontrada para estes filtros.</td></tr>}
           </tbody>
         </table>
         )}
+        {loading && !result.items.length && <div className="analytics-sheet__loading" role="status" aria-label="Carregando dados"><LoaderCircle size={22} className="animate-spin" aria-hidden="true" /></div>}
       </div>
       <PaginationFooter page={page} pageSize={PAGE_SIZE} total={result.total} onPageChange={setPage} />
     </section>

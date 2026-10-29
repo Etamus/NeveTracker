@@ -77,8 +77,9 @@ def _collect_official_item(source, identity, postal_code=None, timeout=15):
     match = resolve_candidate(identity, candidate)
     if not match.accepted:
         return {"status": "INVALID_MATCH", "reason": match.reason, "match": match}
-    price = float(payload.get("price") or 0)
-    if price <= 0:
+    price = float(payload.get("price") or 0) or None
+    unavailable = payload.get('available_quantity') == 0 or payload.get('status') in {'paused', 'closed'}
+    if (price is None or price <= 0) and not unavailable:
         return {"status": "PARSER_ERROR", "reason": "Preco ausente", "match": match}
     item = {
         **candidate,
@@ -89,13 +90,18 @@ def _collect_official_item(source, identity, postal_code=None, timeout=15):
         "category": payload.get("category_id") or identity.sku,
         "price": price,
         "cash_price": price,
-        "availability": "in_stock" if (payload.get("available_quantity") or 0) > 0 else "out_of_stock",
+        "availability": "out_of_stock" if unavailable else "in_stock" if payload.get('available_quantity') is not None and payload['available_quantity'] > 0 else None,
         "image_url": next((picture.get("secure_url") for picture in payload.get("pictures") or [] if picture.get("secure_url")), None),
         "match_confidence": match.confidence,
         "match_method": match.method,
         "captured_at": datetime.utcnow().isoformat(),
         "discovery_source": "mercado_livre_api",
     }
+    logistics = (payload.get('shipping') or {}).get('logistic_type')
+    if logistics in {'fulfillment', 'self_service'}:
+        item.update(fulfillment_type='2P' if logistics == 'fulfillment' else '3P',
+                    fulfilled_by='Mercado Livre' if logistics == 'fulfillment' else seller,
+                    fulfillment_evidence=f'Mercado Livre shipping.logistic_type={logistics}')
     if postal_code:
         item = enrich_offer(item, postal_code)
         if item.get("destination_zip") == postal_code:

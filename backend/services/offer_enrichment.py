@@ -1,4 +1,6 @@
+from services.shipping_selection import shipping_sort_key
 import math
+import json
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -164,6 +166,17 @@ def _structured_offer(soup, item=None, url=""):
             name=item.get("name"), brand=item.get("brand"),
         )
         product, _ = select_product(nodes, identity)
+        from services.store_registry import find_target_store
+        from services.manufacturer_pages import selected_product, MANUFACTURER_STORES
+        store = find_target_store(url)
+        if store and store['key'] in MANUFACTURER_STORES:
+            from types import SimpleNamespace
+            from scrapy.http import HtmlResponse
+            response = HtmlResponse(url=url, body=str(soup).encode('utf-8'), encoding='utf-8')
+            hydrated = selected_product(response, SimpleNamespace(store=store['key']), identity, store['label'])
+            if hydrated:
+                product = hydrated
+                nodes = []
         if not product:
             return None, True
     elif len(products) == 1:
@@ -173,6 +186,11 @@ def _structured_offer(soup, item=None, url=""):
     else:
         return None, False
     offers = product_offers(product, nodes)
+    sku_id = next((values[0] for key, values in parse_qs(urlparse(url).query).items() if key.lower() in {'skuid', 'idsku'}), None)
+    if sku_id:
+        matching = [offer for offer in offers if str(offer.get('sku') or '') == sku_id]
+        if matching:
+            offers = matching
     selected = select_offer(offers, (item or {}).get("seller") or (item or {}).get("store"), url)
     if selected and str(selected.get("priceCurrency") or "BRL").upper() != "BRL":
         return None, True
@@ -233,10 +251,10 @@ def _loja_integrada_rate_details(rates):
             continue
         cost = _as_float(rate.get("price"))
         _minimum, maximum = delivery_range(rate.get("deliveryTime"))
-        options.append((cost if cost is not None else math.inf, maximum if maximum is not None else math.inf, rate))
+        options.append((shipping_sort_key(cost, maximum), rate))
     if not options:
         return {}
-    _, _, selected = min(options, key=lambda option: (option[0], option[1]))
+    _, selected = min(options, key=lambda option: option[0])
     minimum, maximum = delivery_range(selected.get("deliveryTime"))
     return {
         "shipping_cost": _as_float(selected.get("price")),
@@ -280,7 +298,7 @@ def _dufrio_shipping(session, soup, url, postal_code):
         return {}
     selected = min(
         rates,
-        key=lambda rate: (_as_float(rate.get("price")) is None, _as_float(rate.get("price")) or 0),
+        key=lambda rate: shipping_sort_key(_as_float(rate.get("price"))),
     )
     title = " ".join(
         str(value or "")
@@ -377,7 +395,7 @@ def _shopify_shipping(session, url, postal_code, sku=None):
         return {}
     selected = min(
         rates,
-        key=lambda rate: (_as_float(rate.get("price")) is None, _as_float(rate.get("price")) or 0),
+        key=lambda rate: shipping_sort_key(_as_float(rate.get("price"))),
     )
     delivery_days = selected.get("delivery_days") or []
     minimum = _as_float(delivery_days[0]) if delivery_days else None
@@ -427,7 +445,7 @@ def _tray_shipping(session, soup, url, postal_code):
         rates.append((cost, days or 9999, method))
     if not rates:
         return {}
-    cost, days, method = min(rates, key=lambda rate: (rate[0], rate[1]))
+    cost, days, method = min(rates, key=lambda rate: shipping_sort_key(rate[0], rate[1]))
     return {
         "shipping_cost": cost,
         "shipping_method": method,
@@ -478,11 +496,7 @@ def _mercado_livre_shipping(session, url, postal_code):
 
     selected = min(
         options,
-        key=lambda option: (
-            _as_float(option.get("cost")) is None,
-            _as_float(option.get("cost")) or 0,
-            option_days(option) or 9999,
-        ),
+        key=lambda option: shipping_sort_key(_as_float(option.get("cost")), option_days(option)),
     )
     days = option_days(selected)
     return {
@@ -494,6 +508,75 @@ def _mercado_livre_shipping(session, url, postal_code):
     }
 
 
+def _manufacturer_shipping(session, soup, url, postal_code, item):
+    """Quote exactly one selected SKU via the storefront's public simulation.
+
+    This endpoint simulates delivery without creating an order or a cart.
+    """
+    from services.store_registry import find_target_store
+    from services.manufacturer_pages import MANUFACTURER_STORES
+    store = find_target_store(url)
+    if not store or store['key'] not in MANUFACTURER_STORES:
+        return {}
+    params = {key.lower(): values[0] for key, values in parse_qs(urlparse(url).query).items()}
+    sku_id = params.get('skuid') or params.get('idsku')
+    seller_id = params.get('seller_id')
+    node = soup.select_one('script#__NEXT_DATA__')
+    if node:
+        try:
+            product = json.loads(node.string or node.get_text())['props']['pageProps']['data']['product']
+            if sku_id and str(product['sku']) != sku_id:
+                return {}
+            sku_id = str(product['sku'])
+            sellers = {str(offer.get('seller', {}).get('identifier')) for offer in product.get('offers', {}).get('offers', [])}
+            if not seller_id and len(sellers) == 1:
+                seller_id = next(iter(sellers))
+            if seller_id not in sellers:
+                return {}
+        except (ValueError, KeyError, TypeError):
+            return {}
+    elif store['key'] == 'electrolux':
+        nodes = product_nodes(str(soup), url)
+        product, match = select_product(nodes, ProductIdentity(sku=str((item or {}).get('sku') or ''), model=(item or {}).get('model') or (item or {}).get('sku')))
+        if not product or not match or not match.accepted:
+            return {}
+        selected_sku = sku_id or str(product.get('sku') or '')
+        offer = next((offer for offer in product_offers(product, nodes) if str(offer.get('sku')) == selected_sku), None)
+        if not offer:
+            return {}
+        sku_id = str(offer.get('sku') or '').lstrip('0')
+        # Electrolux's explicitly named own retail offer uses its own seller.
+        if str((offer.get('seller') or {}).get('name') or '').lower() != 'electrolux':
+            return {}
+        seller_id = '1'
+    if not sku_id or not seller_id:
+        return {}
+    base = f'{urlparse(url).scheme}://{urlparse(url).netloc}'
+    response = session.post(base + '/api/checkout/pub/orderForms/simulation',
+        json={'items': [{'id': sku_id, 'quantity': 1, 'seller': seller_id}], 'postalCode': postal_code, 'country': 'BRA'},
+        headers=_headers(url, 'application/json'), timeout=12)
+    if response.status_code != 200:
+        return {}
+    data = response.json()
+    options = []
+    for package in data.get('logisticsInfo') or []:
+        if package.get('itemIndex') != 0:
+            continue
+        for sla in package.get('slas') or []:
+            if sla.get('deliveryChannel') != 'delivery':
+                continue
+            cost = number(sla.get('price'), allow_zero=True)
+            if cost is None:
+                continue
+            estimate = re.fullmatch(r'(\d+)(bd|d|h)', str(sla.get('shippingEstimate') or ''))
+            days = math.ceil(int(estimate[1]) / 24) if estimate and estimate[2] == 'h' else int(estimate[1]) if estimate else None
+            options.append({'shipping_cost': round(cost / 100, 2), 'shipping_method': sla.get('name') or sla.get('id'),
+                            'delivery_min_days': days, 'delivery_max_days': days,
+                            'delivery_days_type': 'business' if estimate and estimate[2] == 'bd' else 'calendar' if estimate else None,
+                            'logistics_source': 'manufacturer_public_simulation'})
+    return min(options, key=lambda option: shipping_sort_key(option['shipping_cost'], option['delivery_max_days']), default={})
+
+
 def _fetch_details_uncached(url, current_price, postal_code=None, item=None):
     parsed = urlparse(url or "")
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -501,7 +584,20 @@ def _fetch_details_uncached(url, current_price, postal_code=None, item=None):
 
     session = _session()
     try:
-        response = session.get(url, headers=_headers(url), timeout=12)
+        context = (item or {}).get('_page_context') or {}
+        reusable = (
+            context.get('offer_url') == url and isinstance(context.get('html'), str)
+            and 0 < len(context['html']) <= 4_000_000
+            and urlparse(context.get('page_url') or '').hostname == parsed.hostname
+        )
+        if reusable:
+            from types import SimpleNamespace
+            response = SimpleNamespace(status_code=200, text=context['html'], url=context['page_url'], headers={})
+        else:
+            response = session.get(url, headers=_headers(url), timeout=12)
+        if re.search(r'(?:electrolux|midea|consul|brastemp)\.com\.br$', parsed.hostname or '', re.I):
+            from services.http_client import recover_public_html
+            response = recover_public_html(response, url, 12)
         if _blocked_page_response(response):
             if postal_code and "mercadolivre.com" in parsed.netloc:
                 return _mercado_livre_shipping(session, url, postal_code)
@@ -520,11 +616,16 @@ def _fetch_details_uncached(url, current_price, postal_code=None, item=None):
             **_parse_payment_details(text, offer_price(_offer) if _offer and offer_price(_offer) is not None else current_price),
             **_jsonld_offer_details(soup, item, postal_code, response.url or url),
         }
+        if item and _offer:
+            from services.fulfillment import fulfillment_details
+            details.update(fulfillment_details(response.text, item.get('source') or '', item.get('seller') or item.get('store') or ''))
 
         if postal_code:
             shipping = {}
             try:
-                if re.search(r"friolar|goldservice", parsed.netloc, re.I):
+                if re.search(r'(?:electrolux|midea|consul|brastemp)\.com\.br$', parsed.hostname or '', re.I):
+                    shipping = _manufacturer_shipping(session, soup, url, postal_code, item)
+                elif re.search(r"friolar|goldservice", parsed.netloc, re.I):
                     shipping = _loja_integrada_shipping(
                         session, soup, response.text, url, postal_code
                     )
@@ -580,8 +681,11 @@ def _fetch_details(url, current_price, postal_code=None, item=None, force_refres
 
 def enrich_offer(item, postal_code=None, force_refresh=False):
     postal_code = normalize_postal_code(postal_code)
-    details = _fetch_details(item.get("url"), item.get("price"), postal_code, item=item, force_refresh=force_refresh)
+    details = _fetch_details(item.get("url"), item.get("price"), postal_code, item=item,
+                             force_refresh=force_refresh or bool(item.get('_page_context')))
     enriched = merge_offer_details(item, details)
+    enriched.pop('_page_context', None)
+    enriched['_http_logistics_attempted_zip'] = postal_code
     if enriched.get("cash_price"):
         enriched["price"] = enriched["cash_price"]
     if enriched.get("installment_price") and enriched.get("cash_price"):

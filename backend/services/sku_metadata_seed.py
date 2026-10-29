@@ -3,6 +3,10 @@ from datetime import datetime
 from models.product import KnownSku
 
 
+# Removed from the catalog at the user's request; do not rediscover from compatibility titles.
+RETIRED_AUTO_SEED_SKUS = frozenset(['326037942', 'W10728409', 'W10859619', 'W11433177', 'W11525615', 'W11677210'])
+
+
 SKU_BUSINESS_METADATA = {
     "W11509387": ("CONSUMÍVEIS & ACESSÓRIOS", "CDP Bronze", "Filtros"),
     "W11199342": ("CONSUMÍVEIS & ACESSÓRIOS", "CDP Bronze", "Filtros"),
@@ -20,7 +24,6 @@ SKU_BUSINESS_METADATA = {
     "W10577330": ("PEÇAS+", "CDP Bronze", "Tampas Móveis"),
     "W11393157": ("PEÇAS+", "CDP Bronze", "Tampas Móveis"),
     "W10866791": ("PEÇAS+", "CDP Diamante", "Kits Instalação"),
-    "W10859619": ("PEÇAS+", "CDP Bronze", "Mesas Cocção"),
     "W10347201": ("PEÇAS+", "CDP Bronze", "Prateleiras"),
     "W11601002": ("CONSUMÍVEIS & ACESSÓRIOS", "CDP Bronze", "Filtros"),
     "W10705755": ("CONSUMÍVEIS & ACESSÓRIOS", "CDP Bronze", "Acessórios"),
@@ -49,8 +52,6 @@ SKU_BUSINESS_METADATA = {
     "W11601003": ("CONSUMÍVEIS & ACESSÓRIOS", "CDP Bronze", "Filtros"),
     "W11619317": ("PEÇAS+", "CDP Bronze", "Placas de Controle"),
     "W10833267": ("PEÇAS+", "CDP Bronze", "Parafusos e afins"),
-    "W10728409": ("PEÇAS+", "CDP Diamante", "Mesas Cocção"),
-    "W11525615": ("PEÇAS+", "CDP Bronze", "Outros"),
     "W11670790": ("PEÇAS+", "CDP Bronze", "Emblemas"),
     "W10515645": ("CONSUMÍVEIS & ACESSÓRIOS", "CDP Bronze", "Filtros"),
     "W11559186": ("PEÇAS+", "CDP Diamante", "Kits Instalação"),
@@ -72,7 +73,6 @@ SKU_BUSINESS_METADATA = {
     "W10351342": ("PEÇAS+", "CDP Bronze", "Ice Maker"),
     "W10638541": ("CONSUMÍVEIS & ACESSÓRIOS", "CDP Bronze", "Filtros"),
     "W11300695": ("PEÇAS+", "CDP Bronze", "Mecanismos"),
-    "W11433177": ("CONSUMÍVEIS & ACESSÓRIOS", "CDP Bronze", "Acessórios"),
     "W11100356": ("PEÇAS+", "CDP Prata", "Acessórios"),
     "W10915770": ("PEÇAS+", "CDP Bronze", "Vidros"),
     "326075876": ("CONSUMÍVEIS & ACESSÓRIOS", "CDP Bronze", "Filtros"),
@@ -101,7 +101,6 @@ SKU_CATEGORIES = {
     "W10577330": "FOGÕES",
     "W11393157": "LAVADORAS",
     "W10866791": "FOGÕES",
-    "W10859619": "FOGÕES",
     "W10347201": "REFRIGERADORES",
     "W11601002": "PURIFICADORES",
     "W10705755": "LAVADORAS",
@@ -130,8 +129,6 @@ SKU_CATEGORIES = {
     "W11601003": "PURIFICADORES",
     "W11619317": "LAVA LOUÇAS",
     "W10833267": "LAVA LOUÇAS",
-    "W10728409": "COOKTOPS",
-    "W11525615": "PURIFICADORES",
     "W11670790": "REFRIGERADORES",
     "W10515645": "REFRIGERADORES",
     "W11559186": "FOGÕES",
@@ -153,7 +150,6 @@ SKU_CATEGORIES = {
     "W10351342": "REFRIGERADORES",
     "W10638541": "COIFAS / DEPURADORES",
     "W11300695": "LAVADORAS",
-    "W11433177": "LIQUIDIFICADORES",
     "W11100356": "FOGÕES",
     "W10915770": "FORNOS",
     "326075876": "COIFAS / DEPURADORES",
@@ -171,7 +167,6 @@ SKU_SUBFAMILY_CORRECTIONS = {
     "W10907728": "Acessórios",
     "W10705755": "Acessórios",
     "W10420716": "Acessórios",
-    "W11433177": "Acessórios",
     "W11100356": "Acessórios",
     "W10577330": "Tampas Móveis",
     "W11393157": "Tampas Móveis",
@@ -181,8 +176,6 @@ SKU_SUBFAMILY_CORRECTIONS = {
     "W10866790": "Kits Instalação",
     "W11559186": "Kits Instalação",
     "W10866789": "Kits Instalação",
-    "W10859619": "Mesas Cocção",
-    "W10728409": "Mesas Cocção",
     "W11047054": "Interruptores horário",
     "W11245249": "Válvulas de Água",
 }
@@ -204,9 +197,13 @@ def seed_sku_business_metadata(db):
             cluster = "CONSUMÍVEIS & ACESSÓRIOS"
         elif cluster.startswith("PE"):
             cluster = "PEÇAS+"
-        item.cluster = cluster
-        item.category = SKU_CATEGORIES[sku]
+        if not item.cluster:
+            item.cluster = cluster
+        if not item.category:
+            item.category = SKU_CATEGORIES[sku]
         item.portfolio = None
-        item.subfamily = SKU_SUBFAMILY_CORRECTIONS.get(sku, subfamily)
-        item.updated_at = now
+        if not item.subfamily:
+            item.subfamily = SKU_SUBFAMILY_CORRECTIONS.get(sku, subfamily)
+        if db.is_modified(item) or item in db.new:
+            item.updated_at = now
     db.commit()

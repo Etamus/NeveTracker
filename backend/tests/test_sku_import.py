@@ -140,6 +140,16 @@ class SkuImportTests(unittest.TestCase):
         self.assertEqual(item.subfamily, "Filtros")
         self.assertIsNone(item.portfolio)
 
+    def test_startup_seed_preserves_imported_business_metadata(self):
+        self.db.add(KnownSku(sku="W11199342", subfamily="Subfamilia importada",
+                             category="Categoria importada", cluster="Cluster importado",
+                             market_type="Competitivo"))
+        self.db.commit()
+        seed_sku_business_metadata(self.db)
+        item = self.db.query(KnownSku).filter_by(sku="W11199342").one()
+        self.assertEqual((item.subfamily, item.category, item.cluster, item.market_type),
+                         ("Subfamilia importada", "Categoria importada", "Cluster importado", "Competitivo"))
+
     def test_registers_and_reads_more_than_sqlite_parameter_limit(self):
         skus = [f"W{10600000 + index}" for index in range(1205)]
 
@@ -311,7 +321,8 @@ class SkuImportTests(unittest.TestCase):
         friolar = next(row for row in response["coverage_by_store"] if row["store"] == "friolar")
         self.assertEqual(friolar["failed_sources_without_price"], 1)
         self.assertEqual(friolar["source_failures"][0]["reason"], "HTTP 403")
-        self.assertEqual(len(response["coverage_by_store"]), 11)
+        from services.store_registry import TARGET_STORES
+        self.assertEqual(len(response["coverage_by_store"]), len(TARGET_STORES))
 
     def test_delete_sku_removes_catalog_and_price_history(self):
         sku = "W10531315"

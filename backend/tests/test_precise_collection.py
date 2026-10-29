@@ -26,6 +26,7 @@ from services.store_registry import TARGET_STORES, find_target_store
 
 FIXTURE = Path(__file__).parent / "fixtures" / "product_pdp.html"
 HTTP_STORES = (
+    "electrolux", "midea", "consul", "brastemp",
     "amazon",
     "magalu",
     "leroy_merlin",

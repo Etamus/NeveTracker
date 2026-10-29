@@ -1,5 +1,6 @@
 import re
 import unicodedata
+from urllib.parse import urlparse
 
 from scrapers.amazon import scrape_amazon
 from scrapers.leroy import scrape_leroy
@@ -19,6 +20,10 @@ from services.mercado_livre_api import search_mercado_livre
 # One direct extractor per storefront keeps the normal path predictable. Offers
 # exposed by Buscape/Zoom are collected once, separately, and merged by source.
 TARGET_STORES = (
+    {"key": "electrolux", "label": "Electrolux", "aliases": ("Eletrolux", "electrolux.com.br"), "scope": "retail", "cadence": "3x_daily", "direct_scrapers": ()},
+    {"key": "midea", "label": "Midea", "aliases": ("midea.com.br",), "scope": "retail", "cadence": "3x_daily", "direct_scrapers": ()},
+    {"key": "consul", "label": "Consul", "aliases": ("consul.com.br",), "scope": "retail", "cadence": "3x_daily", "direct_scrapers": ()},
+    {"key": "brastemp", "label": "Brastemp", "aliases": ("brastemp.com.br",), "scope": "retail", "cadence": "3x_daily", "direct_scrapers": ()},
     {
         "key": "mercado_livre",
         "label": "Mercado Livre",
@@ -120,16 +125,28 @@ def _normalize_store_name(value):
 
 def find_target_store(*values):
     """Return the configured storefront represented by a merchant name or URL."""
+    # A brand/manufacturer name in a merchant label must never override the
+    # actual marketplace hosting the offer.
+    for value in values:
+        if '://' not in str(value or ''):
+            continue
+        host = (urlparse(str(value)).hostname or '').lower()
+        for store in TARGET_STORES:
+            for alias in store.get('aliases', ()):
+                if '.' in alias and (host == alias or host.endswith('.' + alias)):
+                    return store
     haystack = f" {' '.join(_normalize_store_name(value) for value in values)} "
     if not haystack.strip():
         return None
 
-    for store in TARGET_STORES:
-        names = (store["label"], *store.get("aliases", ()))
-        for name in names:
-            needle = _normalize_store_name(name)
-            if needle and f" {needle} " in haystack:
-                return store
+    for value in values:
+        text = f' {_normalize_store_name(value)} '
+        for store in TARGET_STORES:
+            names = (store["label"], *store.get("aliases", ()))
+            for name in names:
+                needle = _normalize_store_name(name)
+                if needle and f" {needle} " in text:
+                    return store
     return None
 
 

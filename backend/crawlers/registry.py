@@ -3,7 +3,15 @@ from crawlers.mercado_livre import collect_mercado_livre
 from crawlers.shopee import collect_shopee
 
 
+def collect_manufacturer(source, identity, postal_code=None, timeout=15):
+    from crawlers.base import collect_http
+    from crawlers.profiles import DEFAULT_PROFILE
+    return collect_http(source, identity, postal_code, DEFAULT_PROFILE, timeout)
+
+
 HTTP_COLLECTORS = {
+    "electrolux": collect_manufacturer, "midea": collect_manufacturer,
+    "consul": collect_manufacturer, "brastemp": collect_manufacturer,
     "amazon": amazon.collect,
     "magalu": magalu.collect,
     "leroy_merlin": leroy.collect,

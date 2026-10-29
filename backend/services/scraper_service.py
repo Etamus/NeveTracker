@@ -65,7 +65,6 @@ KNOWN_SKUS = {
     "W10320833",
     "326043145",
     "W10351342",
-    "W11433177",
     "W10200101",
     "W11300695",
     "W10420716",
@@ -92,9 +91,7 @@ KNOWN_SKUS = {
     "W10644162",
     "W10911678",
     "W11228626",
-    "W10728409",
     "326065620",
-    "W11525615",
     "W10544749",
     "W11108178",
     "W11693441",
@@ -104,7 +101,6 @@ KNOWN_SKUS = {
     "W10516861",
     "W11195523",
     "W10238102",
-    "W10859619",
     "W11185123",
     "W10212150",
     "W10336914",
@@ -280,6 +276,7 @@ OFFER_DETAIL_FIELDS = (
     "handling_max_days",
     "destination_zip",
     "availability",
+    "fulfillment_type", "fulfilled_by", "fulfillment_evidence",
     "logistics_source",
     "logistics_captured_at",
     "is_cached",
@@ -301,7 +298,7 @@ def _tokens(value):
 
 def _extract_skus(value):
     normalized = _normalize_text(value).upper()
-    skus = re.findall(r"\bW\d{6,}\b|\b\d{8,}\b", normalized)
+    skus = re.findall(r"\bW\d{6,}\b|\bMD-RT\d+[A-Z]+\d*\b|\b(?:BWF|BRO|CRD|CRM|BRM|BWJ|LEE|IM|IF|CIX)\d+[A-Z]*\b|\b\d{8,}\b", normalized)
     return list(dict.fromkeys(skus))
 
 
@@ -437,6 +434,9 @@ def _normalize_result(item, product_query, store_label=None):
     if not name or not url or (price is None and offer_available(item)):
         return None
 
+    if re.search(r'\b(?:garantia estendida|seguro garantia|servico de instalacao)\b', _normalize_text(name)):
+        return None
+
     if query_sku and sku != query_sku:
         return None
     if query_sku and not resolve_candidate(ProductIdentity(sku=query_sku, model=query_sku), item).accepted:
@@ -492,7 +492,7 @@ def _offer_url_identity(url):
         for key, value in parse_qsl(parsed_url.query, keep_blank_values=False)
         if key.lower()
         in {
-            "item_id", "wid", "pdp_filters", "offer_id", "oid", "seller", "seller_id", "shop_id", "m", "smid", "variant"
+            "item_id", "wid", "pdp_filters", "offer_id", "oid", "seller", "seller_id", "shop_id", "m", "smid", "variant", "skuid", "idsku"
         }
     ]
     return urlunsplit(
@@ -1285,6 +1285,25 @@ def _cached_discovered_sku_items(db: Session, sku: str):
 
 def _run_store_scrapers(store_config, product_query):
     store_results = []
+    from services.manufacturer_pages import MANUFACTURER_STORES
+    if store_config['key'] in MANUFACTURER_STORES:
+        from crawlers.paged_discovery import fetch_search_page, search_url
+        from crawlers.registry import collect_product_source
+        from types import SimpleNamespace
+        from services.product_resolver import ProductIdentity, resolve_candidate
+        identity = ProductIdentity(sku=product_query, model=product_query)
+        candidates, _, _ = fetch_search_page(store_config['key'], search_url(store_config['key'], product_query), timeout=12)
+        for candidate in candidates:
+            if not resolve_candidate(identity, candidate).accepted:
+                continue
+            source = SimpleNamespace(store=store_config['key'], url=candidate['url'], seller=candidate.get('seller'), brand=None,
+                                     external_product_id=None, asin=None, item_id=None)
+            result = collect_product_source(source, identity, timeout=12)
+            for item in result.get('items', []):
+                normalized = _normalize_result(item, product_query, store_config['label'])
+                if normalized:
+                    store_results.append(normalized)
+        return store_results
     query_variants = _query_variants(product_query)
     scraper_functions = store_config.get("direct_scrapers", ())
     mercado_livre_mode = "always"

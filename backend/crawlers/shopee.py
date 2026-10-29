@@ -62,7 +62,8 @@ def collect_shopee(source, identity, postal_code=None, timeout=15):
     if not match.accepted:
         return {"status": "INVALID_MATCH", "reason": match.reason, "match": match}
     price = _price(payload.get("price") or payload.get("price_min"))
-    if not price:
+    unavailable = payload.get('stock') == 0
+    if not price and not unavailable:
         return {"status": "PARSER_ERROR", "reason": "Preco ausente", "match": match}
     installment = payload.get("installment_plans") or []
     plan = next((value for value in installment if isinstance(value, dict)), {})
@@ -81,8 +82,8 @@ def collect_shopee(source, identity, postal_code=None, timeout=15):
         "installment_count": count,
         "installment_value": installment_value,
         "installment_price": installment_total,
-        "payment_difference": round(max(0, installment_total - price), 2) if installment_total else None,
-        "availability": "in_stock" if (payload.get("stock") or 0) > 0 else "out_of_stock",
+        "payment_difference": round(max(0, installment_total - price), 2) if installment_total and price is not None else None,
+        "availability": "out_of_stock" if unavailable else "in_stock" if payload.get('stock') is not None and payload['stock'] > 0 else None,
         "image_url": f"https://down-br.img.susercontent.com/file/{payload.get('image')}" if payload.get("image") else None,
         "match_confidence": match.confidence,
         "match_method": match.method,

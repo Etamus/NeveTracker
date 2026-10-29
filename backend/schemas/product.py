@@ -62,6 +62,7 @@ class ExtractionScheduleRequest(BaseModel):
     days: List[int] = Field(default_factory=lambda: [1])
     repeat_every_hours: int = Field(default=0, ge=0, le=12)
     force_refresh: bool = True
+    only_stale: bool = False
     postal_code: Optional[str] = None
 
     @field_validator("start_time", "end_time")
@@ -101,6 +102,9 @@ class AnalyticsOfferExport(BaseModel):
     delivery_days_type: Optional[str] = None
     destination_zip: Optional[str] = None
     availability: Optional[str] = None
+    fulfillment_type: Optional[str] = None
+    fulfilled_by: Optional[str] = None
+    fulfillment_evidence: Optional[str] = None
     logistics_source: Optional[str] = None
     is_cached: bool = False
 

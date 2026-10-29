@@ -226,6 +226,9 @@ def _write_offers_sheet(workbook, rows):
             "Atualizado em",
             "URL",
             "Tipo de prazo",
+            "Logística 2P/3P (2P plataforma; 3P lojista)",
+            "Entregue por",
+            "Evidência logística",
         ]
     )
 
@@ -248,7 +251,7 @@ def _write_offers_sheet(workbook, rows):
                     row.market_type or "",
                     offer.store,
                     offer.source or offer.store,
-                    offer.current_price,
+                    offer.current_price if offer_available({"availability": offer.availability}) else "Sem estoque",
                     cash_price,
                     offer.installment_price,
                     offer.installment_count,
@@ -267,6 +270,9 @@ def _write_offers_sheet(workbook, rows):
                     _excel_datetime(offer.last_update),
                     offer.url,
                     {"business": "Dias uteis", "calendar": "Dias corridos"}.get(offer.delivery_days_type, "Nao informado"),
+                    offer.fulfillment_type or "",
+                    offer.fulfilled_by or "",
+                    offer.fulfillment_evidence or "",
                 ]
             )
             link_cell = sheet.cell(sheet.max_row, 27)
@@ -275,7 +281,7 @@ def _write_offers_sheet(workbook, rows):
 
     _style_sheet(
         sheet,
-        [16, 45, 38, 22, 22, 16, 16, 30, 22, 17, 17, 17, 10, 18, 20, 15, 18, 20, 20, 24, 13, 18, 20, 18, 11, 21, 62, 18],
+        [16, 45, 38, 22, 22, 16, 16, 30, 22, 17, 17, 17, 10, 18, 20, 15, 18, 20, 20, 24, 13, 18, 20, 18, 11, 21, 62, 18, 44, 28, 60],
     )
     for row_index in range(2, sheet.max_row + 1):
         for column in (10, 11, 12, 14, 15, 16, 17):

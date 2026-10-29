@@ -795,6 +795,7 @@ def _schedule_response(schedule):
         "days": days or [1],
         "repeat_every_hours": schedule.repeat_every_hours,
         "force_refresh": schedule.force_refresh,
+        "only_stale": schedule.only_stale,
         "last_run_key": schedule.last_run_key,
         "last_run": schedule.last_run,
         "updated_at": schedule.updated_at,
@@ -833,6 +834,7 @@ def update_extraction_schedule(
     schedule.days = ",".join(str(day) for day in payload.days)
     schedule.repeat_every_hours = payload.repeat_every_hours
     schedule.force_refresh = payload.force_refresh
+    schedule.only_stale = payload.only_stale
     schedule.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(schedule)
@@ -1362,10 +1364,12 @@ def analytics_sheet_options(
 def _analytics_filter_values(values):
     if isinstance(values, str):
         values = [values]
+    if not isinstance(values, (list, tuple, set)):
+        return []
     return list(dict.fromkeys(value.strip() for value in (values or []) if value and value.strip()))
 
 
-def _analytics_sheet_query(db, skus, search, source, seller):
+def _analytics_sheet_query(db, skus, search, source, seller, fulfillment=None):
     query = _latest_products_query(db)
     requested_skus = _normalize_sku_list(re.split(r"[,;\s]+", skus))
     if requested_skus:
@@ -1379,6 +1383,12 @@ def _analytics_sheet_query(db, skus, search, source, seller):
         query = query.filter(PriceHistory.source.in_(selected_sources))
     if selected_sellers:
         query = query.filter(PriceHistory.store.in_(selected_sellers))
+    selected_fulfillment = _analytics_filter_values(fulfillment)
+    if selected_fulfillment:
+        conditions = [PriceHistory.fulfillment_type.in_([value for value in selected_fulfillment if value in {'2P', '3P'}])]
+        if 'unknown' in selected_fulfillment:
+            conditions.append(PriceHistory.fulfillment_type.is_(None))
+        query = query.filter(or_(*conditions))
     return query
 
 
@@ -1390,9 +1400,10 @@ def analytics_sheet_summary(
     seller: Optional[list[str]] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
+    fulfillment: Optional[list[str]] = Query(None),
     db: Session = Depends(get_db),
 ):
-    query = _analytics_sheet_query(db, skus, search, source, seller)
+    query = _analytics_sheet_query(db, skus, search, source, seller, fulfillment)
     unavailable = func.lower(PriceHistory.availability).in_(tuple(UNAVAILABLE_STATES))
     # The provider's min/max are cash prices; fall back only when cash is unknown.
     priced = case((or_(PriceHistory.availability.is_(None), ~unavailable),
@@ -1412,7 +1423,7 @@ def analytics_sheet_summary(
         )
         .group_by(Product.sku)
     )
-    if not _analytics_filter_values(source) and not _analytics_filter_values(seller):
+    if not _analytics_filter_values(source) and not _analytics_filter_values(seller) and not _analytics_filter_values(fulfillment):
         # Keep requested/catalogued materials visible even when no storefront
         # exposed an offer. Unknown availability is not a stock-out assertion.
         missing = db.query(
@@ -1470,10 +1481,11 @@ def export_analytics_sheet(
     search: str = "",
     source: Optional[list[str]] = Query(None),
     seller: Optional[list[str]] = Query(None),
+    fulfillment: Optional[list[str]] = Query(None),
     db: Session = Depends(get_db),
 ):
     """Export every matching saved offer, independently of the visible page."""
-    matches = _analytics_sheet_query(db, skus, search, source, seller).order_by(
+    matches = _analytics_sheet_query(db, skus, search, source, seller, fulfillment).order_by(
         Product.sku, PriceHistory.price, Product.id,
     ).all()
     grouped = {}
@@ -1513,7 +1525,7 @@ def export_analytics_sheet(
             "offers": offers,
         })
 
-    if not _analytics_filter_values(source) and not _analytics_filter_values(seller):
+    if not _analytics_filter_values(source) and not _analytics_filter_values(seller) and not _analytics_filter_values(fulfillment):
         requested = _normalize_sku_list(re.split(r"[,;\s]+", skus))
         known = db.query(KnownSku)
         if requested:
@@ -1550,10 +1562,11 @@ def analytics_sheet(
     seller: Optional[list[str]] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
+    fulfillment: Optional[list[str]] = Query(None),
     db: Session = Depends(get_db),
 ):
     """A paginated view of the latest saved offer for each product listing."""
-    query = _analytics_sheet_query(db, skus, search, source, seller)
+    query = _analytics_sheet_query(db, skus, search, source, seller, fulfillment)
 
     total = query.count()
     rows = (query.order_by(Product.sku.asc(), PriceHistory.price.asc(), Product.id.asc())

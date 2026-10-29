@@ -188,7 +188,7 @@ def _valid_offer(identity, item):
         or not seller or isinstance(price, bool)
         or (price is None and offer_available(item))
         or (price is not None and (not isinstance(price, (int, float)) or not math.isfinite(price) or price <= 0))
-        or (title_skus and identity.sku.upper() not in title_skus)
+        or (re.fullmatch(r'W\d{8}', identity.sku.upper()) and title_skus and identity.sku.upper() not in title_skus)
         or not resolve_candidate(identity, item).accepted
     ):
         return False
@@ -253,7 +253,7 @@ def _discover_store(
             title_skus = {value.upper() for value in re.findall(
                 r"\bW\d{8}\b", str(candidate.get("name") or candidate.get("title") or ""), re.I,
             )}
-            if title_skus and identity.sku.upper() not in title_skus:
+            if re.fullmatch(r'W\d{8}', identity.sku.upper()) and title_skus and identity.sku.upper() not in title_skus:
                 continue
             identity_key = (candidate.get("url"), candidate.get("seller") or candidate.get("store"))
             has_price = isinstance(candidate.get("price"), (int, float)) and candidate["price"] > 0
@@ -504,9 +504,10 @@ def _collect_sources(db, identity, sources, postal_code, control, progress=None)
     if logistics_indices:
         if progress:
             progress(f"{identity.sku}: cotando frete e prazo de {len(logistics_indices)} ofertas para {postal_code}")
-        enriched = enrich_offers([collected[index] for index in logistics_indices], postal_code, force_refresh=True,
-                                 per_domain=control.concurrent_requests_per_domain)
-        for index, item in zip(logistics_indices, enriched):
+        http_indices = [index for index in logistics_indices if collected[index].get('_http_logistics_attempted_zip') != postal_code]
+        enriched = enrich_offers([collected[index] for index in http_indices], postal_code, force_refresh=True,
+                                 per_domain=control.concurrent_requests_per_domain) if http_indices else []
+        for index, item in zip(http_indices, enriched):
             if item.get("destination_zip") == postal_code:
                 item["shipping_zip_code"] = postal_code
             collected[index] = item
@@ -520,11 +521,14 @@ def _collect_sources(db, identity, sources, postal_code, control, progress=None)
             for index in missing:
                 by_host[urlparse(collected[index]["url"]).netloc].append(index)
             remaining = []
-            for host, indices in by_host.items():
+            def probe_host(pair):
+                host, indices = pair
+                return host, indices, collect_shipping_with_playwright(
+                    collected[indices[0]]["url"], postal_code, control.request_timeout_seconds)
+            with ThreadPoolExecutor(max_workers=min(2, len(by_host)) or 1) as executor:
+                probes = list(executor.map(probe_host, by_host.items()))
+            for host, indices, shipping in probes:
                 first = indices[0]
-                shipping = collect_shipping_with_playwright(
-                    collected[first]["url"], postal_code, control.request_timeout_seconds,
-                )
                 if shipping.get("_blocked_status") in {403, 429}:
                     print(f"[FALLBACK][{host}] Navegador bloqueado; demais paginas ficam para outra extracao")
                     continue

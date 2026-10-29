@@ -23,6 +23,10 @@ def _request_slot(host):
 
 
 STORE_HOSTS = {
+    "electrolux": "electrolux.com.br",
+    "midea": "midea.com.br",
+    "consul": "consul.com.br",
+    "brastemp": "brastemp.com.br",
     "amazon": "amazon.com.br",
     "mercado_livre": "mercadolivre.com.br",
     "magalu": "magazineluiza.com.br",
@@ -37,6 +41,7 @@ STORE_HOSTS = {
 }
 
 SEARCH_LABELS = {
+    "electrolux": "Electrolux", "midea": "Midea", "consul": "Consul", "brastemp": "Brastemp",
     "leroy_merlin": "Leroy Merlin",
     "shopee": "Shopee",
     "dufrio": "Dufrio",
@@ -56,6 +61,10 @@ def search_url(store, term):
     if store == "magalu":
         return f"https://www.magazineluiza.com.br/busca/{quote(term)}/"
     search_templates = {
+        "electrolux": "https://loja.electrolux.com.br/{term}?_q={term}&map=ft",
+        "midea": "https://www.midea.com.br/s?q={term}",
+        "consul": "https://www.consul.com.br/s?q={term}",
+        "brastemp": "https://www.brastemp.com.br/s?q={term}",
         "leroy_merlin": "https://www.leroymerlin.com.br/busca?q={term}",
         "shopee": "https://shopee.com.br/search?keyword={term}",
         "dufrio": "https://www.dufrio.com.br/catalogsearch/result/?q={term}",
@@ -169,6 +178,18 @@ def _fetch_html(url, timeout):
 
 
 def fetch_search_page(store, url, timeout=15, diagnostics=None, use_browser=False):
+    if store in {'electrolux', 'midea', 'consul', 'brastemp'} and not use_browser:
+        from services.manufacturer_pages import sitemap_candidates
+        query = parse_qs(urlparse(url).query)
+        term = (query.get('q') or query.get('_q') or [''])[0]
+        try:
+            sitemap_items = sitemap_candidates(store, term, timeout) if term else []
+            if sitemap_items:
+                if diagnostics is not None:
+                    diagnostics.update(status='OK', reason='URLs do sitemap publico; produto sujeito a confirmacao na PDP')
+                return sitemap_items, None, True
+        except Exception:
+            pass  # Keep HTML/browser/indexed discovery available on sitemap failure.
     if diagnostics is None and not use_browser:
         fetched = _fetch_html(url, timeout)
     else:
@@ -224,6 +245,8 @@ def fetch_search_page(store, url, timeout=15, diagnostics=None, use_browser=Fals
         identifier = re.sub(r"[^a-z0-9]", "", search_term.lower())
         is_identifier_search = bool(re.fullmatch(r"[a-z]*\d{5,}", identifier))
         selectors = {
+            "electrolux": "a[href*='/p']", "midea": "a[href*='/p']",
+            "consul": "a[href*='/p']", "brastemp": "a[href*='/p']",
             "leroy_merlin": ".product-card a[href], a[href*='/produto/']",
             "shopee": "a[href*='-i.'], a[href*='/product/']",
             "dufrio": "li.product a[href], .product-item a[href]",
@@ -236,6 +259,8 @@ def fetch_search_page(store, url, timeout=15, diagnostics=None, use_browser=Fals
         listing_soup = _decoded_template_soup(soup) if store == "refrigeracao_mota" else soup
         for link in listing_soup.select(selectors[store]):
             product_url = _same_store_url(final_url, link.get("href"), host)
+            if store in {'electrolux', 'midea', 'consul', 'brastemp'} and (not product_url or not urlparse(product_url).path.rstrip('/').endswith('/p')):
+                continue
             title = link.get_text(" ", strip=True) or link.get("title") or ""
             if store == "refrigeracao_mota":
                 card = link.find_parent("li", class_="product")

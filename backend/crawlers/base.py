@@ -103,6 +103,11 @@ def parse_product_response(response, source, identity, profile, postal_code=None
     )
     nodes = _jsonld_nodes(response)
     product, structured_match = select_product(nodes, identity)
+    from services.manufacturer_pages import selected_product
+    hydrated = selected_product(response, source, identity, store_label)
+    if hydrated:
+        product = hydrated
+        structured_match = resolve_candidate(identity, hydrated)
     offers = product_offers(product, nodes)
     if source.store == 'magalu':
         from services.magalu_public import embedded_seller_offers
@@ -178,6 +183,12 @@ def parse_product_response(response, source, identity, profile, postal_code=None
             continue
         seller = explicit_seller or page_seller or source.seller or store_label
         offer_url = urljoin(response.url, str(offer.get("url") or response.url))
+        if source.store == 'electrolux' and offer.get('sku'):
+            from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+            parts = urlsplit(offer_url)
+            params = dict(parse_qsl(parts.query))
+            params['skuId'] = str(offer['sku'])
+            offer_url = urlunsplit((*parts[:3], urlencode(params), ''))
         if urlparse(offer_url).hostname != urlparse(response.url).hostname:
             continue
         key = (offer_url, seller)
@@ -201,11 +212,16 @@ def parse_product_response(response, source, identity, profile, postal_code=None
             })
         item.update({key: offer[key] for key in ('cash_price', 'installment_price', 'payment_difference')
                      if offer.get(key) is not None})
+        if len(offers) <= 1:
+            from services.fulfillment import fulfillment_details
+            item.update(fulfillment_details(response.text, store_label, seller))
         items.append(item)
     if not items:
         if page_availability == "out_of_stock" or offers and all(_availability(offer.get("availability")) == "out_of_stock" for offer in offers):
             return {"status": "OUT_OF_STOCK", "reason": "Produto explicitamente sem estoque e sem preco atual", "match": match}
         return {"status": "PARSER_ERROR", "reason": "PDP sem preco de oferta individual", "match": match}
+    if len(items) == 1 and len(response.text) <= 4_000_000:
+        items[0]['_page_context'] = {'offer_url': items[0]['url'], 'page_url': response.url, 'html': response.text}
     return {"status": "OK", "item": items[0], "items": items, "match": match}
 
 

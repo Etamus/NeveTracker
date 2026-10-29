@@ -5,7 +5,19 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist', 'backend/.venv']),
+  // Browser profiles and installed tools contain third-party JavaScript.
+  // They are runtime data, not application source files.
+  globalIgnores([
+    'dist/**',
+    '**/.venv/**',
+    '.tools/**',
+    '.logs/**',
+    '.artifacts/**',
+    'backend/.scrapy-cache/**',
+    'playwright-report/**',
+    'test-results/**',
+    'blob-report/**',
+  ]),
   {
     files: ['**/*.{js,jsx}'],
     extends: [

@@ -205,7 +205,7 @@ def _page_seller(soup):
     return None
 
 
-def parse_product_html(html, url, source, identity, postal_code=None):
+def _parse_product_html(html, url, source, identity, postal_code=None):
     from scrapy.http import HtmlResponse
     from crawlers.base import parse_product_response
     from crawlers.profiles import STORE_PROFILES
@@ -327,6 +327,15 @@ def parse_product_html(html, url, source, identity, postal_code=None):
             'match_confidence': match.confidence, 'match_method': match.method,
             'discovery_source': 'mercado_livre_html'}
     return {'status': 'OK', 'item': item, 'items': [item], 'match': match}
+
+
+def parse_product_html(html, url, source, identity, postal_code=None):
+    result = _parse_product_html(html, url, source, identity, postal_code)
+    if len(result.get('items', [])) == 1:
+        from services.fulfillment import fulfillment_details
+        item = result['items'][0]
+        item.update(fulfillment_details(html, 'Mercado Livre', item.get('seller') or item.get('store')))
+    return result
 
 
 def collect_public_product(source, identity, postal_code=None, timeout=15, use_browser=False):

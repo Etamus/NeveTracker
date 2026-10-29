@@ -7,6 +7,7 @@ from datetime import date
 from urllib.parse import urljoin, urlparse
 
 import extruct
+from services.shipping_selection import shipping_sort_key
 from bs4 import BeautifulSoup
 
 from services.product_resolver import normalize_text, resolve_candidate
@@ -355,9 +356,5 @@ def shipping_details(offer, postal_code=None):
         }
         if any(option[field] is not None for field in ("shipping_cost", "delivery_min_days", "delivery_max_days")):
             options.append(option)
-    selected = min(options, key=lambda item: (
-        item["shipping_cost"] is None,
-        item["shipping_cost"] if item["shipping_cost"] is not None else math.inf,
-        item["delivery_max_days"] if item["delivery_max_days"] is not None else math.inf,
-    ), default={})
+    selected = min(options, key=lambda item: shipping_sort_key(item['shipping_cost'], item['delivery_max_days']), default={})
     return {key: value for key, value in selected.items() if value is not None}

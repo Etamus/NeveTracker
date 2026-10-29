@@ -9,6 +9,7 @@ from database import Base, SessionLocal, engine
 from models.product import KnownSku
 from routes.auth import auth_router
 from routes.integrations import integration_router
+from routes.lead_time import lead_time_router
 from routes.products import process_extraction_queue_item, product_router
 from services.auth_service import ensure_owner_user
 from services.extraction_queue import (
@@ -17,7 +18,7 @@ from services.extraction_queue import (
 )
 from services.extraction_scheduler import start_extraction_scheduler
 from services.scraper_service import KNOWN_SKUS
-from services.sku_metadata_seed import seed_sku_business_metadata
+from services.sku_metadata_seed import RETIRED_AUTO_SEED_SKUS, seed_sku_business_metadata
 
 Base.metadata.create_all(bind=engine)
 
@@ -66,6 +67,9 @@ def _ensure_sqlite_columns():
             "handling_max_days": "INTEGER",
             "destination_zip": "VARCHAR",
             "availability": "VARCHAR",
+            "fulfillment_type": "VARCHAR",
+            "fulfilled_by": "VARCHAR",
+            "fulfillment_evidence": "VARCHAR",
             "logistics_source": "VARCHAR",
             "logistics_captured_at": "DATETIME",
             "is_cached": "BOOLEAN NOT NULL DEFAULT 0",
@@ -124,6 +128,7 @@ def _ensure_sqlite_columns():
             "days": "VARCHAR NOT NULL DEFAULT '1'",
             "repeat_every_hours": "INTEGER NOT NULL DEFAULT 0",
             "force_refresh": "BOOLEAN NOT NULL DEFAULT 1",
+            "only_stale": "BOOLEAN NOT NULL DEFAULT 0",
             "last_run_key": "VARCHAR",
             "last_run": "DATETIME",
         }
@@ -231,7 +236,7 @@ def _seed_known_skus():
                     re.findall(r"\bW\d{6,}\b|\b\d{8,}\b", (value or "").upper())
                 )
 
-        for sku in sorted(discovered - existing):
+        for sku in sorted(discovered - existing - RETIRED_AUTO_SEED_SKUS):
             connection.execute(KnownSku.__table__.insert().values(sku=sku))
 
 
@@ -261,6 +266,7 @@ app.add_middleware(
 )
 
 app.include_router(product_router, prefix="/products", tags=["Products"])
+app.include_router(lead_time_router, prefix='/products/lead-time', tags=['Lead Time'])
 app.include_router(auth_router, prefix="/auth", tags=["Auth"])
 app.include_router(
     integration_router,
@@ -274,6 +280,8 @@ def start_background_services():
     configure_extraction_processor(process_extraction_queue_item)
     start_extraction_queue()
     start_extraction_scheduler()
+    from services.lead_time_service import start_lead_time_worker
+    start_lead_time_worker()
 
 
 @app.get("/")

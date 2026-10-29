@@ -33,6 +33,9 @@ export interface Product {
   handling_max_days?: number | null;
   destination_zip?: string | null;
   availability?: string | null;
+  fulfillment_type?: "2P" | "3P" | null;
+  fulfilled_by?: string | null;
+  fulfillment_evidence?: string | null;
   logistics_source?: string | null;
   logistics_captured_at?: string | null;
   is_cached?: boolean;

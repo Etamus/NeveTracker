@@ -6,6 +6,10 @@ const PREVIOUS_INTERFACE_PREFERENCES_KEYS = [
 ];
 
 export const STORE_OPTIONS = [
+  { label: "Electrolux", aliases: ["electrolux", "eletrolux"] },
+  { label: "Midea", aliases: ["midea"] },
+  { label: "Consul", aliases: ["consul"] },
+  { label: "Brastemp", aliases: ["brastemp"] },
   { label: "Mercado Livre", aliases: ["mercado livre", "meli", "-ml", "mlb"] },
   { label: "Magazine Luiza", aliases: ["magazine luiza", "magalu"] },
   { label: "Amazon Brasil", aliases: ["amazon brasil", "amazon"] },
@@ -57,9 +61,14 @@ export const getInterfacePreferences = (): InterfacePreferences => {
     if (!storedPreferences) return defaultInterfacePreferences;
 
     const parsed = JSON.parse(storedPreferences) as Partial<InterfacePreferences>;
-    const defaultStores = Array.isArray(parsed.defaultStores)
+    let defaultStores = Array.isArray(parsed.defaultStores)
       ? parsed.defaultStores.filter((store) => validStores.has(store))
       : defaultInterfacePreferences.defaultStores;
+    const manufacturerStores = new Set(["Electrolux", "Midea", "Consul", "Brastemp"]);
+    const previousStores = STORE_OPTIONS.filter((store) => !manufacturerStores.has(store.label));
+    if (defaultStores.length === previousStores.length && previousStores.every((store) => defaultStores.includes(store.label))) {
+      defaultStores = defaultInterfacePreferences.defaultStores;
+    }
 
     const currency = parsed.currency && validCurrencies.has(parsed.currency) ? parsed.currency : "BRL";
     const regionFormat = regionFormatOptions.find((option) => option.value === currency)!;

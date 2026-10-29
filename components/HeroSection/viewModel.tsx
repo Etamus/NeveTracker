@@ -10,6 +10,9 @@ import { getInterfacePreferences } from "../../src/preferences";
 export const getApiBaseUrl = () => {
   const configuredApiUrl =
     import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+  if (configuredApiUrl.startsWith("/") && !configuredApiUrl.startsWith("//")) {
+    return configuredApiUrl.replace(/\/+$/, "");
+  }
   const apiUrlWithProtocol = /^https?:\/\//i.test(configuredApiUrl)
     ? configuredApiUrl
     : `http://${configuredApiUrl}`;

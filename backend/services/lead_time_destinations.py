@@ -1,0 +1,32 @@
+"""Capital reference destinations; a quote never represents the entire state."""
+DESTINATIONS = [
+    ('AC', 'Acre', 'Rio Branco', '69900060', 'Norte'),
+    ('AL', 'Alagoas', 'Maceió', '57020000', 'Nordeste'),
+    ('AP', 'Amapá', 'Macapá', '68900073', 'Norte'),
+    ('AM', 'Amazonas', 'Manaus', '69005040', 'Norte'),
+    ('BA', 'Bahia', 'Salvador', '40026032', 'Nordeste'),
+    ('CE', 'Ceará', 'Fortaleza', '60025060', 'Nordeste'),
+    ('DF', 'Distrito Federal', 'Brasília', '73083570', 'Centro-Oeste'),
+    ('ES', 'Espírito Santo', 'Vitória', '29010001', 'Sudeste'),
+    ('GO', 'Goiás', 'Goiânia', '74003010', 'Centro-Oeste'),
+    ('MA', 'Maranhão', 'São Luís', '65010000', 'Nordeste'),
+    ('MT', 'Mato Grosso', 'Cuiabá', '78005000', 'Centro-Oeste'),
+    ('MS', 'Mato Grosso do Sul', 'Campo Grande', '79002000', 'Centro-Oeste'),
+    ('MG', 'Minas Gerais', 'Belo Horizonte', '30111000', 'Sudeste'),
+    ('PA', 'Pará', 'Belém', '66010000', 'Norte'),
+    ('PB', 'Paraíba', 'João Pessoa', '58010000', 'Nordeste'),
+    ('PR', 'Paraná', 'Curitiba', '80020000', 'Sul'),
+    ('PE', 'Pernambuco', 'Recife', '50010000', 'Nordeste'),
+    ('PI', 'Piauí', 'Teresina', '64000040', 'Nordeste'),
+    ('RJ', 'Rio de Janeiro', 'Rio de Janeiro', '20040020', 'Sudeste'),
+    ('RN', 'Rio Grande do Norte', 'Natal', '59025000', 'Nordeste'),
+    ('RS', 'Rio Grande do Sul', 'Porto Alegre', '90010000', 'Sul'),
+    ('RO', 'Rondônia', 'Porto Velho', '76801000', 'Norte'),
+    ('RR', 'Roraima', 'Boa Vista', '69301000', 'Norte'),
+    ('SC', 'Santa Catarina', 'Florianópolis', '88010000', 'Sul'),
+    ('SP', 'São Paulo', 'São Paulo', '01001000', 'Sudeste'),
+    ('SE', 'Sergipe', 'Aracaju', '49010000', 'Nordeste'),
+    ('TO', 'Tocantins', 'Palmas', '77001006', 'Norte'),
+]
+CAPITALS = [dict(zip(('uf', 'state', 'capital', 'postal_code', 'region'), row)) for row in DESTINATIONS]
+BY_UF = {destination['uf']: destination for destination in CAPITALS}

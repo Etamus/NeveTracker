@@ -35,6 +35,7 @@ import {
   ShieldCheck,
   SquareCheckBig,
   Trash2,
+  Truck,
   Upload,
   UserPlus,
   UserRound,
@@ -42,6 +43,9 @@ import {
   X,
 } from "lucide-react";
 import SlidingTabs from "../SlidingTabs";
+import { StyledSelect } from "../StyledSelect";
+import LeadTimeView from '../LeadTimeView';
+import FreightMap from "../FreightMap";
 import type {
   ActiveExtractionJobResponse,
   AuthLoginResponse,
@@ -94,10 +98,11 @@ const readMigratedStorageValue = (key: string, previousKeys: string[]) => {
 };
 
 const navigation = [
-  { label: "Ofertas", description: "Comparação de preços", icon: PackageSearch },
-  { label: "Catálogo", description: "Visualização em grade", icon: Grid2X2 },
-  { label: "Analytics", description: "Leitura de mercado", icon: BarChart3 },
-  { label: "Database", description: "Análise de extrações", icon: FileSpreadsheet },
+  { tab: 0, label: "Ofertas", description: "Comparação de preços", icon: PackageSearch },
+  { tab: 1, label: "Catálogo", description: "Visualização em grade", icon: Grid2X2 },
+  { tab: 2, label: "Analytics", description: "Leitura de mercado", icon: BarChart3 },
+  { tab: 4, label: "Lead Time", description: "Prazos por destino", icon: Truck },
+  { tab: 3, label: "Database", description: "Análise de extrações", icon: FileSpreadsheet },
 ];
 
 type ThemeMode = "light" | "dark";
@@ -154,6 +159,7 @@ const extractionJobTitle = (job: ExtractionJob) => {
 
 type ScheduledExtractionSettings = {
   enabled: boolean;
+  onlyStale: boolean;
   time: string;
   endTime: string;
   days: number[];
@@ -210,6 +216,7 @@ const getScheduleSummary = (settings: ScheduledExtractionSettings) => {
 
 const defaultScheduleSettings: ScheduledExtractionSettings = {
   enabled: false,
+  onlyStale: false,
   time: "09:00",
   endTime: "18:00",
   days: [1],
@@ -246,6 +253,7 @@ const getInitialScheduleSettings = (): ScheduledExtractionSettings => {
       ...defaultScheduleSettings,
       ...parsed,
       enabled: Boolean(parsed.enabled),
+      onlyStale: Boolean(parsed.onlyStale),
       time: typeof parsed.time === "string" && /^\d{2}:\d{2}$/.test(parsed.time) ? parsed.time : "09:00",
       endTime: typeof parsed.endTime === "string" && /^\d{2}:\d{2}$/.test(parsed.endTime) ? parsed.endTime : "18:00",
       days: days.length ? days : defaultScheduleSettings.days,
@@ -317,100 +325,6 @@ const apiErrorMessage = (data: unknown, fallback: string) => {
   return fallback;
 };
 
-type StyledSelectOption<T extends string | number> = {
-  value: T;
-  label: string;
-};
-
-type StyledSelectProps<T extends string | number> = {
-  value: T;
-  options: StyledSelectOption<T>[];
-  onChange: (value: T) => void;
-  ariaLabel: string;
-  disabled?: boolean;
-};
-
-const StyledSelect = <T extends string | number,>({
-  value,
-  options,
-  onChange,
-  ariaLabel,
-  disabled = false,
-}: StyledSelectProps<T>) => {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
-  const selectedOption = options[selectedIndex];
-
-  useEffect(() => {
-    if (!open) return;
-    const closeOutside = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("pointerdown", closeOutside);
-    return () => document.removeEventListener("pointerdown", closeOutside);
-  }, [open]);
-
-  const selectAt = (index: number) => {
-    const option = options[index];
-    if (!option) return;
-    onChange(option.value);
-  };
-
-  return (
-    <div ref={rootRef} className={open ? "styled-select styled-select--open" : "styled-select"}>
-      <button
-        type="button"
-        className="styled-select__trigger"
-        aria-label={ariaLabel}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        disabled={disabled}
-        onClick={() => setOpen((current) => !current)}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            setOpen(false);
-            return;
-          }
-          if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-          event.preventDefault();
-          setOpen(true);
-          if (event.key === "Home") return selectAt(0);
-          if (event.key === "End") return selectAt(options.length - 1);
-          const direction = event.key === "ArrowDown" ? 1 : -1;
-          selectAt((selectedIndex + direction + options.length) % options.length);
-        }}
-      >
-        <span>{selectedOption?.label || "Selecione"}</span>
-        <ChevronDown size={15} aria-hidden="true" />
-      </button>
-      {open && (
-        <div className="styled-select__menu" role="listbox" aria-label={ariaLabel}>
-          {options.map((option) => {
-            const selected = option.value === value;
-            return (
-              <button
-                key={String(option.value)}
-                type="button"
-                role="option"
-                aria-selected={selected}
-                className={selected ? "styled-select__option styled-select__option--selected" : "styled-select__option"}
-                onClick={() => {
-                  onChange(option.value);
-                  setOpen(false);
-                }}
-              >
-                <span>{option.label}</span>
-                {selected && <CheckCircle2 size={14} aria-hidden="true" />}
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-};
-
 export const HeroSection = () => {
   const [activeTab, setActiveTab] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -456,6 +370,7 @@ export const HeroSection = () => {
   const [extractionTab, setExtractionTab] = useState<ExtractionTab>("extract");
   const [scheduleSettings, setScheduleSettings] = useState<ScheduledExtractionSettings>(getInitialScheduleSettings);
   const [scheduleSaving, setScheduleSaving] = useState(false);
+  const [scheduleError, setScheduleError] = useState("");
   const [interfacePreferences, setInterfacePreferences] = useState<InterfacePreferences>(getInterfacePreferences);
   const [integrationProviders, setIntegrationProviders] = useState<IntegrationProviderSettings[]>([]);
   const [activeIntegrationProvider, setActiveIntegrationProvider] = useState<string | null>(null);
@@ -578,7 +493,8 @@ export const HeroSection = () => {
   const submitSearch = (event?: FormEvent) => {
     event?.preventDefault();
     if (loading || !productName.trim()) return;
-    setActiveTab(0);
+    if (activeTab === 4) return;
+    if (activeTab !== 2) setActiveTab(0);
     setSidebarOpen(false);
     void handleSearch(
       selectedSearchSkus,
@@ -902,6 +818,7 @@ export const HeroSection = () => {
         setScheduleSettings((currentSettings) => ({
           ...currentSettings,
           enabled: Boolean(data.enabled),
+          onlyStale: Boolean(data.only_stale),
           time: typeof data.start_time === "string" ? data.start_time : currentSettings.time,
           endTime: typeof data.end_time === "string" ? data.end_time : currentSettings.endTime,
           days: Array.isArray(data.days) && data.days.length ? data.days : currentSettings.days,
@@ -1206,6 +1123,7 @@ export const HeroSection = () => {
   const saveSchedule = async () => {
     if (scheduleSaving) return;
     setScheduleSaving(true);
+    setScheduleError("");
     try {
       const response = await fetch(`${getApiBaseUrl()}/products/schedule`, {
         method: "PUT",
@@ -1216,6 +1134,7 @@ export const HeroSection = () => {
           end_time: scheduleSettings.endTime,
           days: scheduleSettings.days,
           repeat_every_hours: scheduleSettings.repeatEveryHours,
+          only_stale: scheduleSettings.onlyStale,
           force_refresh: true,
           postal_code: interfacePreferences.logisticsPostalCode.length === 8
             ? interfacePreferences.logisticsPostalCode
@@ -1225,6 +1144,7 @@ export const HeroSection = () => {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
     } catch (error) {
       console.error("Erro ao salvar programação:", error);
+      setScheduleError("Não foi possível salvar o agendamento. Tente novamente.");
     } finally {
       setScheduleSaving(false);
     }
@@ -1588,7 +1508,11 @@ export const HeroSection = () => {
     setSelectedSearchSkus(draftSearchSkus);
     setProductName(label);
     setSkuSelectorOpen(false);
-    setActiveTab(0);
+    if (activeTab === 4) {
+      setSidebarOpen(false);
+      return;
+    }
+    if (activeTab !== 2) setActiveTab(0);
     setSidebarOpen(false);
     void handleSearch(draftSearchSkus, label);
   };
@@ -1699,15 +1623,15 @@ export const HeroSection = () => {
         <div className="flex min-h-0 flex-1 flex-col px-3 py-5">
           <p className="sidebar-label">Workspace</p>
           <nav className="mt-2 space-y-1" aria-label="Navegação principal">
-            {navigation.map((item, index) => {
+            {navigation.map((item) => {
               const Icon = item.icon;
-              const active = activeTab === index;
+              const active = activeTab === item.tab;
 
               return (
                 <button
                   key={item.label}
                   type="button"
-                  onClick={() => switchTab(index)}
+                  onClick={() => switchTab(item.tab)}
                   className={`sidebar-item ${active ? "sidebar-item--active" : ""}`}
                 >
                   <span className="sidebar-item__icon">
@@ -1812,7 +1736,7 @@ export const HeroSection = () => {
             <div className="hidden items-center gap-2 text-xs md:flex">
               <span className="font-medium text-[var(--muted)]">Workspace</span>
               <span className="text-[var(--border-strong)]">/</span>
-              <span className="font-semibold text-[var(--foreground)]">{navigation[activeTab].label}</span>
+              <span className="font-semibold text-[var(--foreground)]">{navigation.find((item) => item.tab === activeTab)?.label}</span>
             </div>
           </div>
 
@@ -1858,15 +1782,16 @@ export const HeroSection = () => {
           <div className="header-actions" aria-hidden="true" />
         </header>
 
-        <main className={activeTab === 1 || activeTab === 2 || activeTab === 3 ? "app-content app-content--fixed" : "app-content"}>
-          <SlidingTabs
+        <main className={activeTab >= 1 ? "app-content app-content--fixed" : "app-content"}>
+          {activeTab === 4 ? <LeadTimeView query={productName} selectedSkus={selectedSearchSkus} canRefresh={canUseExtractions} headers={authorizedHeaders} /> : <SlidingTabs
             activeTab={activeTab}
             onTabChange={setActiveTab}
             loading={loading}
             products={products}
             comparisonRows={comparisonRows}
             lastQuery={lastQuery}
-          />
+            analyticsMap={(stores) => <FreightMap query={productName} selectedSkus={selectedSearchSkus} sources={stores} canRefresh={canUseExtractions} headers={authorizedHeaders} />}
+          />}
         </main>
       </section>
 
@@ -3091,7 +3016,16 @@ export const HeroSection = () => {
                     </label>
                   </div>
 
+                  <div className="schedule-card__head schedule-stale-setting">
+                    <div><strong>Consultar apenas desatualizados</strong><p>Atualiza SKUs sem coleta confirmada nas últimas 8 horas.</p></div>
+                    <label className="schedule-toggle">
+                      <input type="checkbox" aria-label="Consultar apenas desatualizados" checked={scheduleSettings.onlyStale} onChange={(event) => setScheduleSettings((current) => ({ ...current, onlyStale: event.target.checked }))} />
+                      <span className="schedule-toggle__track" aria-hidden="true"><span className="schedule-toggle__thumb" /></span>
+                    </label>
+                  </div>
+
                 </div>
+                {scheduleError && <p role="alert" className="auth-error">{scheduleError}</p>}
               </div>
             ) : extractionTab === "database" ? (
               <div className="extraction-panel" role="tabpanel">
