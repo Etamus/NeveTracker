@@ -17,15 +17,16 @@ def source_identifiers(item):
     filtered_id = re.search(r"item_id:(MLB\d+)", (query.get("pdp_filters") or [""])[0], re.I)
     ml_value = (query.get("wid") or query.get("item_id") or [filtered_id.group(1) if filtered_id else parsed.path if "/p/" not in parsed.path else ""])[0]
     ml_match = re.search(r"MLB-?(\d+)", ml_value, re.I)
-    shopee_match = re.search(r"/product/(\d+)/(\d+)", parsed.path)
+    from services.shopee_public import item_ids
+    shopee_shop, shopee_item = item_ids(url)
     return {
         "external_product_id": item.get("external_product_id") or item.get("product_id"),
         "asin": item.get("asin") or (asin_match.group(1).upper() if asin_match else None),
         "item_id": item.get("item_id") or (
-            f"MLB{ml_match.group(1)}" if ml_match else shopee_match.group(2) if shopee_match else None
+            f"MLB{ml_match.group(1)}" if ml_match else shopee_item
         ),
         "shop_id": item.get("shop_id") or (
-            shopee_match.group(1) if shopee_match else (query.get("shop_id") or [None])[0]
+            shopee_shop or (query.get("shop_id") or [None])[0]
         ),
     }
 

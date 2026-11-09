@@ -1145,6 +1145,9 @@ def _save_result(item, db: Session):
         if not observed_at or (existing_price and existing_price.timestamp and existing_price.timestamp >= observed_at):
             return 0
 
+    from services.price_observations import record_observation
+    observation = record_observation(db, item, observed_at)
+
     if not existing_price:
         new_product = Product(
             name=item["name"],
@@ -1166,6 +1169,9 @@ def _save_result(item, db: Session):
             **_price_detail_values(item),
         )
         db.add(new_price)
+        db.flush()
+        if observation is not None:
+            observation.legacy_price_id = new_price.id
         return 1
 
     product = db.query(Product).filter(Product.id == existing_price.product_id).first()
@@ -1193,10 +1199,18 @@ def _save_result(item, db: Session):
             **_price_detail_values(item),
         )
         db.add(new_price)
+        db.flush()
+        if observation is not None:
+            observation.legacy_price_id = new_price.id
         return 1
 
     for field, value in _price_detail_values(item).items():
         setattr(existing_price, field, value)
+    if observation is not None:
+        from models.product import OfferObservation
+        linked = db.query(OfferObservation.id).filter_by(legacy_price_id=existing_price.id).first()
+        if not linked:
+            observation.legacy_price_id = existing_price.id
     existing_price.timestamp = observed_at
     return 0
 

@@ -10,6 +10,7 @@ from models.product import KnownSku
 from routes.auth import auth_router
 from routes.integrations import integration_router
 from routes.lead_time import lead_time_router
+from routes.analysis import analysis_router
 from routes.products import process_extraction_queue_item, product_router
 from services.auth_service import ensure_owner_user
 from services.extraction_queue import (
@@ -242,6 +243,10 @@ def _seed_known_skus():
 
 _seed_known_skus()
 
+from services.price_observations import backfill_observations
+with SessionLocal() as history_db:
+    backfill_observations(history_db)
+
 with SessionLocal() as metadata_db:
     seed_sku_business_metadata(metadata_db)
 
@@ -267,6 +272,7 @@ app.add_middleware(
 
 app.include_router(product_router, prefix="/products", tags=["Products"])
 app.include_router(lead_time_router, prefix='/products/lead-time', tags=['Lead Time'])
+app.include_router(analysis_router, prefix='/analysis', tags=['Analysis'])
 app.include_router(auth_router, prefix="/auth", tags=["Auth"])
 app.include_router(
     integration_router,

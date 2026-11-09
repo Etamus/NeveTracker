@@ -522,6 +522,9 @@ def delete_local_sku(
     db.query(ScrapeCursor).filter(ScrapeCursor.sku == normalized_sku).delete(
         synchronize_session=False
     )
+    from models.product import OfferObservation, LeadTimeQuote
+    db.query(OfferObservation).filter_by(sku=normalized_sku).delete(synchronize_session=False)
+    db.query(LeadTimeQuote).filter_by(sku=normalized_sku).delete(synchronize_session=False)
     if product_ids:
         deleted_prices = (
             db.query(PriceHistory)
@@ -1613,6 +1616,12 @@ def create_product(product_data: ProductCreate, db: Session = Depends(get_db)):
     )
 
     db.add(new_price)
+    db.flush()
+    from services.price_observations import record_observation
+    record_observation(db, {
+        **product_data.initial_price.model_dump(), 'sku': new_product.sku,
+        'name': new_product.name, 'brand': new_product.brand,
+    }, new_price.timestamp, origin='manual', legacy_price_id=new_price.id)
     db.commit()
 
     return {"message": "Produto e preço inicial cadastrados!", "id": new_product.id}

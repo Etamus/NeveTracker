@@ -46,6 +46,7 @@ import SlidingTabs from "../SlidingTabs";
 import { StyledSelect } from "../StyledSelect";
 import LeadTimeView from '../LeadTimeView';
 import FreightMap from "../FreightMap";
+import AnalysisReports from "../AnalysisReports";
 import type {
   ActiveExtractionJobResponse,
   AuthLoginResponse,
@@ -57,7 +58,6 @@ import type {
   IntegrationSettingsResponse,
   ProductSourceItem,
   ProductSourceResponse,
-  SkuBatchResult,
   SkuImportResponse,
   SkuStatusItem,
   SkuStatusResponse,
@@ -398,7 +398,6 @@ export const HeroSection = () => {
   const [extractionProgress, setExtractionProgress] = useState("");
   const [activeExtractionJob, setActiveExtractionJob] = useState<ExtractionJob | null>(null);
   const [extractionConnectionLost, setExtractionConnectionLost] = useState(false);
-  const [extractionResults, setExtractionResults] = useState<SkuBatchResult[]>([]);
   const [extractionError, setExtractionError] = useState("");
   const [skuImporting, setSkuImporting] = useState(false);
   const [skuImportSummary, setSkuImportSummary] = useState<SkuImportResponse | null>(null);
@@ -804,7 +803,6 @@ export const HeroSection = () => {
     setAccountOpen(false);
     setSidebarOpen(false);
     setExtractionError("");
-    if (!activeExtractionJob) setExtractionResults([]);
     setSkuImportSummary(null);
     setSkuDatabaseFilter("");
     setExtractionTab("extract");
@@ -1167,7 +1165,6 @@ export const HeroSection = () => {
     setExtractionRunning(true);
     setExtractionProgress(`0 de ${skus.length}`);
     setExtractionError("");
-    setExtractionResults([]);
 
     try {
       const response = await fetch(`${getApiBaseUrl()}/products/extraction-jobs`, {
@@ -1240,7 +1237,6 @@ export const HeroSection = () => {
     setExtractionRunning(true);
     setExtractionProgress("0 de 1");
     setExtractionError("");
-    setExtractionResults([]);
     try {
       const response = await fetch(`${getApiBaseUrl()}/products/extraction-jobs`, {
         method: "POST",
@@ -1285,7 +1281,6 @@ export const HeroSection = () => {
       setSkuStatusItems((items) => items.filter((item) => item.sku !== sku));
       setSelectedSearchSkus((items) => items.filter((item) => item !== sku));
       setDraftSearchSkus((items) => items.filter((item) => item !== sku));
-      setExtractionResults((items) => items.filter((item) => item.sku !== sku));
     } catch (error) {
       setExtractionError(error instanceof Error ? error.message : "Não foi possível excluir o SKU.");
     } finally {
@@ -1301,7 +1296,6 @@ export const HeroSection = () => {
     setExtractionRunning(true);
     setExtractionProgress(`0 de ${skus.length}`);
     setExtractionError("");
-    setExtractionResults([]);
 
     try {
       const response = await fetch(`${getApiBaseUrl()}/products/extraction-jobs/database`, {
@@ -1427,13 +1421,7 @@ export const HeroSection = () => {
             setExtractionError("A extração terminou, mas os detalhes do resultado não puderam ser carregados.");
           }
           if (disposed) return;
-          const items = job.items || [];
-          const orderedItems = [
-            ...items.filter((item) => item.status === "error"),
-            ...items.filter((item) => item.status !== "error"),
-          ];
           setActiveExtractionJob(job);
-          setExtractionResults(job.kind === "single" ? [] : orderedItems.slice(0, 300));
           setExtractionRunning(false);
           setExtractionProgress("");
           setRefreshingAllSkus(false);
@@ -1791,6 +1779,7 @@ export const HeroSection = () => {
             comparisonRows={comparisonRows}
             lastQuery={lastQuery}
             analyticsMap={(stores) => <FreightMap query={productName} selectedSkus={selectedSearchSkus} sources={stores} canRefresh={canUseExtractions} headers={authorizedHeaders} />}
+            analyticsReport={(mode, stores, brands) => <AnalysisReports mode={mode} query={productName} selectedSkus={selectedSearchSkus} sources={stores} brands={brands} />}
           />}
         </main>
       </section>
@@ -2667,7 +2656,7 @@ export const HeroSection = () => {
                                   ? <LoaderCircle size={15} className="animate-spin" /> : <ExternalLink size={15} />}
                                 Validar navegador
                               </button>
-                              {mercadoBrowserMessage && <p role="status">{mercadoBrowserMessage}</p>}
+                              {mercadoBrowserMessage && <p role="status" className="integration-browser-status">{mercadoBrowserMessage}</p>}
                             </section>
                           )}
                           <section className="integration-config-section">
@@ -2899,20 +2888,7 @@ export const HeroSection = () => {
 
                 {extractionError && <p className="auth-error">{extractionError}</p>}
 
-                {extractionResults.length > 0 && (
-                  <div className="extraction-results">
-                    {extractionResults.map((item) => (
-                      <div key={item.sku} className="extraction-result-row">
-                        <span className={`status-dot status-dot--${item.status}`} />
-                        <div className="min-w-0 flex-1">
-                          <strong>{item.sku}</strong>
-                          <small>{item.message}</small>
-                        </div>
-                        <span>{item.stores_count} lojas</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
+
               </div>
             ) : extractionTab === "schedule" ? (
               <div className="extraction-panel" role="tabpanel">

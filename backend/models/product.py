@@ -98,6 +98,35 @@ class LeadTimeQuote(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class LeadTimeDestination(Base):
+    __tablename__ = 'lead_time_destinations'
+    postal_code = Column(String(8), primary_key=True)
+    uf = Column(String(2), nullable=False)
+    city = Column(String, nullable=False)
+    position = Column(Integer, nullable=False, default=0)
+
+
+class OfferObservation(Base):
+    """Append-only observations, independent from mutable latest-price rows."""
+    __tablename__ = 'offer_observations'
+    id = Column(Integer, primary_key=True)
+    legacy_price_id = Column(Integer, unique=True, nullable=True)
+    offer_key = Column(String(64), nullable=False, index=True)
+    sku = Column(String, nullable=False, index=True)
+    source = Column(String, nullable=False, index=True)
+    seller = Column(String, nullable=False, index=True)
+    brand = Column(String, nullable=True, index=True)
+    name = Column(String, nullable=True)
+    url = Column(Text, nullable=False)
+    price = Column(Float, nullable=True)
+    availability = Column(String, nullable=True)
+    postal_code = Column(String(8), nullable=True)
+    observed_at = Column(DateTime, nullable=False, index=True)
+    changed = Column(Boolean, nullable=False, default=False)
+    origin = Column(String, nullable=False, default='collection')
+    snapshot_json = Column(Text, nullable=False)
+
+
 class ExtractionSchedule(Base):
     __tablename__ = "extraction_schedule"
 

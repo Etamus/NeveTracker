@@ -235,6 +235,33 @@ def _external_candidates(identity, store_key):
     return result
 
 
+def _html_and_parallel_api(db, identity, store, control, progress, include_other_sources):
+    """Overlap an explicitly enabled always-on API with public HTML discovery.
+
+    Only the calling thread accesses the SQLAlchemy session. Fallback-only
+    providers retain their conditional use and do not consume extra quota.
+    """
+    settings = get_runtime_provider_settings('mercado_livre') if store['key'] == 'mercado_livre' else {}
+    parallel = include_other_sources and settings.get('enabled') and settings.get('configured') and settings.get('usage_mode') == 'always'
+    def html():
+        try:
+            return discover_html_pages(db, identity, store, control.request_timeout_seconds, progress=progress)
+        except Exception as exc:
+            print(f"[DISCOVERY][{store['key'].upper()}] HTML_ERROR: {exc}")
+            return []
+    if not parallel:
+        return html(), None
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_direct_candidates, store, identity, control.request_timeout_seconds)
+        candidates = html()
+        try:
+            direct = future.result()
+        except Exception as exc:
+            print(f"[DISCOVERY][{store['key'].upper()}] API_ERROR: {exc}")
+            direct = []
+        return candidates, direct
+
+
 def _discover_store(
     db, identity, store, control, known_source_ids=None, retry_failed=False,
     progress=None, include_other_sources=True,
@@ -289,13 +316,7 @@ def _discover_store(
                     f"({match.confidence:.2f}, {candidate_method})"
                 )
 
-    try:
-        html_candidates = discover_html_pages(
-            db, identity, store, control.request_timeout_seconds, progress=progress,
-        )
-    except Exception as exc:
-        print(f"[DISCOVERY][{store['key'].upper()}] HTML_ERROR: {exc}")
-        html_candidates = []
+    html_candidates, parallel_direct = _html_and_parallel_api(db, identity, store, control, progress, include_other_sources)
     save_candidates(html_candidates, "html_pages")
     db.commit()
     if control.external_discovery_fallback:
@@ -309,7 +330,7 @@ def _discover_store(
         and get_runtime_provider_settings("mercado_livre")["usage_mode"] == "fallback"
         and (html_candidates or (known_source_ids and not retry_failed))
     )
-    direct_candidates = (
+    direct_candidates = parallel_direct if parallel_direct is not None else (
         [] if skip_fallback_api or not include_other_sources
         else _direct_candidates(store, identity, control.request_timeout_seconds)
     )
@@ -463,6 +484,13 @@ def _collect_sources(db, identity, sources, postal_code, control, progress=None)
                         "A abertura de mais opcoes pode exigir login no Mercado Livre."
                     )
             else:
+                candidate = result.get('candidate')
+                if store_key == 'shopee' and candidate and resolve_candidate(identity, candidate).accepted:
+                    # Public metadata can confirm identity while prices remain
+                    # redacted. Preserve discovery, not a fabricated price.
+                    source.listing_name = candidate.get('name') or source.listing_name
+                    source.shop_id = candidate.get('shop_id') or source.shop_id
+                    source.item_id = candidate.get('item_id') or source.item_id
                 if status == "OUT_OF_STOCK":
                     db.query(PriceHistory).filter(
                         PriceHistory.url == source.url, PriceHistory.store == source.seller,

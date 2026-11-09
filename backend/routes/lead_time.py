@@ -7,6 +7,7 @@ from services.auth_service import require_operator
 from services.lead_time_destinations import BY_UF
 from services.lead_time_service import get_matrix, get_shipping_map, enqueue_quotes
 from models.product import LeadTimeQuote
+from services.delivery_destinations import destinations, save_destinations
 
 lead_time_router = APIRouter()
 
@@ -16,6 +17,25 @@ class QuoteRequest(BaseModel):
     force_refresh: bool = False
     source: str | None = None
     sources: list[str] | None = Field(default=None, max_length=15)
+    postal_codes: list[str] | None = Field(default=None, max_length=200)
+
+
+class DestinationRequest(BaseModel):
+    postal_codes: list[str] = Field(default_factory=list, max_length=200)
+
+
+@lead_time_router.get('/destinations')
+def list_destinations(db: Session = Depends(get_db)):
+    chosen = destinations(db)
+    return {'custom': any(dest.get('custom') for dest in chosen), 'destinations': chosen}
+
+
+@lead_time_router.put('/destinations')
+def configure_destinations(payload: DestinationRequest, actor=Depends(require_operator), db: Session = Depends(get_db)):
+    try:
+        return save_destinations(db, payload.postal_codes)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 def normalized_sku(sku):
@@ -37,12 +57,24 @@ def shipping_map(sku: str, source: list[str] | None = Query(default=None), db: S
     return get_shipping_map(db, normalized_sku(sku), sources=source)
 
 
+@lead_time_router.get('/{sku}/export')
+def export_quotes(sku: str, region: str | None = None, db: Session = Depends(get_db)):
+    from services.analysis_workbooks import lead_time_workbook
+    from routes.analysis import excel
+    normalized = normalized_sku(sku)
+    return excel(lead_time_workbook(get_matrix(db, normalized), region), f'lead-time-{normalized}.xlsx')
+
+
 @lead_time_router.post('/{sku}/refresh')
 def refresh(sku: str, payload: QuoteRequest, actor=Depends(require_operator), db: Session = Depends(get_db)):
     states = list(dict.fromkeys(value.upper() for value in payload.states))
     if not states or any(value not in BY_UF for value in states):
         raise HTTPException(400, 'Selecione estados válidos.')
-    return enqueue_quotes(db, normalized_sku(sku), states, payload.force_refresh, source=payload.source, sources=payload.sources)
+    try:
+        return enqueue_quotes(db, normalized_sku(sku), states, payload.force_refresh, source=payload.source, sources=payload.sources,
+                              postal_codes=payload.postal_codes)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 @lead_time_router.post('/{sku}/cancel')

@@ -100,6 +100,9 @@ def render_product_page(url, timeout_seconds=15, page_handler=None, ready_identi
 
 
 def collect_product_with_playwright(source, identity, postal_code=None, timeout_seconds=15, include_shipping=False):
+    if source.store == "shopee":
+        from services.shopee_public import collect_browser
+        return collect_browser(source, identity, timeout_seconds)
     if source.store == "mercado_livre":
         from crawlers.mercado_livre_public import collect_public_product
         return collect_public_product(source, identity, postal_code, timeout_seconds, use_browser=True)

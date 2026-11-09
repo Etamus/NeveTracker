@@ -586,6 +586,7 @@ class PreciseCollectionTests(unittest.TestCase):
         shop_response.json.return_value = {"data": {"name": "LOJA OFICIAL"}}
         create_session.return_value.get.side_effect = [item_response, shop_response]
         source = self._source("shopee", "Shopee Loja 42")
+        source.url = 'https://shopee.com.br/product/42/123'
         source.item_id = "123"
         source.shop_id = "42"
         result = collect_shopee(source, self.identity)

@@ -1,94 +1,65 @@
 from __future__ import annotations
 
-from datetime import datetime
+import time
+from types import SimpleNamespace
 
 from services.http_client import create_resilient_session
-from services.product_resolver import resolve_candidate
-
+from services.shopee_public import MOBILE_HEADERS, item_ids, money, parse_payload, parse_public_html
 
 API_ROOT = "https://shopee.com.br/api/v4"
-
-
-def _price(value):
-    try:
-        result = float(value or 0)
-    except (TypeError, ValueError):
-        return None
-    return result / 100000 if result > 100000 else result or None
+_price = money
 
 
 def collect_shopee(source, identity, postal_code=None, timeout=15):
-    if not source.item_id or not source.shop_id:
-        return {"status": "PARSER_ERROR", "reason": "item_id/shop_id ausente"}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36",
-        "Referer": source.url,
-        "x-api-source": "pc",
-    }
+    shop_id, item_id = item_ids(source.url)
+    if not shop_id or not item_id:
+        return {"status": "INVALID_MATCH", "reason": "URL Shopee sem item_id/shop_id validos"}
+    for field, actual in (("shop_id", shop_id), ("item_id", item_id)):
+        stored = getattr(source, field, None)
+        if stored and str(stored) != actual:
+            return {"status": "INVALID_MATCH", "reason": "IDs da fonte divergem da URL Shopee"}
+    checked_source = SimpleNamespace(url=source.url, shop_id=shop_id, item_id=item_id, seller=getattr(source, 'seller', None))
+    deadline = time.monotonic() + max(1, timeout)
+    headers = {"User-Agent": MOBILE_HEADERS['User-Agent'], "Referer": source.url, "x-api-source": "pc"}
     session = create_resilient_session(pool_size=2)
+    result = {"status": "PARSER_ERROR", "reason": "Resposta sem dados do produto"}
     try:
-        response = session.get(
-            f"{API_ROOT}/item/get",
-            params={"itemid": source.item_id, "shopid": source.shop_id},
-            headers=headers,
-            timeout=(5, timeout),
-        )
-        if response.status_code == 404:
-            return {"status": "NOT_FOUND", "reason": "Item removido"}
-        if response.status_code != 200:
-            return {"status": "BLOCKED", "reason": f"HTTP {response.status_code}"}
-        payload = response.json().get("data") or {}
-        shop_response = session.get(
-            f"{API_ROOT}/shop/get_shop_base",
-            params={"shopid": source.shop_id},
-            headers=headers,
-            timeout=(5, timeout),
-        )
-        shop = shop_response.json().get("data") or {} if shop_response.status_code == 200 else {}
+        response = session.get(f"{API_ROOT}/item/get", params={"itemid": item_id, "shopid": shop_id},
+                               headers=headers, timeout=(min(5, timeout), min(7, timeout)))
+        if response.status_code == 200:
+            payload = response.json()
+            if not payload.get('error'):
+                shop = {}
+                # Shop metadata is optional; a failed name lookup must not
+                # discard an otherwise valid item observation.
+                try:
+                    remaining = deadline - time.monotonic()
+                    if remaining > 1:
+                        reply = session.get(f"{API_ROOT}/shop/get_shop_base", params={"shopid": shop_id},
+                                            headers=headers, timeout=(min(3, remaining), min(4, remaining)))
+                        if reply.status_code == 200:
+                            shop = reply.json().get('data') or {}
+                except Exception:
+                    pass
+                result = parse_payload(payload, checked_source, identity, shop=shop)
+                if result['status'] in {'OK', 'INVALID_MATCH'}:
+                    return result
+            else:
+                result = parse_payload(payload, checked_source, identity)
+        else:
+            result = {'status': 'BLOCKED' if response.status_code in {401, 403, 429} else 'HTTP_ERROR',
+                      'reason': f'Shopee HTTP {response.status_code}'}
+            if response.status_code == 429:
+                return result
+        remaining = deadline - time.monotonic()
+        if remaining > 1:
+            page = session.get(source.url, headers=MOBILE_HEADERS, timeout=(min(4, remaining), remaining))
+            if page.status_code == 200:
+                public = parse_public_html(page.text, checked_source, identity)
+                if public.get('candidate') or public['status'] in {'OK', 'INVALID_MATCH', 'BLOCKED'}:
+                    return public
+        return result
     except Exception as exc:
-        return {"status": "TIMEOUT", "reason": str(exc)}
+        return {'status': 'TIMEOUT' if 'timeout' in str(exc).lower() else 'PARSER_ERROR', 'reason': str(exc)[:300]}
     finally:
         session.close()
-
-    seller = shop.get("name") or shop.get("account", {}).get("username") or source.seller
-    candidate = {
-        "name": payload.get("name"),
-        "url": source.url,
-        "brand": (payload.get("brand") or {}).get("name") if isinstance(payload.get("brand"), dict) else payload.get("brand"),
-        "model": next((attribute.get("value") for attribute in payload.get("attributes") or [] if str(attribute.get("name") or "").lower() in {"modelo", "model"}), None),
-        "item_id": str(source.item_id),
-    }
-    match = resolve_candidate(identity, candidate)
-    if not match.accepted:
-        return {"status": "INVALID_MATCH", "reason": match.reason, "match": match}
-    price = _price(payload.get("price") or payload.get("price_min"))
-    unavailable = payload.get('stock') == 0
-    if not price and not unavailable:
-        return {"status": "PARSER_ERROR", "reason": "Preco ausente", "match": match}
-    installment = payload.get("installment_plans") or []
-    plan = next((value for value in installment if isinstance(value, dict)), {})
-    count = plan.get("installment_count") or plan.get("tenure")
-    installment_value = _price(plan.get("installment_amount"))
-    installment_total = round(count * installment_value, 2) if count and installment_value else None
-    item = {
-        **candidate,
-        "sku": identity.sku,
-        "store": seller or "Shopee",
-        "seller": seller or "Shopee",
-        "source": "Shopee",
-        "category": identity.sku,
-        "price": price,
-        "cash_price": price,
-        "installment_count": count,
-        "installment_value": installment_value,
-        "installment_price": installment_total,
-        "payment_difference": round(max(0, installment_total - price), 2) if installment_total and price is not None else None,
-        "availability": "out_of_stock" if unavailable else "in_stock" if payload.get('stock') is not None and payload['stock'] > 0 else None,
-        "image_url": f"https://down-br.img.susercontent.com/file/{payload.get('image')}" if payload.get("image") else None,
-        "match_confidence": match.confidence,
-        "match_method": match.method,
-        "captured_at": datetime.utcnow().isoformat(),
-        "discovery_source": "shopee_internal_api",
-    }
-    print(f"[COLLECTION][SHOPEE] {source.shop_id}/{source.item_id} coletado; seller={seller}")
-    return {"status": "OK", "item": item, "match": match}

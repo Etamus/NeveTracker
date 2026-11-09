@@ -373,3 +373,24 @@ O gráfico **Frete por estado** acompanha o SKU da navbar e segue as lojas selec
 O mapa fica abaixo de **Preço mínimo por loja**. **Atualizar** relê as cotações salvas. **Consultar fretes** usa a fila persistente para consultar as 27 UFs nas lojas selecionadas, reaproveitando cotações completas recentes. Apresenta o menor frete pago observado; zero somente se confirmado e sem alternativa paga. Um frete confirmado pode aparecer mesmo quando o prazo não foi informado pela loja.
 
 A geometria é incluída localmente a partir de [click_that_hood](https://github.com/codeforgermany/click_that_hood/blob/main/public/data/brazil-states.geojson), com licença em `src/data/brazilStates.LICENSE.txt`. Não depende de um serviço pago de mapas. Após atualizar o projeto, reinicie o backend para carregar a opção do agendamento e a rota do mapa.
+
+## CEPs, comparações e histórico persistente
+
+- **Lead Time > Definir CEPs** recebe vários CEPs, separados por linhas, espaços, vírgulas ou ponto e vírgula. A seleção é compartilhada e salva no banco. Até 200 destinos por seleção; CEPs do mesmo estado têm colunas e cotações independentes. **Restaurar capitais** retorna aos 27 destinos originais. O mapa de fretes do Analytics continua usando as capitais.
+- **Lead Time > Exportar para Excel** exporta os destinos exibidos em duas folhas: matriz de prazos e cotações por lojista, com frete, tipo de dias, CEP, situação, data e anúncio.
+- **Analytics > Comparar lojas / marcas** permite escolher as duas dimensões, acompanhando os SKUs da navbar e filtros de lojas e marcas. Usa a última observação por anúncio e lojista; anúncios sem estoque não entram nos mínimos e médias de preços. A comparação por SKU evidencia materiais em comum; médias de produtos diferentes não comprovam equivalência entre marcas.
+- **Analytics > Histórico de preços** mostra o período, preço diário, dia anterior, diferenças, frete, prazo, disponibilidade e campos alterados, com gráfico e Excel completo. Cada coleta real acrescenta uma observação, mesmo com preço inalterado. Cache não conta como nova coleta. A opção de mostrar o último valor conhecido identifica dias sem coleta e preserva a data original; não cria observações retroativas.
+- O banco existente em `backend/precos.db` continua persistente. Na inicialização, os registros de preços anteriores são recuperados uma única vez. Datas antigas já sobrescritas antes desta melhoria não podem ser reconstruídas. O relatório aceita até 366 dias por consulta, sem apagar o histórico armazenado. Faça backup do banco para transferir ou preservar os dados.
+- A extração precisa combina scraping, coleta de páginas e APIs habilitadas/configuradas. Na descoberta do Mercado Livre, a API em modo **sempre** roda simultaneamente ao HTML; em **fallback**, mantém o acionamento condicional. As credenciais e permissões da API continuam necessárias. Nenhum provedor pago é ativado por esta melhoria.
+
+Reinicie o projeto pelo BAT para carregar as novas rotas e o registro de observações no backend.
+
+## Shopee: coleta pública sem login
+
+O coletor reconhece URLs `/product/loja/item` e `-i.loja.item`, valida o material no título/atributos retornados e converte os valores monetários JSON na escala fixa da Shopee (100.000 unidades por real). Não usa o SKU no endereço como confirmação isolada. Itens explicitamente sem estoque podem permanecer sem preço; valores ausentes não significam falta de estoque.
+
+A recuperação tenta os dados públicos do anúncio e o estado estruturado da página mobile. Quando o fallback de navegador está habilitado, pode ler as respostas da própria página pública em um navegador mobile sem login. Não utiliza serviço pago, proxy pago, credenciais ou resolução automática de CAPTCHA.
+
+O projeto aproveita as abordagens de identificação por anúncio descritas em [paulodarosa/shopee-scraper](https://github.com/paulodarosa/shopee-scraper) e de leitura de estado/respostas da página em [perdanacarrer/shopee-mobile-scarper-api](https://github.com/perdanacarrer/shopee-mobile-scarper-api), com implementação em Python usando as dependências existentes. Não instala nem executa esses repositórios.
+
+Nos testes anônimos de 29/10/2026, `W10531315` e `W11199342` tiveram título e IDs confirmados nas páginas públicas, mas os preços e o nome do vendedor foram omitidos pela Shopee. O navegador solicitou login/verificação. Esse resultado é uma descoberta parcial, não uma coleta de preços concluída: as fontes podem ser registradas com a razão da falha, sem criar preços, frete ou prazo fictícios. Detalhes do teste local ficam em `.logs/shopee-review/live-validation.json`.

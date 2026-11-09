@@ -51,18 +51,27 @@ def _selected_sources(source=None, sources=None):
     return {store['label'] if (store := find_target_store(value)) else value for value in selected}
 
 
-def enqueue_quotes(db, sku, ufs, force_refresh=False, source=None, sources=None):
+def enqueue_quotes(db, sku, ufs, force_refresh=False, source=None, sources=None, postal_codes=None):
     selected = _selected_sources(source, sources)
     offers = [item for item in sku_offers(db, sku) if not selected or item['source'] in selected]
     if not offers:
         return {'queued': 0, 'message': 'Nenhuma oferta salva para este SKU. Faça uma extração primeiro.'}
+    if postal_codes is None:
+        requested = [BY_UF[uf] for uf in ufs]
+    else:
+        from services.delivery_destinations import destinations
+        available = {dest['postal_code']: dest for dest in [*CAPITALS, *destinations(db)]}
+        unknown = set(postal_codes) - set(available)
+        if unknown:
+            raise ValueError('Salve os CEPs na seleção de destinos antes de consultar: ' + ', '.join(sorted(unknown)))
+        requested = [available[cep] for cep in dict.fromkeys(postal_codes)]
     now = datetime.utcnow()
     queued = 0
     for item in offers:
         if not offer_available(item):
             continue
-        for uf in ufs:
-            dest = BY_UF[uf]
+        for dest in requested:
+            uf = dest['uf']
             key = quote_key(sku, item, dest['postal_code'])
             row = db.query(LeadTimeQuote).filter_by(quote_key=key).first()
             if row and (row.status in {'queued', 'running'} or (
@@ -112,6 +121,9 @@ def _best_cell(cells):
 
 
 def get_matrix(db, sku):
+    from services.delivery_destinations import destinations
+    chosen = destinations(db)
+    by_cep = {dest["postal_code"]: dest for dest in chosen}
     offers = sku_offers(db, sku)
     active = {(item['source'], item['seller'], item['url']): item for item in offers}
     records = db.query(LeadTimeQuote).filter_by(sku=sku).all()
@@ -120,14 +132,17 @@ def get_matrix(db, sku):
     for row in records:
         if (row.source, row.seller, row.url) not in active or not offer_available(active[(row.source, row.seller, row.url)]):
             continue
+        dest = by_cep.get(row.postal_code)
+        if not dest or dest['uf'] != row.uf:
+            continue
         relevant.append(row)
-        cells.setdefault((row.source, row.seller, row.uf), []).append(_cell(row))
+        cells.setdefault((row.source, row.seller, dest['key']), []).append(_cell(row))
     # Exact CEP only: a saved SP quote must never fill another state's column.
     for item in offers:
         if not offer_available(item):
             continue
-        for dest in CAPITALS:
-            key = (item['source'], item['seller'], dest['uf'])
+        for dest in chosen:
+            key = (item['source'], item['seller'], dest['key'])
             if item.get('destination_zip') != dest['postal_code'] or item.get('delivery_max_days') is None:
                 continue
             if not any(cell.get('url') == item['url'] for cell in cells.get(key, [])):
@@ -142,18 +157,18 @@ def get_matrix(db, sku):
         for name in sorted({item['seller'] for item in store_offers}):
             seller_items = [item for item in store_offers if item['seller'] == name]
             unavailable = all(not offer_available(item) for item in seller_items)
-            seller_cells = {dest['uf']: _best_cell(cells.get((store['label'], name, dest['uf']), [])) for dest in CAPITALS}
+            seller_cells = {dest['key']: _best_cell(cells.get((store['label'], name, dest['key']), [])) for dest in chosen}
             if unavailable:
-                seller_cells = {dest['uf']: {'status': 'out_of_stock'} for dest in CAPITALS}
+                seller_cells = {dest['key']: {'status': 'out_of_stock'} for dest in chosen}
             sellers.append({'name': name, 'cells': seller_cells})
-        aggregate = {dest['uf']: _best_cell([cell for seller in sellers for cell in seller['cells'][dest['uf']].get('alternatives', [])]) for dest in CAPITALS}
+        aggregate = {dest['key']: _best_cell([cell for seller in sellers for cell in seller['cells'][dest['key']].get('alternatives', [])]) for dest in chosen}
         if store_offers and all(not offer_available(item) for item in store_offers):
-            aggregate = {dest['uf']: {'status': 'out_of_stock'} for dest in CAPITALS}
+            aggregate = {dest['key']: {'status': 'out_of_stock'} for dest in chosen}
         if not store_offers:
-            aggregate = {dest['uf']: {'status': 'no_offers'} for dest in CAPITALS}
+            aggregate = {dest['key']: {'status': 'no_offers'} for dest in chosen}
         stores.append({'key': store['key'], 'name': store['label'], 'offer_count': len(store_offers), 'sellers': sellers, 'cells': aggregate})
     pending = sum(row.status in {'queued', 'running'} for row in relevant)
-    return {'sku': sku, 'destinations': CAPITALS, 'stores': stores,
+    return {'sku': sku, 'destinations': chosen, 'stores': stores,
             'progress': {'total': len(relevant), 'completed': len(relevant)-pending, 'pending': pending},
             'has_offers': bool(offers)}
 

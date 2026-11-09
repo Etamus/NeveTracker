@@ -40,6 +40,7 @@ interface SlidingTabsProps {
   comparisonRows: ComparisonRow[];
   lastQuery: string;
   analyticsMap?: (stores: string[]) => ReactNode;
+  analyticsReport?: (mode: "comparison" | "history", stores: string[], brands: string[]) => ReactNode;
 }
 
 type SortOrder = "stores_desc" | "price_asc" | "price_desc";
@@ -560,11 +561,13 @@ export default function SlidingTabs({
   comparisonRows,
   lastQuery,
   analyticsMap,
+  analyticsReport,
 }: SlidingTabsProps) {
   const [resultSearch, setResultSearch] = useState("");
   const [sortOrder, setSortOrder] = useState<SortOrder>("stores_desc");
   const [selectedBrands, setSelectedBrands] = useState<string[]>([]);
   const [selectedStores, setSelectedStores] = useState<string[]>([]);
+  const [analyticsMode, setAnalyticsMode] = useState<"overview" | "comparison" | "history">("overview");
   const [selectedSubfamilies, setSelectedSubfamilies] = useState<string[]>([]);
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
   const [selectedClusters, setSelectedClusters] = useState<string[]>([]);
@@ -976,6 +979,12 @@ export default function SlidingTabs({
               )}
             </div>
 
+            {activeTab === 2 && (
+              <div className="analytics-report-tabs" role="tablist" aria-label="Visões do Analytics">
+                {([{ key: "overview", label: "Visão geral" }, { key: "comparison", label: "Comparar lojas" }, { key: "history", label: "Histórico de preços" }] as const).map((tab) => <button type="button" key={tab.key} role="tab" aria-selected={analyticsMode === tab.key} className={analyticsMode === tab.key ? "is-active" : ""} onClick={() => setAnalyticsMode(tab.key)}>{tab.label}</button>)}
+              </div>
+            )}
+
             <div ref={filterControlRef} className="relative ml-auto">
               <button
                 type="button"
@@ -1167,14 +1176,14 @@ export default function SlidingTabs({
 
           {activeTab === 2 && (
             <div className="tab-scroll-region">
-              <MarketAnalytics
+              {analyticsMode !== "overview" ? analyticsReport?.(analyticsMode, selectedStores, selectedBrands) : <MarketAnalytics
                 freightMap={analyticsMap?.(selectedStores)}
                 products={filteredProducts}
                 rows={filteredRows}
                 stores={marketStoreRanking}
                 searched={Boolean(lastQuery)}
                 onOpenProduct={openAnalytics}
-              />
+              />}
             </div>
           )}
         </>
@@ -1649,7 +1658,7 @@ const ProductAnalytics = ({ row, onBack }: { row: ComparisonRow; onBack: () => v
         </section>
         <section className="data-panel">
           <div className="data-panel__header"><div><h2>Ofertas por loja</h2><p>{offers.length} fontes encontradas</p></div></div>
-          <div className="divide-y divide-[var(--border)]">
+          <div className="product-analytics-offers divide-y divide-[var(--border)]">
             {offers.map((offer, index) => (
               <a key={`${offer.store}-${offer.url}`} href={offer.url} target="_blank" rel="noreferrer" className="detail-offer-row">
                 <span className="store-ranking-index">{String(index + 1).padStart(2, "0")}</span>

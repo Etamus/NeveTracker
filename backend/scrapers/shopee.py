@@ -3,6 +3,7 @@ from urllib.parse import quote_plus
 from cachetools import TTLCache, cached
 
 from services.http_client import create_resilient_session
+from services.shopee_public import money as _price
 
 BASE_URL = "https://shopee.com.br"
 SEARCH_URL = f"{BASE_URL}/api/v4/search/search_items"
@@ -24,18 +25,6 @@ def _headers(product_query):
         "x-api-source": "pc",
         "x-requested-with": "XMLHttpRequest",
     }
-
-
-def _price(value):
-    try:
-        if value is None:
-            return None
-        price = float(value)
-        if price > 100000:
-            price = price / 100000
-        return price if price > 0 else None
-    except (TypeError, ValueError):
-        return None
 
 
 def _image_url(image_id):
@@ -87,7 +76,8 @@ def scrape_shopee(product_query: str):
             price = _price(basic.get("price") or basic.get("price_min"))
             shop_id = basic.get("shopid")
             item_id = basic.get("itemid")
-            if not name or not price or not shop_id or not item_id:
+            unavailable = basic.get("stock") == 0
+            if not name or (price is None and not unavailable) or not shop_id or not item_id:
                 continue
 
             products.append(
@@ -98,7 +88,9 @@ def scrape_shopee(product_query: str):
                     "source": "Shopee",
                     "seller": f"Shopee Loja {shop_id}",
                     "url": f"{BASE_URL}/product/{shop_id}/{item_id}",
-                    "brand": "Shopee",
+                    "brand": (basic.get("brand") or {}).get("name") if isinstance(basic.get("brand"), dict) else basic.get("brand"),
+                    "shop_id": str(shop_id), "item_id": str(item_id),
+                    "availability": "out_of_stock" if unavailable else None,
                     "category": product_query,
                     "image_url": _image_url(basic.get("image")),
                 }
@@ -108,3 +100,6 @@ def scrape_shopee(product_query: str):
     except Exception as e:
         print(f"Erro ao buscar na Shopee: {e}")
         return []
+
+    finally:
+        session.close()
