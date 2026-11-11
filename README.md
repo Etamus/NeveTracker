@@ -375,6 +375,8 @@ Em **Extrações > Cadastro de SKUs**, acima de **Dados** e com a mesma permiss�
 
 Visitantes podem pesquisar ofertas e catálogo somente nos dados salvos. Pesquisas sem correspondência permanecem vazias e não acionam scraping. Analytics, Lead Time, Database e suas rotas de dados exigem login. O CEP de referência não aparece em Configurações para visitantes. O analytics aberto por uma oferta permanece disponível, sem o mapa de fretes e com retorno para Ofertas.
 
+Usuários autenticados, inclusive Visualizadores, podem pesquisar termos livres na navbar: quando não há correspondência salva, a busca consulta as lojas pelo modo rápido e usa o CEP da própria conta. Resultados já disponíveis são reutilizados. Uma extração ativa de outro usuário impede a nova coleta até sua conclusão; a limitação ao banco aplica-se apenas aos visitantes.
+
 O **CEP de referência** de **Configurações > Geral** fica salvo na própria conta e é separado por usuário também no navegador. Contas sem CEP usam `01001-000`. A lista de destinos de **Lead Time > Definir CEPs** é uma configuração separada das cotações.
 
 Em **Extração > Agendamento**, o toggle **Consultar apenas desatualizados** filtra os materiais antes de criar a fila. Fica desligado por padrão, preservando a extração de todos os SKUs. Quando ligado, considera as últimas observações de cada oferta: sem coleta confirmada nas últimas oito horas, cache, CEP divergente, falhas de fontes ou descoberta incompleta mantêm o SKU pendente. Preço inalterado e confirmação de falta de estoque contam como observações válidas. Alterações de cadastro não contam como coleta. Clique em **Salvar** para persistir a opção; o controle Ativo/Inativo continua independente.

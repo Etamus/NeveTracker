@@ -6,6 +6,7 @@ import type {
   StoreSearchResult,
 } from "../../models/product.model";
 import { getInterfacePreferences } from "../../src/preferences";
+import { apiAuthHeaders } from "../../src/apiAuth";
 
 export const getApiBaseUrl = () => {
   const configuredApiUrl =
@@ -46,7 +47,7 @@ const useHeroSection = () => {
       const response = skus.length
         ? await fetch(`${apiBase}/products/search/batch`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: apiAuthHeaders({ "Content-Type": "application/json" }),
             body: JSON.stringify({
               skus,
               force_refresh: false,
@@ -56,7 +57,7 @@ const useHeroSection = () => {
               scope: "all",
             }),
           })
-        : await fetch(`${apiBase}/products/search?q=${encodeURIComponent(query)}`);
+        : await fetch(`${apiBase}/products/search?q=${encodeURIComponent(query)}`, { headers: apiAuthHeaders() });
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }

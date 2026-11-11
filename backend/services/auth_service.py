@@ -136,6 +136,13 @@ def get_current_user(auth_session: AuthSession = Depends(get_auth_session)):
     return auth_session.user
 
 
+def get_optional_current_user(authorization: str = Header(default=''), db: Session = Depends(get_db)):
+    if not authorization:
+        return None
+    token = get_bearer_token(authorization)
+    return get_current_user(get_auth_session(token, db))
+
+
 def require_admin(user: AuthUser = Depends(get_current_user)):
     if user_role(user) not in MANAGEMENT_ROLES:
         raise HTTPException(status_code=403, detail="Acesso restrito a administradores.")

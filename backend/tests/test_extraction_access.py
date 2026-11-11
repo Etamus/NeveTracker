@@ -157,6 +157,27 @@ class ExtractionAccessTests(unittest.TestCase):
             self.assertEqual(self.client.get(path).status_code,401)
             self.assertEqual(self.client.get(path,headers=self.headers('VIEWER')).status_code,200)
 
+    def test_logged_in_users_can_search_new_content_but_guests_cannot(self):
+        result={'results':[{'sku':None,'name':'Produto novo','store':'Dufrio','source':'Dufrio','url':'https://www.dufrio.com.br/novo.html','current_price':123}], 'comparison':[], 'stores':[]}
+        for name in ('ALICE','BOB','VIEWER'):
+            with patch('routes.products.run_all_scrapers',return_value=result) as scrape:
+                response=self.client.get('/products/search',params={'q':'Produto fora do banco'},headers=self.headers(name))
+                self.assertEqual(response.status_code,200,response.text)
+                self.assertEqual(response.json()['results'][0]['current_price'],123)
+                scrape.assert_called_once()
+                self.assertEqual(scrape.call_args.kwargs['postal_code'],'01001000')
+        with patch('routes.products.run_all_scrapers') as scrape:
+            self.assertEqual(self.client.get('/products/search',params={'q':'Produto fora do banco'}).json()['results'],[])
+            self.assertEqual(self.client.get('/products/search',params={'q':'Produto fora do banco'},headers={'Authorization':'Bearer invalid'}).status_code,401)
+            scrape.assert_not_called()
+
+    def test_live_navbar_search_respects_other_users_extraction(self):
+        queue.enqueue_extraction_job(['W11509387'],owner_user_id=self.tokens['ALICE'][0])
+        with patch('routes.products.run_all_scrapers') as scrape:
+            response=self.client.get('/products/search?q=ProdutoNovo',headers=self.headers('BOB'))
+            self.assertEqual(response.status_code,409)
+            scrape.assert_not_called()
+
     def test_scheduler_runs_at_local_time_once_and_processed_by_real_queue(self):
         with self.sessions() as db:
             db.add(ExtractionSchedule(id=1,enabled=True,owner_user_id=self.tokens['ALICE'][0],days='2',start_time='09:00',end_time='18:00'));db.commit()

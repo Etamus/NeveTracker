@@ -46,7 +46,7 @@ from services.scraper_service import (
 from services.analytics_export import build_analytics_workbook
 from services.offer_enrichment import normalize_postal_code
 from services.crawler_control import get_control, serialize_control, update_control
-from services.auth_service import require_developer, require_operator, get_current_user
+from services.auth_service import require_developer, require_operator, get_current_user, get_optional_current_user
 from services.product_sources import serialize_source
 from services.scrape_pagination import coverage_by_store
 from services.precise_extraction import run_precise_extraction
@@ -1640,10 +1640,17 @@ def refresh_prices(
 
 
 @product_router.get("/search")
-def search_and_update(q: str = Query(..., min_length=2), db: Session = Depends(get_db)):
+def search_and_update(q: str = Query(..., min_length=2, max_length=250), db: Session = Depends(get_db), actor=Depends(get_optional_current_user)):
     search_text = q.strip()
     sku = _primary_sku(search_text)
     rows = [row for row in _find_sku_products(db, sku) if _product_belongs_to_sku(row[0], sku)] if sku else _find_products(db, search_text, strict=True)
     cached = _serialize_results(rows, db, resolve_redirects=False)
+    if actor is not None and not cached:
+        active_job = get_active_extraction_job()
+        if active_job and active_job.get('owner_user_id') != actor.id:
+            raise HTTPException(409, 'Outro usuário está realizando uma extração. Aguarde a conclusão para pesquisar novas ofertas.')
+        summary = run_all_scrapers(search_text, db, postal_code=actor.logistics_postal_code or '01001000', scope='all')
+        summary = _apply_summary_metadata(summary, db, sku)
+        return {'message': 'Pesquisa nas lojas concluída.', **summary}
     summary = _apply_summary_metadata(build_summary_from_cached_results(cached, search_text), db, sku)
     return {'message': 'Consulta ao banco local.', **summary}
