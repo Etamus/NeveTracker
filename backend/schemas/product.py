@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, HttpUrl, field_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 from datetime import datetime
 from typing import Literal, Optional, List
 
@@ -36,6 +36,7 @@ class SkuBatchRequest(BaseModel):
     scope: Literal["all", "sites", "retail"] = "all"
     mode: Literal["quick", "precise"] = "quick"
     local_only: bool = False
+    api_with_scraping: Optional[bool] = None
 
 
 class ExtractionDatabaseJobRequest(BaseModel):
@@ -51,6 +52,7 @@ class CrawlerControlRequest(BaseModel):
     external_discovery_fallback: bool = True
     playwright_product_fallback: bool = True
     playwright_shipping_fallback: bool = True
+    api_with_scraping: bool = True
     concurrent_requests_per_domain: int = Field(default=2, ge=1, le=4)
     request_timeout_seconds: int = Field(default=15, ge=5, le=45)
 
@@ -64,6 +66,12 @@ class ExtractionScheduleRequest(BaseModel):
     force_refresh: bool = True
     only_stale: bool = False
     postal_code: Optional[str] = None
+
+    @model_validator(mode='after')
+    def ordered_window(self):
+        if datetime.strptime(self.end_time, '%H:%M') < datetime.strptime(self.start_time, '%H:%M'):
+            raise ValueError('O horário final deve ser igual ou posterior ao inicial.')
+        return self
 
     @field_validator("start_time", "end_time")
     @classmethod

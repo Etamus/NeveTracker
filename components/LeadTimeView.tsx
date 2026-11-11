@@ -1,3 +1,4 @@
+import { apiAuthHeaders } from "../src/apiAuth";
 import { useEffect, useMemo, useState } from "react";
 import { CalendarClock, ChevronDown, ChevronRight, FileSpreadsheet, LoaderCircle, MapPin, RefreshCw, X } from "lucide-react";
 import { StyledSelect } from "./StyledSelect";
@@ -56,7 +57,7 @@ export default function LeadTimeView({ query, selectedSkus, canRefresh, headers 
     setLoading(true); setError(""); setMessage(""); setMatrix(null);
     const load = async () => {
       try {
-        const response = await fetch(`${getApiBaseUrl()}/products/lead-time/${encodeURIComponent(sku)}`, { signal: controller.signal });
+        const response = await fetch(`${getApiBaseUrl()}/products/lead-time/${encodeURIComponent(sku)}`, { signal: controller.signal, headers: apiAuthHeaders() });
         if (!response.ok) throw new Error("Não foi possível carregar os prazos.");
         const data = await response.json() as Matrix;
         if (controller.signal.aborted) return;
@@ -91,7 +92,7 @@ export default function LeadTimeView({ query, selectedSkus, canRefresh, headers 
   const openDestinations = async () => {
     setDestinationsOpen(true); setPostalError("");
     try {
-      const response = await fetch(`${getApiBaseUrl()}/products/lead-time/destinations`);
+      const response = await fetch(`${getApiBaseUrl()}/products/lead-time/destinations`, { headers: apiAuthHeaders() });
       if (!response.ok) throw new Error("Não foi possível carregar os CEPs. Verifique se o backend está atualizado.");
       const data = await response.json() as { destinations: Destination[] };
       setPostalText(data.destinations.map((dest) => cep(dest.postal_code)).join("\n"));
@@ -115,7 +116,7 @@ export default function LeadTimeView({ query, selectedSkus, canRefresh, headers 
 
   const exportQuotes = async () => {
     setExporting(true); setError("");
-    try { await downloadExcel(`${getApiBaseUrl()}/products/lead-time/${encodeURIComponent(sku)}/export?${new URLSearchParams(region ? { region } : {})}`, `lead-time-${sku}.xlsx`); }
+    try { await downloadExcel(`${getApiBaseUrl()}/products/lead-time/${encodeURIComponent(sku)}/export?${new URLSearchParams(region ? { region } : {})}`, `lead-time-${sku}.xlsx`, apiAuthHeaders()); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Falha ao exportar."); }
     finally { setExporting(false); }
   };

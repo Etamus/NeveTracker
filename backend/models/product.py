@@ -132,6 +132,7 @@ class ExtractionSchedule(Base):
 
     id = Column(Integer, primary_key=True, default=1)
     enabled = Column(Boolean, default=False, nullable=False)
+    owner_user_id = Column(Integer, nullable=True)
     policy = Column(String, default="custom", nullable=False)
     postal_code = Column(String, nullable=True)
     start_time = Column(String, default="09:00", nullable=False)
@@ -151,6 +152,8 @@ class ExtractionJob(Base):
     __tablename__ = "extraction_jobs"
 
     id = Column(String(36), primary_key=True)
+    owner_user_id = Column(Integer, nullable=True, index=True)
+    api_with_scraping = Column(Boolean, nullable=False, default=True)
     kind = Column(String(20), default="manual", nullable=False, index=True)
     status = Column(String(30), default="queued", nullable=False, index=True)
     priority = Column(Integer, default=20, nullable=False, index=True)
@@ -255,6 +258,7 @@ class CrawlerControl(Base):
     external_discovery_fallback = Column(Boolean, nullable=False, default=True)
     playwright_product_fallback = Column(Boolean, nullable=False, default=True)
     playwright_shipping_fallback = Column(Boolean, nullable=False, default=True)
+    api_with_scraping = Column(Boolean, nullable=False, default=True)
     concurrent_requests_per_domain = Column(Integer, nullable=False, default=2)
     request_timeout_seconds = Column(Integer, nullable=False, default=15)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

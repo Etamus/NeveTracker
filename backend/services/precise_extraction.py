@@ -242,7 +242,7 @@ def _html_and_parallel_api(db, identity, store, control, progress, include_other
     providers retain their conditional use and do not consume extra quota.
     """
     settings = get_runtime_provider_settings('mercado_livre') if store['key'] == 'mercado_livre' else {}
-    parallel = include_other_sources and settings.get('enabled') and settings.get('configured') and settings.get('usage_mode') == 'always'
+    parallel = include_other_sources and getattr(control, 'api_with_scraping', True) and settings.get('enabled') and settings.get('configured') and settings.get('usage_mode') == 'always'
     def html():
         try:
             return discover_html_pages(db, identity, store, control.request_timeout_seconds, progress=progress)
@@ -327,8 +327,9 @@ def _discover_store(
         db.commit()
     skip_fallback_api = (
         store["key"] == "mercado_livre"
-        and get_runtime_provider_settings("mercado_livre")["usage_mode"] == "fallback"
-        and (html_candidates or (known_source_ids and not retry_failed))
+        and (not getattr(control, 'api_with_scraping', True) or (
+            get_runtime_provider_settings("mercado_livre")["usage_mode"] == "fallback"
+            and (html_candidates or (known_source_ids and not retry_failed))))
     )
     direct_candidates = parallel_direct if parallel_direct is not None else (
         [] if skip_fallback_api or not include_other_sources
@@ -386,10 +387,14 @@ def _collect_sources(db, identity, sources, postal_code, control, progress=None)
         selected = store_sources
         if store_key in {"mercado_livre", "shopee"}:
             workers = min(control.concurrent_requests_per_domain, len(selected))
+            collector = collect_product_source
+            if store_key == 'mercado_livre' and not getattr(control, 'api_with_scraping', True):
+                from crawlers.mercado_livre_public import collect_public_product
+                collector = collect_public_product
             with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
                 futures = {
                     executor.submit(
-                        collect_product_source,
+                        collector,
                         source,
                         identity,
                         postal_code,
@@ -615,7 +620,7 @@ def _discovery_attempted_since(cursors, started_at):
 
 def run_precise_extraction(
     sku, db, postal_code=None, scope="all", rediscover=False,
-    collection_after=None, resume=False, progress=None,
+    collection_after=None, resume=False, progress=None, api_with_scraping=None,
 ):
     from services.scraper_service import _cached_sku_observations, _save_result, build_summary_from_cached_results
     from routes.products import _serialize_results
@@ -623,7 +628,15 @@ def run_precise_extraction(
     postal_code = normalize_postal_code(postal_code)
     execution_started = datetime.utcnow()
     identity, products = _identity(db, sku)
-    control = get_control(db)
+    from types import SimpleNamespace
+    stored_control = get_control(db)
+    control = SimpleNamespace(**{field: getattr(stored_control, field, default) for field, default in {
+        'request_timeout_seconds': 15, 'concurrent_requests_per_domain': 2,
+        'external_discovery_fallback': True, 'playwright_product_fallback': True,
+        'playwright_shipping_fallback': True, 'api_with_scraping': True,
+    }.items()})
+    if api_with_scraping is not None:
+        control.api_with_scraping = api_with_scraping
     selected_stores = [
         store for store in TARGET_STORES
         if scope == "all" or store.get("scope") == scope
@@ -747,6 +760,7 @@ def run_precise_extraction(
         )
 
     discovery_control = SimpleNamespace(
+        api_with_scraping=control.api_with_scraping,
         request_timeout_seconds=control.request_timeout_seconds,
         external_discovery_fallback=getattr(control, "external_discovery_fallback", True),
     )

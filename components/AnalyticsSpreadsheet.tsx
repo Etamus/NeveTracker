@@ -1,3 +1,4 @@
+import { apiAuthHeaders } from "../src/apiAuth";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, ExternalLink, FileSpreadsheet, Funnel, LoaderCircle, RefreshCw, Search, SquareCheckBig, X } from "lucide-react";
@@ -100,7 +101,7 @@ export default function AnalyticsSpreadsheet() {
     const controller = new AbortController();
     const params = new URLSearchParams();
     sources.forEach((value) => params.append("source", value));
-    fetch(`${getApiBaseUrl()}/products/analytics/sheet/options?${params}`, { signal: controller.signal })
+    fetch(`${getApiBaseUrl()}/products/analytics/sheet/options?${params}`, { signal: controller.signal, headers: apiAuthHeaders() })
       .then((response) => {
         if (!response.ok) throw new Error("Não foi possível carregar os filtros.");
         return response.json() as Promise<SheetOptions>;
@@ -129,7 +130,7 @@ export default function AnalyticsSpreadsheet() {
     if (view === "summary") setSummaryResult({ items: [], total: 0, page, page_size: PAGE_SIZE });
     else setOfferResult({ items: [], total: 0, page, page_size: PAGE_SIZE });
     const endpoint = view === "summary" ? "/products/analytics/sheet/summary" : "/products/analytics/sheet";
-    fetch(`${getApiBaseUrl()}${endpoint}?${params}`, { signal: controller.signal })
+    fetch(`${getApiBaseUrl()}${endpoint}?${params}`, { signal: controller.signal, headers: apiAuthHeaders() })
       .then((response) => {
         if (!response.ok) throw new Error("Não foi possível carregar a planilha.");
         return response.json() as Promise<SheetResponse | SummaryResponse>;
@@ -194,7 +195,7 @@ export default function AnalyticsSpreadsheet() {
       sources.forEach((value) => params.append("source", value));
       sellers.forEach((value) => params.append("seller", value));
     fulfillment.forEach((value) => params.append("fulfillment", value));
-      const response = await fetch(`${getApiBaseUrl()}/products/analytics/sheet/export?${params}`);
+      const response = await fetch(`${getApiBaseUrl()}/products/analytics/sheet/export?${params}`, { headers: apiAuthHeaders() });
       if (!response.ok) {
         const body = await response.json().catch(() => null);
         throw new Error(body?.detail || "Não foi possível exportar os dados.");

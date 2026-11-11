@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from sqlalchemy import create_engine
@@ -85,9 +86,9 @@ class IncrementalScheduleTests(DatabaseFixture):
 
     def test_toggle_roundtrip_default_off(self):
         self.assertFalse(ExtractionScheduleRequest().only_stale)
-        update_extraction_schedule(ExtractionScheduleRequest(only_stale=True), db=self.db)
+        update_extraction_schedule(ExtractionScheduleRequest(only_stale=True), _actor=SimpleNamespace(id=1), db=self.db)
         self.assertTrue(get_extraction_schedule(db=self.db)['only_stale'])
-        update_extraction_schedule(ExtractionScheduleRequest(only_stale=False), db=self.db)
+        update_extraction_schedule(ExtractionScheduleRequest(only_stale=False), _actor=SimpleNamespace(id=1), db=self.db)
         self.assertFalse(get_extraction_schedule(db=self.db)['only_stale'])
 
     def test_incremental_filters_queue_and_normal_mode_enqueues_everything(self):
@@ -191,6 +192,8 @@ class FreightMapTests(DatabaseFixture):
         app.include_router(lead_time_router, prefix='/products/lead-time')
         app.dependency_overrides[get_db] = lambda: self.db
         app.dependency_overrides[require_operator] = lambda: object()
+        from services.auth_service import get_current_user
+        app.dependency_overrides[get_current_user] = lambda: object()
         with patch('services.lead_time_service.sku_offers', return_value=offers), TestClient(app) as client:
             response = client.get('/products/lead-time/MD-RT411FGF01/shipping', params=[('source', 'Midea'), ('source', 'Duofrio')])
             self.assertEqual(response.status_code, 200)

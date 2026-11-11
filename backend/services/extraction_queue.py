@@ -7,6 +7,8 @@ import time
 import uuid
 from datetime import datetime, timedelta
 from sqlalchemy.orm import object_session
+from sqlalchemy import text
+from fastapi import HTTPException
 
 from database import SessionLocal
 from models.product import ExtractionJob, ExtractionJobItem, ExtractionSchedule, ScrapeCursor, ProductSource
@@ -48,6 +50,7 @@ _processor = None
 _started = False
 _start_lock = threading.Lock()
 _wake_event = threading.Event()
+_enqueue_lock = threading.RLock()
 
 
 def configure_extraction_processor(processor):
@@ -113,6 +116,8 @@ def serialize_job(job, include_items=False):
             work_progress = max(completion, min(99.9, work_progress)) if completion < 100 else 100.0
     response = {
         "id": job.id,
+        "owner_user_id": job.owner_user_id,
+        "api_with_scraping": job.api_with_scraping,
         "kind": job.kind,
         "status": job.status,
         "scope": job.scope,
@@ -187,6 +192,8 @@ def enqueue_extraction_job(
     scope="all",
     mode="quick",
     schedule_run_key=None,
+    owner_user_id=None,
+    api_with_scraping=True,
 ):
     postal_code = normalize_postal_code(postal_code)
     normalized_skus = list(dict.fromkeys(sku for sku in skus if sku))
@@ -205,8 +212,19 @@ def enqueue_extraction_job(
         mode,
         schedule_run_key,
     )
+    request_key = hashlib.sha256(f'{request_key}:{owner_user_id}:{api_with_scraping}'.encode()).hexdigest()
     db = SessionLocal()
+    _enqueue_lock.acquire()
     try:
+        # Serialize the check and insertion across both threads and SQLite
+        # connections/processes. No network operation takes place in this lock.
+        if db.bind.dialect.name == 'sqlite':
+            db.execute(text('BEGIN IMMEDIATE'))
+        elif db.bind.dialect.name == 'postgresql':
+            db.execute(text('SELECT pg_advisory_xact_lock(72491831)'))
+        active_jobs = db.query(ExtractionJob).filter(ExtractionJob.status.in_(ACTIVE_STATUSES)).all()
+        if any(job.owner_user_id != owner_user_id for job in active_jobs):
+            raise HTTPException(409, 'Outro usuário está realizando uma extração. Aguarde a conclusão para iniciar a sua.')
         existing = (
             db.query(ExtractionJob)
             .filter(
@@ -221,6 +239,8 @@ def enqueue_extraction_job(
 
         job = ExtractionJob(
             id=str(uuid.uuid4()),
+            owner_user_id=owner_user_id,
+            api_with_scraping=True if mode != 'precise' else bool(api_with_scraping),
             kind=kind,
             status="queued",
             priority=_priority_for_kind(kind),
@@ -245,6 +265,7 @@ def enqueue_extraction_job(
         response = serialize_job(job)
     finally:
         db.close()
+        _enqueue_lock.release()
 
     _wake_event.set()
     return response
@@ -273,12 +294,14 @@ def get_active_extraction_job():
         db.close()
 
 
-def cancel_extraction_job(job_id):
+def cancel_extraction_job(job_id, owner_user_id=None):
     db = SessionLocal()
     try:
         job = db.query(ExtractionJob).filter(ExtractionJob.id == job_id).first()
         if not job:
             return None
+        if owner_user_id is None or job.owner_user_id != owner_user_id:
+            raise HTTPException(403, 'Somente o usuário que iniciou a extração pode cancelá-la.')
         if job.status not in TERMINAL_STATUSES:
             job.cancel_requested = True
             job.message = "Cancelamento solicitado. Finalizando o SKU atual."
@@ -370,6 +393,7 @@ def _mark_item_running(job_id, item_id):
             "kind": job.kind,
             "scope": job.scope,
             "mode": job.mode,
+            "api_with_scraping": job.api_with_scraping,
             "force_refresh": job.force_refresh,
             "refresh_if_stale": job.refresh_if_stale,
             "postal_code": job.postal_code,

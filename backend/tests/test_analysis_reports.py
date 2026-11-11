@@ -17,7 +17,7 @@ from database import Base, get_db
 from models.product import OfferObservation, Product, PriceHistory, LeadTimeDestination, LeadTimeQuote
 from routes.analysis import analysis_router
 from routes.lead_time import lead_time_router
-from services.auth_service import require_operator
+from services.auth_service import require_operator, get_current_user
 from services.delivery_destinations import destinations, save_destinations
 from services.lead_time_service import get_matrix, enqueue_quotes
 from services.price_observations import record_observation, backfill_observations, history_report, compare_groups
@@ -53,6 +53,7 @@ class AnalysisTests(unittest.TestCase):
             with self.sessions() as db:
                 yield db
         app.dependency_overrides[get_db] = database
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=1, username='READER', role='viewer', is_owner=False, is_admin=False)
         return app, TestClient(app)
 
     def test_real_unchanged_collections_append_and_restart_does_not_duplicate(self):

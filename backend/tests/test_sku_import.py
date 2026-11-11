@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timedelta
 from io import BytesIO
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi import UploadFile
@@ -166,7 +167,7 @@ class SkuImportTests(unittest.TestCase):
         payload = SkuBatchRequest(skus=["W11509387"], mode="quick")
 
         with patch("routes.products.enqueue_extraction_job", return_value={"id": "job"}) as enqueue:
-            response = create_extraction_job(payload=payload, _actor=None, db=self.db)
+            response = create_extraction_job(payload=payload, _actor=SimpleNamespace(id=1), db=self.db)
 
         self.assertEqual(response["id"], "job")
         self.assertEqual(enqueue.call_args.kwargs["mode"], "quick")
@@ -176,7 +177,7 @@ class SkuImportTests(unittest.TestCase):
         self.db.commit()
         payload = SkuBatchRequest(skus=["W11509387"])
         with patch("routes.products.enqueue_extraction_job") as enqueue:
-            create_extraction_job(payload=payload, _actor=None, db=self.db)
+            create_extraction_job(payload=payload, _actor=SimpleNamespace(id=1), db=self.db)
         self.assertEqual(enqueue.call_args.kwargs["mode"], "precise")
 
     @patch("routes.products.run_all_scrapers")

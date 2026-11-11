@@ -17,6 +17,7 @@ def serialize_control(control):
         "external_discovery_fallback": control.external_discovery_fallback,
         "playwright_product_fallback": control.playwright_product_fallback,
         "playwright_shipping_fallback": control.playwright_shipping_fallback,
+        "api_with_scraping": control.api_with_scraping,
         "concurrent_requests_per_domain": control.concurrent_requests_per_domain,
         "request_timeout_seconds": control.request_timeout_seconds,
         "updated_at": control.updated_at,

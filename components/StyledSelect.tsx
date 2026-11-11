@@ -12,6 +12,7 @@ type StyledSelectProps<T extends string | number> = {
   onChange: (value: T) => void;
   ariaLabel: string;
   disabled?: boolean;
+  placeholder?: string;
 };
 
 export const StyledSelect = <T extends string | number,>({
@@ -20,11 +21,13 @@ export const StyledSelect = <T extends string | number,>({
   onChange,
   ariaLabel,
   disabled = false,
+  placeholder,
 }: StyledSelectProps<T>) => {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
-  const selectedOption = options[selectedIndex];
+  const matchedIndex = options.findIndex((option) => option.value === value);
+  const selectedIndex = Math.max(0, matchedIndex);
+  const selectedOption = placeholder && matchedIndex < 0 ? undefined : options[selectedIndex];
 
   useEffect(() => {
     if (!open) return;
@@ -65,7 +68,7 @@ export const StyledSelect = <T extends string | number,>({
           selectAt((selectedIndex + direction + options.length) % options.length);
         }}
       >
-        <span>{selectedOption?.label || "Selecione"}</span>
+        <span>{selectedOption?.label || placeholder || "Selecione"}</span>
         <ChevronDown size={15} aria-hidden="true" />
       </button>
       {open && (

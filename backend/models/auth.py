@@ -14,6 +14,7 @@ class AuthUser(Base):
     password_hash = Column(String(128), nullable=False)
     password_salt = Column(String(64), nullable=False)
     role = Column(String(20), default="viewer", nullable=False)
+    logistics_postal_code = Column(String(8), nullable=False, default='01001000')
     avatar_data_url = Column(Text, nullable=True)
     is_admin = Column(Boolean, default=False, nullable=False)
     is_owner = Column(Boolean, default=False, nullable=False)

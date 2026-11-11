@@ -1,3 +1,4 @@
+import { apiAuthHeaders } from "./apiAuth";
 import { STORE_OPTIONS } from "./preferences";
 
 export type FreightQuote = { shipping_cost: number; source: string; seller: string; url: string; captured_at: string; stale: boolean };
@@ -46,9 +47,9 @@ export async function loadFreightMap(base: string, sku: string, sources: string[
   const params = new URLSearchParams();
   sources.map(canonicalFreightStore).forEach((source) => params.append("source", source));
   const path = `${base}/products/lead-time/${encodeURIComponent(sku)}`;
-  const response = await fetch(`${path}/shipping?${params}`, { signal });
+  const response = await fetch(`${path}/shipping?${params}`, { signal, headers: apiAuthHeaders() });
   if (response.status === 404) {
-    const matrix = await fetch(path, { signal });
+    const matrix = await fetch(path, { signal, headers: apiAuthHeaders() });
     if (matrix.ok) return fromMatrix(await matrix.json() as LegacyMatrix, sources);
     throw new Error("Não foi possível carregar os fretes. Verifique se o backend está atualizado e tente novamente.");
   }

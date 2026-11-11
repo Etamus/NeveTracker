@@ -49,6 +49,8 @@ class AnalyticsSheetTests(unittest.TestCase):
             yield self.db
 
         app.dependency_overrides[get_db] = override_db
+        from services.auth_service import get_current_user
+        app.dependency_overrides[get_current_user] = lambda: object()
         self.client = TestClient(app)
 
         self.db.add(KnownSku(sku="W10531315", description="Compressor", cluster="A"))

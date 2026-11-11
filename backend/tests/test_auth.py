@@ -224,6 +224,33 @@ class AuthTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
 
+    def test_administrator_has_full_access_and_can_assign_profiles(self):
+        from routes.integrations import integration_router
+        from routes.products import product_router
+        self.client.app.include_router(integration_router,prefix='/integrations')
+        self.client.app.include_router(product_router,prefix='/products')
+        owner=self.login()
+        created=self.client.post('/auth/users',headers=owner,json={'username':'ADMIN2','password':'5678','role':'administrator'})
+        self.assertEqual(created.status_code,201,created.text)
+        self.assertEqual(created.json()['role'],'administrator')
+        self.assertFalse(created.json()['is_owner'])
+        admin=self.login('ADMIN2','5678')
+        self.assertEqual(self.client.get('/integrations',headers=admin).status_code,200)
+        self.assertEqual(self.client.get('/products/crawler-control',headers=admin).status_code,200)
+        control=self.client.put('/products/crawler-control',headers=admin,json={'default_mode':'precise'})
+        self.assertEqual(control.status_code,200,control.text)
+        subordinate=self.client.post('/auth/users',headers=admin,json={'username':'ADMIN3','password':'5678','role':'administrator'})
+        self.assertEqual(subordinate.status_code,201,subordinate.text)
+        target=subordinate.json()['id']
+        self.assertEqual(self.client.patch(f'/auth/users/{target}',headers=admin,json={'role':'viewer'}).status_code,200)
+        self.assertEqual(self.client.patch(f'/auth/users/{target}',headers=admin,json={'role':'administrator'}).status_code,200)
+        self.assertEqual(self.client.patch('/auth/users/1',headers=admin,json={'role':'viewer'}).status_code,400)
+        self.client.post('/auth/users',headers=owner,json={'username':'GOVTEST','password':'5678','role':'governor'})
+        gov=self.login('GOVTEST','5678')
+        self.assertEqual(self.client.post('/auth/users',headers=gov,json={'username':'ESCALATE','password':'5678','role':'administrator'}).status_code,403)
+        self.assertEqual(self.client.patch(f'/auth/users/{target}',headers=gov,json={'role':'administrator'}).status_code,403)
+        self.assertEqual(self.client.get('/integrations',headers=gov).status_code,403)
+
 
 if __name__ == "__main__":
     unittest.main()

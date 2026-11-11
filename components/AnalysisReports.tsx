@@ -1,3 +1,4 @@
+import { apiAuthHeaders } from "../src/apiAuth";
 import { useEffect, useMemo, useState } from "react";
 import { FileSpreadsheet, LoaderCircle, RefreshCw } from "lucide-react";
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
@@ -42,7 +43,7 @@ export default function AnalysisReports({ mode, query, selectedSkus, sources, br
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`${getApiBaseUrl()}/analysis/options`, { signal: controller.signal }).then((response) => {
+    fetch(`${getApiBaseUrl()}/analysis/options`, { signal: controller.signal, headers: apiAuthHeaders() }).then((response) => {
       if (!response.ok) throw new Error("Não foi possível carregar as opções de comparação.");
       return response.json();
     }).then(setOptions).catch(() => undefined);
@@ -67,7 +68,7 @@ export default function AnalysisReports({ mode, query, selectedSkus, sources, br
     if (mode === "comparison" && left === right) { setComparison(null); setLoading(false); return; }
     const timer = window.setTimeout(async () => {
       try {
-        const response = await fetch(url, { signal: controller.signal });
+        const response = await fetch(url, { signal: controller.signal, headers: apiAuthHeaders() });
         const result = await response.json();
         if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : "Não foi possível carregar a análise. Verifique se o backend está atualizado.");
         if (controller.signal.aborted) return;
@@ -80,7 +81,7 @@ export default function AnalysisReports({ mode, query, selectedSkus, sources, br
 
   const exportReport = async () => {
     setExporting(true); setError("");
-    try { await downloadExcel(`${url}&export=true`, mode === "history" ? "historico-precos.xlsx" : "comparacao-lojas.xlsx"); }
+    try { await downloadExcel(`${url}&export=true`, mode === "history" ? "historico-precos.xlsx" : "comparacao-lojas.xlsx", apiAuthHeaders()); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Falha ao exportar."); }
     finally { setExporting(false); }
   };

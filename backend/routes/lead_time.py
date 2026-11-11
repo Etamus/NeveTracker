@@ -3,13 +3,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from database import get_db
-from services.auth_service import require_operator
+from services.auth_service import require_operator, get_current_user
 from services.lead_time_destinations import BY_UF
 from services.lead_time_service import get_matrix, get_shipping_map, enqueue_quotes
 from models.product import LeadTimeQuote
 from services.delivery_destinations import destinations, save_destinations
 
-lead_time_router = APIRouter()
+lead_time_router = APIRouter(dependencies=[Depends(get_current_user)])
 
 
 class QuoteRequest(BaseModel):

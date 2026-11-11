@@ -5117,6 +5117,26 @@ svg.animate-spin {
 .destination-dialog__body p { margin-top: 12px; color: var(--muted); font-size: 12px; line-height: 1.6; }
 @media (max-width: 700px) { .analysis-comparison-cards { grid-template-columns: minmax(0, 1fr); } .analysis-report__actions { margin-left: 0; width: 100%; } .analysis-report__toolbar .styled-select { flex: 1; min-width: 120px; } }
 .schedule-stale-setting { gap: 18px; padding: 16px 0; border-top: 1px solid var(--border); }
+.extraction-content-scroll--schedule .schedule-card__head,
+.extraction-content-scroll--schedule .schedule-card__head--footer,
+.extraction-content-scroll--schedule .schedule-stale-setting { border-top: 0; border-bottom: 0; }
+.modal-content-panel:has(.extraction-content-scroll--schedule) > .extraction-action-footer { border-top: 0; }
+.sku-metadata-editor { display: grid; gap: 20px; }
+.sku-metadata-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.sku-metadata-fields input, .sku-metadata-bulk textarea { width: 100%; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-subtle); color: var(--foreground); font: inherit; font-size: 13px; padding: 10px 12px; }
+.sku-metadata-bulk p { color: var(--muted); font-size: 12px; line-height: 1.6; margin-bottom: 12px; }
+.sku-metadata-bulk textarea { resize: vertical; min-height: 180px; }
+.sku-metadata-upload { display: inline-flex; margin-top: 12px; cursor: pointer; }
+.sku-metadata-upload input { display: none; }
+.sku-metadata-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; }
+.sku-metadata-footer .sku-metadata-actions { width: 100%; }
+.extraction-content-scroll--metadata { overflow-y: auto !important; }
+.sku-metadata-actions .sku-metadata-upload { margin-top: 0; }
+.sku-metadata-editor .styled-select__trigger, .sku-metadata-editor .styled-select__option { font-weight: 400; }
+.sku-metadata-file-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.sku-metadata-file-actions .sku-metadata-upload { margin-top: 0; }
+.sku-metadata-upload--disabled { opacity: .5; pointer-events: none; }
+@media (max-width: 600px) { .sku-metadata-fields { grid-template-columns: minmax(0, 1fr); } }
 .schedule-stale-setting strong { font-size: 13px; color: var(--foreground); }
 .schedule-stale-setting p { max-width: 490px; margin-top: 5px; font-size: 12px; line-height: 1.5; color: var(--muted); }
 .freight-map { margin-bottom: 20px; }

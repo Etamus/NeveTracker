@@ -46,7 +46,7 @@ from services.scraper_service import (
 from services.analytics_export import build_analytics_workbook
 from services.offer_enrichment import normalize_postal_code
 from services.crawler_control import get_control, serialize_control, update_control
-from services.auth_service import require_developer, require_operator
+from services.auth_service import require_developer, require_operator, get_current_user
 from services.product_sources import serialize_source
 from services.scrape_pagination import coverage_by_store
 from services.precise_extraction import run_precise_extraction
@@ -212,7 +212,7 @@ def _apply_search_filter(query, search_text: str, match_all: bool):
     if not terms:
         return query
 
-    clauses = [Product.name.ilike(f"%{term}%") for term in terms]
+    clauses = [Product.name.ilike('%' + term.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%', escape='\\') for term in terms]
     return query.filter(and_(*clauses) if match_all else or_(*clauses))
 
 
@@ -416,8 +416,10 @@ def _sku_status_map(db: Session, skus=None):
     return statuses
 
 
-def _find_products(db: Session, search_text: Optional[str] = None):
+def _find_products(db: Session, search_text: Optional[str] = None, strict=False):
     query = _latest_products_query(db)
+    if strict and search_text and not _query_terms(search_text):
+        return []
 
     if search_text:
         strict_results = (
@@ -426,7 +428,7 @@ def _find_products(db: Session, search_text: Optional[str] = None):
             .limit(30)
             .all()
         )
-        if strict_results:
+        if strict_results or strict:
             return strict_results
 
         return (
@@ -838,6 +840,7 @@ def update_extraction_schedule(
     schedule.repeat_every_hours = payload.repeat_every_hours
     schedule.force_refresh = payload.force_refresh
     schedule.only_stale = payload.only_stale
+    schedule.owner_user_id = _actor.id
     schedule.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(schedule)
@@ -845,27 +848,8 @@ def update_extraction_schedule(
 
 
 @product_router.post("/batch-search")
-def batch_search_products(payload: SkuBatchRequest, db: Session = Depends(get_db)):
-    skus = _normalize_sku_list(payload.skus)
-    if not skus:
-        raise HTTPException(status_code=400, detail="Informe ao menos um SKU valido.")
-    if len(skus) > BATCH_SKU_LIMIT:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Limite de {BATCH_SKU_LIMIT} SKUs por extracao.",
-        )
-
-    _register_skus(db, skus)
-    items = []
-    for sku in skus:
-        try:
-            summary, status = _search_sku_summary(sku, payload, db)
-            items.append(_sku_batch_result(db, sku, summary, status))
-        except Exception as exc:
-            db.rollback()
-            items.append(_sku_error_result(db, sku, exc))
-
-    return {"items": items}
+def batch_search_products(payload: SkuBatchRequest, db: Session = Depends(get_db), _actor: AuthUser = Depends(require_operator)):
+    return create_extraction_job(payload, _actor, db)
 
 
 def _register_skus(db: Session, skus):
@@ -915,6 +899,7 @@ def _search_sku_summary(sku, payload, db, refreshed_after=None, collection_after
             collection_after=collection_after,
             resume=resume,
             progress=progress,
+            api_with_scraping=payload.api_with_scraping,
         )
     else:
         summary = run_all_scrapers(
@@ -987,6 +972,7 @@ def process_extraction_queue_item(sku, options):
             postal_code=options.get("postal_code"),
             scope=options.get("scope") or "all",
             mode=options.get("mode") or "quick",
+            api_with_scraping=options.get('api_with_scraping'),
         )
         summary, status = _search_sku_summary(
             sku,
@@ -1073,6 +1059,8 @@ def create_extraction_job(
         postal_code=normalize_postal_code(payload.postal_code),
         scope=payload.scope,
         mode=(payload.mode if "mode" in payload.model_fields_set else get_control(db).default_mode),
+        owner_user_id=_actor.id,
+        api_with_scraping=get_control(db).api_with_scraping,
     )
 
 
@@ -1096,6 +1084,8 @@ def create_database_extraction_job(
         postal_code=normalize_postal_code(payload.postal_code),
         scope=payload.scope,
         mode=(payload.mode if "mode" in payload.model_fields_set else get_control(db).default_mode),
+        owner_user_id=_actor.id,
+        api_with_scraping=get_control(db).api_with_scraping,
     )
 
 
@@ -1184,6 +1174,8 @@ def rediscover_product_sources(
         force_refresh=True,
         refresh_if_stale=False,
         mode="precise",
+        owner_user_id=_actor.id,
+        api_with_scraping=get_control(db).api_with_scraping,
     )
 
 
@@ -1204,7 +1196,7 @@ def request_extraction_job_cancel(
     job_id: str,
     _actor: AuthUser = Depends(require_operator),
 ):
-    job = cancel_extraction_job(job_id)
+    job = cancel_extraction_job(job_id, owner_user_id=_actor.id)
     if not job:
         raise HTTPException(status_code=404, detail="Fila de extracao nao encontrada.")
     return job
@@ -1276,6 +1268,8 @@ def _combine_summaries(summaries, skus):
 
 @product_router.post("/search/batch")
 def search_sku_batch(payload: SkuBatchRequest, db: Session = Depends(get_db)):
+    if not payload.local_only:
+        raise HTTPException(409, 'Inicie a extração pelo modal de Extrações para acompanhar a fila.')
     skus = _normalize_sku_list(payload.skus)
     if not skus:
         raise HTTPException(status_code=400, detail="Informe ao menos um SKU valido.")
@@ -1350,7 +1344,7 @@ def export_analytics(payload: AnalyticsExportRequest):
     )
 
 
-@product_router.get("/analytics/sheet/options")
+@product_router.get("/analytics/sheet/options", dependencies=[Depends(get_current_user)])
 def analytics_sheet_options(
     source: Optional[list[str]] = Query(None),
     db: Session = Depends(get_db),
@@ -1395,7 +1389,7 @@ def _analytics_sheet_query(db, skus, search, source, seller, fulfillment=None):
     return query
 
 
-@product_router.get("/analytics/sheet/summary")
+@product_router.get("/analytics/sheet/summary", dependencies=[Depends(get_current_user)])
 def analytics_sheet_summary(
     skus: str = "",
     search: str = "",
@@ -1478,7 +1472,7 @@ def analytics_sheet_summary(
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
-@product_router.get("/analytics/sheet/export")
+@product_router.get("/analytics/sheet/export", dependencies=[Depends(get_current_user)])
 def export_analytics_sheet(
     skus: str = "",
     search: str = "",
@@ -1557,7 +1551,7 @@ def export_analytics_sheet(
     )
 
 
-@product_router.get("/analytics/sheet")
+@product_router.get("/analytics/sheet", dependencies=[Depends(get_current_user)])
 def analytics_sheet(
     skus: str = "",
     search: str = "",
@@ -1640,75 +1634,16 @@ def refresh_prices(
     postal_code: Optional[str] = None,
     scope: str = "all",
     db: Session = Depends(get_db),
+    _actor: AuthUser = Depends(require_operator),
 ):
-    summary = _apply_summary_metadata(
-        run_all_scrapers(q, db, postal_code=postal_code, scope=scope),
-        db,
-        _primary_sku(q),
-    )
-    return {
-        "message": (
-            "Busca finalizada. "
-            f"{summary['processed_count']} preços novos ou atualizados"
-        ),
-        "results": summary["results"],
-        "stores": summary["stores"],
-        "comparison": summary["comparison"],
-        "source_health": summary.get("source_health", []),
-    }
+    return create_extraction_job(SkuBatchRequest(skus=_extract_skus(q), postal_code=postal_code, scope=scope), _actor, db)
 
 
 @product_router.get("/search")
 def search_and_update(q: str = Query(..., min_length=2), db: Session = Depends(get_db)):
     search_text = q.strip()
     sku = _primary_sku(search_text)
-
-    if sku:
-        cached_results = _serialize_results(_find_sku_products(db, sku), db)
-        if cached_results:
-            summary = _apply_summary_metadata(
-                build_summary_from_cached_results(cached_results, sku), db, sku
-            )
-            unavailable_count = len(
-                [store for store in summary["stores"] if not store["available"]]
-            )
-            return {
-                "message": (
-                    f"Resultado carregado do banco local. {len(cached_results)} "
-                    f"ofertas analisadas para {sku}; {unavailable_count} "
-                    "lojas sem disponibilidade."
-                ),
-                "results": summary["results"],
-                "stores": summary["stores"],
-                "comparison": summary["comparison"],
-                "source_health": summary.get("source_health", []),
-            }
-
-    summary = _apply_summary_metadata(
-        run_all_scrapers(search_text, db), db, _primary_sku(search_text)
-    )
-    results = summary["results"]
-    comparison = summary["comparison"]
-    unavailable_count = len(
-        [store for store in summary["stores"] if not store["available"]]
-    )
-
-    if results:
-        message = (
-            f"Busca concluída. {len(results)} ofertas analisadas em "
-            f"{len(comparison)} linhas comparativas; {unavailable_count} "
-            "lojas sem disponibilidade."
-        )
-    else:
-        message = (
-            "Nenhuma das lojas alvo retornou oferta nas fontes gratuitas agora. "
-            "Cada loja foi marcada como Não disponível."
-        )
-
-    return {
-        "message": message,
-        "results": results,
-        "stores": summary["stores"],
-        "comparison": comparison,
-        "source_health": summary.get("source_health", []),
-    }
+    rows = [row for row in _find_sku_products(db, sku) if _product_belongs_to_sku(row[0], sku)] if sku else _find_products(db, search_text, strict=True)
+    cached = _serialize_results(rows, db, resolve_redirects=False)
+    summary = _apply_summary_metadata(build_summary_from_cached_results(cached, search_text), db, sku)
+    return {'message': 'Consulta ao banco local.', **summary}

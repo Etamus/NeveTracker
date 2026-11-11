@@ -8,7 +8,8 @@ from models.product import OfferObservation
 from services.price_observations import history_report, compare_groups, local_day
 from services.analysis_workbooks import history_workbook, comparison_workbook
 
-analysis_router = APIRouter()
+from services.auth_service import get_current_user
+analysis_router = APIRouter(dependencies=[Depends(get_current_user)])
 
 
 def excel(stream, filename):

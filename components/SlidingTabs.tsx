@@ -33,6 +33,7 @@ import {
 } from "../src/preferences";
 
 interface SlidingTabsProps {
+  isAuthenticated?: boolean;
   activeTab: number;
   onTabChange: (tab: number) => void;
   loading: boolean;
@@ -562,6 +563,7 @@ export default function SlidingTabs({
   lastQuery,
   analyticsMap,
   analyticsReport,
+  isAuthenticated = true,
 }: SlidingTabsProps) {
   const [resultSearch, setResultSearch] = useState("");
   const [sortOrder, setSortOrder] = useState<SortOrder>("stores_desc");
@@ -712,9 +714,9 @@ export default function SlidingTabs({
   }, [defaultStoreSelection, lastQuery]);
 
   useEffect(() => {
-    if (activeTab !== 2) setSelectedRow(null);
+    if (isAuthenticated ? activeTab !== 2 : activeTab !== 0) setSelectedRow(null);
     setHoveredStoreRanking(null);
-  }, [activeTab]);
+  }, [activeTab, isAuthenticated]);
 
   const filteredRows = useMemo(() => {
     const query = normalize(resultSearch);
@@ -869,7 +871,7 @@ export default function SlidingTabs({
 
   const openAnalytics = (row: ComparisonRow) => {
     setSelectedRow(row);
-    onTabChange(2);
+    onTabChange(isAuthenticated ? 2 : 0);
   };
 
   const clearFilters = () => {
@@ -958,8 +960,8 @@ export default function SlidingTabs({
         <AnalyticsSpreadsheet />
       ) : loading ? (
         <div className="mt-5"><LoadingState /></div>
-      ) : selectedRow && activeTab === 2 ? (
-        <div className="tab-scroll-region"><ProductAnalytics row={selectedRow} onBack={() => setSelectedRow(null)} />{analyticsMap?.(selectedStores)}</div>
+      ) : selectedRow && (activeTab === 2 || (!isAuthenticated && activeTab === 0)) ? (
+        <div className="tab-scroll-region"><ProductAnalytics row={selectedRow} backLabel={isAuthenticated ? "Voltar para visão geral" : "Voltar para ofertas"} onBack={() => { setSelectedRow(null); if (!isAuthenticated) onTabChange(0); }} />{isAuthenticated && analyticsMap?.(selectedStores)}</div>
       ) : (
         <>
           <div className="workspace-toolbar">
@@ -1638,14 +1640,14 @@ const MarketAnalytics = ({
   );
 };
 
-const ProductAnalytics = ({ row, onBack }: { row: ComparisonRow; onBack: () => void }) => {
+const ProductAnalytics = ({ row, onBack, backLabel }: { row: ComparisonRow; onBack: () => void; backLabel: string }) => {
   const offers = bestOffersByStore(row.offers);
   const pricedOffers = offers.filter((offer) => offerIsAvailable(offer) && offer.current_price != null);
   const spread = pricedOffers.length > 1 ? Number(pricedOffers[pricedOffers.length - 1].current_price) - Number(pricedOffers[0].current_price) : 0;
 
   return (
     <div className="mt-5 animate-enter">
-      <button type="button" onClick={onBack} className="back-button"><ArrowLeft size={15} />Voltar para visão geral</button>
+      <button type="button" onClick={onBack} className="back-button"><ArrowLeft size={15} />{backLabel}</button>
       <div className="mt-4 grid gap-3 sm:grid-cols-3">
         <article className="detail-stat"><span>Melhor preço</span><strong className="text-[var(--success)]">{formatCurrency(row.cheapest_price)}</strong><small>{row.cheapest_store}</small></article>
         <article className="detail-stat"><span>Preço médio</span><strong>{formatCurrency(row.pma)}</strong><small>{row.offer_count} ofertas analisadas</small></article>

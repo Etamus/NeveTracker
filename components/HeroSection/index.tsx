@@ -15,6 +15,7 @@ import {
   ExternalLink,
   FileSpreadsheet,
   FileDown,
+  ClipboardList,
   Grid2X2,
   Github,
   Info,
@@ -47,6 +48,7 @@ import { StyledSelect } from "../StyledSelect";
 import LeadTimeView from '../LeadTimeView';
 import FreightMap from "../FreightMap";
 import AnalysisReports from "../AnalysisReports";
+import SkuMetadataEditor from "../SkuMetadataEditor";
 import type {
   ActiveExtractionJobResponse,
   AuthLoginResponse,
@@ -70,6 +72,7 @@ import {
   getInterfacePreferences,
   regionFormatOptions,
   saveInterfacePreferences,
+  setPreferenceUser,
   type InterfacePreferences,
 } from "../../src/preferences";
 
@@ -107,13 +110,14 @@ const navigation = [
 
 type ThemeMode = "light" | "dark";
 type UserRole = AuthUser["role"];
-type ExtractionTab = "extract" | "database" | "schedule" | "control";
+type ExtractionTab = "extract" | "database" | "schedule" | "control" | "metadata";
 type ExtractionMode = "quick" | "precise";
 type SettingsTab = "general" | "about";
 type AdminEditorTab = "access" | "profile";
 
 const defaultCrawlerControl: CrawlerControlSettings = {
   default_mode: "quick",
+  api_with_scraping: true,
   external_discovery_fallback: true,
   playwright_product_fallback: true,
   playwright_shipping_fallback: true,
@@ -130,9 +134,11 @@ const resolvedUserRole = (user?: AuthUser | null): UserRole => {
   return user.is_admin ? "governor" : "viewer";
 };
 
+const hasFullAccess = (role: UserRole) => role === "developer" || role === "administrator";
+
 const userRoleLabel = (user: AuthUser) => {
   const role = resolvedUserRole(user);
-  if (role === "developer") return "Administrador";
+  if (hasFullAccess(role)) return "Administrador";
   if (role === "governor") return "Governante";
   return "Visualizador";
 };
@@ -343,6 +349,7 @@ export const HeroSection = () => {
   const [authLoading, setAuthLoading] = useState(false);
   const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const extractionJobStorageKey = `${EXTRACTION_JOB_STORAGE_KEY}:${currentUser?.id ?? "guest"}`;
   const [adminUsers, setAdminUsers] = useState<AuthUser[]>([]);
   const [selectedAdminUser, setSelectedAdminUser] = useState<AuthUser | null>(null);
   const [adminUsername, setAdminUsername] = useState("");
@@ -368,10 +375,12 @@ export const HeroSection = () => {
   const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [extractionTab, setExtractionTab] = useState<ExtractionTab>("extract");
+  const [metadataFooter, setMetadataFooter] = useState<HTMLDivElement | null>(null);
   const [scheduleSettings, setScheduleSettings] = useState<ScheduledExtractionSettings>(getInitialScheduleSettings);
   const [scheduleSaving, setScheduleSaving] = useState(false);
   const [scheduleError, setScheduleError] = useState("");
   const [interfacePreferences, setInterfacePreferences] = useState<InterfacePreferences>(getInterfacePreferences);
+  const [preferenceSaveError, setPreferenceSaveError] = useState("");
   const [integrationProviders, setIntegrationProviders] = useState<IntegrationProviderSettings[]>([]);
   const [activeIntegrationProvider, setActiveIntegrationProvider] = useState<string | null>(null);
   const [integrationKeys, setIntegrationKeys] = useState<Record<string, string>>({});
@@ -581,12 +590,21 @@ export const HeroSection = () => {
     }, 220);
   };
 
+  useEffect(() => {
+    setInterfacePreferences(setPreferenceUser(currentUser?.id ?? null, currentUser?.logistics_postal_code || (currentUser ? "01001000" : undefined)));
+    setPreferenceSaveError("");
+  }, [currentUser?.id]);
+
   const updateInterfacePreferences = (updater: (currentPreferences: InterfacePreferences) => InterfacePreferences) => {
-    setInterfacePreferences((currentPreferences) => {
-      const nextPreferences = updater(currentPreferences);
-      saveInterfacePreferences(nextPreferences);
-      return nextPreferences;
-    });
+    const nextPreferences = updater(interfacePreferences);
+    setInterfacePreferences(nextPreferences);
+    saveInterfacePreferences(nextPreferences);
+    if (currentUser && nextPreferences.logisticsPostalCode !== interfacePreferences.logisticsPostalCode && (nextPreferences.logisticsPostalCode.length === 8 || !nextPreferences.logisticsPostalCode)) {
+      setPreferenceSaveError("");
+      void fetch(`${getApiBaseUrl()}/auth/me/preferences`, { method: "PUT", headers: authorizedHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ logistics_postal_code: nextPreferences.logisticsPostalCode }) }).then((response) => {
+        if (!response.ok) throw new Error("Não foi possível salvar seu CEP de referência.");
+      }).catch((reason) => setPreferenceSaveError(reason instanceof Error ? reason.message : "Falha ao salvar CEP."));
+    }
   };
 
   const loadSkuStatus = async (skus?: string[]) => {
@@ -616,7 +634,7 @@ export const HeroSection = () => {
       const control = await controlResponse.json() as CrawlerControlSettings;
       setCrawlerControl(control);
       setExtractionMode(control.default_mode);
-      if (resolvedUserRole(currentUser) === "developer") {
+      if (hasFullAccess(resolvedUserRole(currentUser))) {
         const sourceResponse = await fetch(`${getApiBaseUrl()}/products/sources`, {
           headers: authorizedHeaders(),
         });
@@ -671,7 +689,7 @@ export const HeroSection = () => {
       }
       setActiveExtractionJob(data);
       setExtractionRunning(true);
-      window.localStorage.setItem(EXTRACTION_JOB_STORAGE_KEY, data.id);
+      window.localStorage.setItem(extractionJobStorageKey, data.id);
     } catch (error) {
       setExtractionError(error instanceof Error ? error.message : "Não foi possível redescobrir o SKU.");
     } finally {
@@ -680,7 +698,7 @@ export const HeroSection = () => {
   };
 
   const loadIntegrationSettings = async () => {
-    if (resolvedUserRole(currentUser) !== "developer") return;
+    if (!hasFullAccess(resolvedUserRole(currentUser))) return;
     setIntegrationsLoading(true);
     setIntegrationsError("");
     try {
@@ -791,7 +809,7 @@ export const HeroSection = () => {
   };
 
   const openIntegrations = () => {
-    if (resolvedUserRole(currentUser) !== "developer") return;
+    if (!hasFullAccess(resolvedUserRole(currentUser))) return;
     setAccountOpen(false);
     setSidebarOpen(false);
     setIntegrationsOpen(true);
@@ -1017,13 +1035,13 @@ export const HeroSection = () => {
     if (editingUser) {
       if (adminPassword) payload.password = adminPassword;
       if (
-        resolvedUserRole(currentUser) === "developer" &&
+        hasFullAccess(resolvedUserRole(currentUser)) &&
         !editingUser.is_owner &&
         adminRole !== resolvedUserRole(editingUser)
       ) {
         payload.role = adminRole;
       }
-      if (!(resolvedUserRole(currentUser) !== "developer" && resolvedUserRole(editingUser) !== "viewer" && editingUser.id !== currentUser?.id) && adminAvatarDraft !== undefined) payload.avatar_data_url = adminAvatarDraft;
+      if (!(!hasFullAccess(resolvedUserRole(currentUser)) && resolvedUserRole(editingUser) !== "viewer" && editingUser.id !== currentUser?.id) && adminAvatarDraft !== undefined) payload.avatar_data_url = adminAvatarDraft;
       if (!Object.keys(payload).length) {
         setAdminError("Altere a foto, a senha ou as permissões.");
         return;
@@ -1031,7 +1049,7 @@ export const HeroSection = () => {
     } else {
       payload.username = adminUsername.trim().toUpperCase();
       payload.password = adminPassword;
-      payload.role = resolvedUserRole(currentUser) === "developer" ? adminRole : "viewer";
+      payload.role = hasFullAccess(resolvedUserRole(currentUser)) ? adminRole : "viewer";
       if (adminAvatarDraft !== undefined) payload.avatar_data_url = adminAvatarDraft;
     }
 
@@ -1187,7 +1205,7 @@ export const HeroSection = () => {
       }
       setActiveExtractionJob(data);
       setExtractionProgress(`${data.processed_skus} de ${data.total_skus}`);
-      window.localStorage.setItem(EXTRACTION_JOB_STORAGE_KEY, data.id);
+      window.localStorage.setItem(extractionJobStorageKey, data.id);
     } catch (error) {
       console.error("Erro ao extrair SKUs:", error);
       setExtractionError(error instanceof Error ? error.message : "Falha ao extrair SKUs.");
@@ -1256,7 +1274,7 @@ export const HeroSection = () => {
         throw new Error(apiErrorMessage(data, `HTTP ${response.status}`));
       }
       setActiveExtractionJob(data);
-      window.localStorage.setItem(EXTRACTION_JOB_STORAGE_KEY, data.id);
+      window.localStorage.setItem(extractionJobStorageKey, data.id);
     } catch (error) {
       setExtractionError(error instanceof Error ? error.message : "Falha ao atualizar o SKU.");
       setRefreshingSku(null);
@@ -1316,7 +1334,7 @@ export const HeroSection = () => {
         throw new Error(apiErrorMessage(data, `HTTP ${response.status}`));
       }
       setActiveExtractionJob(data);
-      window.localStorage.setItem(EXTRACTION_JOB_STORAGE_KEY, data.id);
+      window.localStorage.setItem(extractionJobStorageKey, data.id);
     } catch (error) {
       setExtractionError(error instanceof Error ? error.message : "Falha ao atualizar o banco local.");
       setRefreshingAllSkus(false);
@@ -1326,7 +1344,7 @@ export const HeroSection = () => {
   };
 
   const cancelActiveExtraction = async () => {
-    if (!activeExtractionJob || !isExtractionJobActive(activeExtractionJob)) return;
+    if (!activeExtractionJob || !isExtractionJobActive(activeExtractionJob) || activeExtractionJob.owner_user_id !== currentUser?.id) return;
     try {
       const response = await fetch(
         `${getApiBaseUrl()}/products/extraction-jobs/${activeExtractionJob.id}/cancel`,
@@ -1343,11 +1361,15 @@ export const HeroSection = () => {
   };
 
   useEffect(() => {
+    if (!currentUser || resolvedUserRole(currentUser) === "viewer") {
+      setActiveExtractionJob(null); setExtractionRunning(false); setRefreshingSku(null); setRefreshingAllSkus(false); setExtractionConnectionLost(false);
+      return;
+    }
     let disposed = false;
     let retryTimer: number | undefined;
 
     const restoreJob = async () => {
-      const storedJobId = window.localStorage.getItem(EXTRACTION_JOB_STORAGE_KEY);
+      const storedJobId = window.localStorage.getItem(extractionJobStorageKey);
       const storedUrl = storedJobId
         ? `${getApiBaseUrl()}/products/extraction-jobs/${storedJobId}`
         : null;
@@ -1376,9 +1398,9 @@ export const HeroSection = () => {
             ? `${job.visited_skus} visitados`
             : `${job.processed_skus} de ${job.total_skus}`);
           setRefreshingAllSkus(job.kind === "database");
-          window.localStorage.setItem(EXTRACTION_JOB_STORAGE_KEY, job.id);
+          window.localStorage.setItem(extractionJobStorageKey, job.id);
         } else {
-          window.localStorage.removeItem(EXTRACTION_JOB_STORAGE_KEY);
+          window.localStorage.removeItem(extractionJobStorageKey);
         }
       } catch {
         if (!disposed) retryTimer = window.setTimeout(() => void restoreJob(), 3000);
@@ -1390,10 +1412,10 @@ export const HeroSection = () => {
       disposed = true;
       if (retryTimer) window.clearTimeout(retryTimer);
     };
-  }, []);
+  }, [currentUser?.id, currentUser?.role]);
 
   useEffect(() => {
-    if (!activeExtractionJob || !isExtractionJobActive(activeExtractionJob)) return;
+    if (!currentUser || resolvedUserRole(currentUser) === "viewer" || !activeExtractionJob || !isExtractionJobActive(activeExtractionJob)) return;
     const jobId = activeExtractionJob.id;
     let disposed = false;
     let timer: number | undefined;
@@ -1403,6 +1425,10 @@ export const HeroSection = () => {
         const response = await fetch(`${getApiBaseUrl()}/products/extraction-jobs/${jobId}`, {
           headers: authorizedHeaders(),
         });
+        if (response.status === 401 || response.status === 403) {
+          if (!disposed) { setActiveExtractionJob(null); setExtractionRunning(false); setCurrentUser(null); }
+          return;
+        }
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         let job = await response.json() as ExtractionJob;
         if (disposed) return;
@@ -1426,7 +1452,7 @@ export const HeroSection = () => {
           setExtractionProgress("");
           setRefreshingAllSkus(false);
           setRefreshingSku(null);
-          window.localStorage.removeItem(EXTRACTION_JOB_STORAGE_KEY);
+          window.localStorage.removeItem(extractionJobStorageKey);
           await loadSkuStatus();
           return;
         }
@@ -1454,7 +1480,7 @@ export const HeroSection = () => {
       disposed = true;
       if (timer) window.clearTimeout(timer);
     };
-  }, [activeExtractionJob?.id, activeExtractionJob?.status]);
+  }, [activeExtractionJob?.id, activeExtractionJob?.status, currentUser?.id, currentUser?.role]);
 
   const openSkuSelector = () => {
     setSidebarOpen(false);
@@ -1505,8 +1531,13 @@ export const HeroSection = () => {
     void handleSearch(draftSearchSkus, label);
   };
 
+  useEffect(() => {
+    if (!currentUser && [2, 3, 4].includes(activeTab)) setActiveTab(0);
+    if (!hasFullAccess(resolvedUserRole(currentUser)) && ["metadata", "database", "control"].includes(extractionTab)) setExtractionTab("extract");
+  }, [currentUser?.id, currentUser?.role, activeTab, extractionTab]);
+
   const switchTab = (index: number) => {
-    setActiveTab(index);
+    setActiveTab(!currentUser && [2, 3, 4].includes(index) ? 0 : index);
     setSidebarOpen(false);
   };
 
@@ -1564,9 +1595,9 @@ export const HeroSection = () => {
   const scheduleSummary = getScheduleSummary(scheduleSettings);
   const currentUserRole = resolvedUserRole(currentUser);
   const canUseExtractions = Boolean(currentUser && currentUserRole !== "viewer");
-  const canManageIntegrations = currentUserRole === "developer";
+  const canManageIntegrations = hasFullAccess(currentUserRole);
   const canManageUsers = Boolean(currentUser && currentUserRole !== "viewer");
-  const canManageAdvancedExtraction = currentUserRole === "developer";
+  const canManageAdvancedExtraction = hasFullAccess(currentUserRole);
   const pendingPreciseSku = activeExtractionJob?.kind === "single" &&
     activeExtractionJob.mode === "precise" &&
     !isExtractionJobActive(activeExtractionJob) &&
@@ -1575,14 +1606,14 @@ export const HeroSection = () => {
       : null;
   const adminTargetLocked = Boolean(
     selectedAdminUser &&
-    currentUserRole !== "developer" &&
+    !hasFullAccess(currentUserRole) &&
     resolvedUserRole(selectedAdminUser) !== "viewer" &&
     selectedAdminUser.id !== currentUser?.id,
   );
   const canDeleteAdminUser = (user: AuthUser) => Boolean(
     !user.is_owner &&
     user.id !== currentUser?.id &&
-    (currentUserRole === "developer" || resolvedUserRole(user) === "viewer")
+    (hasFullAccess(currentUserRole) || resolvedUserRole(user) === "viewer")
   );
   const integrationGroups = [
     { category: "discovery", title: "Descoberta de lojistas" },
@@ -1611,7 +1642,7 @@ export const HeroSection = () => {
         <div className="flex min-h-0 flex-1 flex-col px-3 py-5">
           <p className="sidebar-label">Workspace</p>
           <nav className="mt-2 space-y-1" aria-label="Navegação principal">
-            {navigation.map((item) => {
+            {navigation.filter((item) => currentUser || ![2, 3, 4].includes(item.tab)).map((item) => {
               const Icon = item.icon;
               const active = activeTab === item.tab;
 
@@ -1778,13 +1809,14 @@ export const HeroSection = () => {
             products={products}
             comparisonRows={comparisonRows}
             lastQuery={lastQuery}
-            analyticsMap={(stores) => <FreightMap query={productName} selectedSkus={selectedSearchSkus} sources={stores} canRefresh={canUseExtractions} headers={authorizedHeaders} />}
+            isAuthenticated={Boolean(currentUser)}
+            analyticsMap={currentUser ? (stores) => <FreightMap query={productName} selectedSkus={selectedSearchSkus} sources={stores} canRefresh={canUseExtractions} headers={authorizedHeaders} /> : undefined}
             analyticsReport={(mode, stores, brands) => <AnalysisReports mode={mode} query={productName} selectedSkus={selectedSearchSkus} sources={stores} brands={brands} />}
           />}
         </main>
       </section>
 
-      {activeExtractionJob && isExtractionJobActive(activeExtractionJob) && (
+      {canUseExtractions && activeExtractionJob && isExtractionJobActive(activeExtractionJob) && (
         <aside
           className="extraction-job-card extraction-job-card--active extraction-job-card--floating"
           role="status"
@@ -1805,7 +1837,7 @@ export const HeroSection = () => {
                   : ""}
               </small>
             </span>
-            {!extractionConnectionLost && !activeExtractionJob.cancel_requested && (
+            {activeExtractionJob.owner_user_id === currentUser?.id && !extractionConnectionLost && !activeExtractionJob.cancel_requested && (
               <button type="button" className="button-quiet" onClick={() => void cancelActiveExtraction()}>
                 Cancelar
               </button>
@@ -2197,13 +2229,14 @@ export const HeroSection = () => {
                 </div>
               )}
 
-              {adminEditorTab === "profile" && currentUserRole === "developer" && !selectedAdminUser?.is_owner && (
+              {adminEditorTab === "profile" && hasFullAccess(currentUserRole) && !selectedAdminUser?.is_owner && (
                 <label className="settings-field admin-role-field">
                   <span>Perfil</span>
                   <StyledSelect
                     value={adminRole === "developer" ? "governor" : adminRole}
                     ariaLabel="Perfil de acesso"
                     options={[
+                      { value: "administrator", label: "Administrador" },
                       { value: "governor", label: "Governante" },
                       { value: "viewer", label: "Visualizador" },
                     ]}
@@ -2215,7 +2248,7 @@ export const HeroSection = () => {
                 </label>
               )}
 
-              {adminEditorTab === "profile" && currentUserRole !== "developer" && !selectedAdminUser?.is_owner && (
+              {adminEditorTab === "profile" && !hasFullAccess(currentUserRole) && !selectedAdminUser?.is_owner && (
                 <div className="admin-profile-static">
                   <span>Perfil</span>
                   <strong>Visualizador</strong>
@@ -2473,10 +2506,13 @@ export const HeroSection = () => {
                             onChange={(selectedTheme) => updateTheme(selectedTheme as ThemeMode)}
                           />
                         </label>
+                        {currentUser && (
                         <label className="settings-field">
                           <span>CEP de referência</span>
                           <input inputMode="numeric" value={interfacePreferences.logisticsPostalCode} onChange={(event) => updateInterfacePreferences((currentPreferences) => ({ ...currentPreferences, logisticsPostalCode: event.target.value.replace(/\D/g, "").slice(0, 8) }))} />
+                          {preferenceSaveError && <small className="auth-error" role="alert">{preferenceSaveError}</small>}
                         </label>
+                        )}
                         <label className="settings-field">
                           <span>Formato monetário</span>
                           <StyledSelect
@@ -2807,6 +2843,7 @@ export const HeroSection = () => {
                 <CalendarClock size={15} />
                 Agendamento
               </button>
+              {canManageAdvancedExtraction && <button type="button" role="tab" aria-selected={extractionTab === "metadata"} className={extractionTab === "metadata" ? "extraction-tab extraction-tab--active" : "extraction-tab"} onClick={() => { setExtractionTab("metadata"); void loadSkuStatus(); }}><ClipboardList size={15} />Cadastros</button>}
               {canManageAdvancedExtraction && (
                 <button
                   type="button"
@@ -2890,6 +2927,8 @@ export const HeroSection = () => {
 
 
               </div>
+            ) : extractionTab === "metadata" && canManageAdvancedExtraction ? (
+              <SkuMetadataEditor items={skuStatusItems} headers={authorizedHeaders} onSaved={() => loadSkuStatus()} footerContainer={metadataFooter} />
             ) : extractionTab === "schedule" ? (
               <div className="extraction-panel" role="tabpanel">
                 <div className="schedule-card">
@@ -3192,6 +3231,7 @@ export const HeroSection = () => {
                       ["external_discovery_fallback", "Discovery externo"],
                       ["playwright_product_fallback", "Navegador para produtos"],
                       ["playwright_shipping_fallback", "Playwright para logística"],
+                      ...(crawlerControl.default_mode === "precise" ? [["api_with_scraping", "APIs simultâneas ao scraping"]] : []),
                     ].map(([field, label]) => (
                       <label key={field} className="crawler-toggle-row">
                         <span>{label}</span>
@@ -3218,7 +3258,8 @@ export const HeroSection = () => {
             )}
             </div>
 
-            {extractionTab !== "database" && (
+            {extractionTab === "metadata" && canManageAdvancedExtraction && <div ref={setMetadataFooter} className="modal-action-footer extraction-action-footer sku-metadata-footer" />}
+            {extractionTab !== "database" && extractionTab !== "metadata" && (
               <div className="modal-action-footer extraction-action-footer">
                 {extractionTab === "extract" && (
                   <button type="submit" form="extraction-run-form" className="button-primary" disabled={extractionRunning}>

@@ -44,9 +44,15 @@ def _schedule_snapshot():
         schedule = db.query(ExtractionSchedule).filter(ExtractionSchedule.id == 1).first()
         if not schedule:
             return None
+        from models.auth import AuthUser
+        from services.auth_service import user_role
+        owner = db.get(AuthUser, schedule.owner_user_id) if schedule.owner_user_id else None
+        allowed = not schedule.owner_user_id or (owner and user_role(owner) != 'viewer')
         return {
-            "enabled": schedule.enabled,
-            "postal_code": schedule.postal_code,
+            "enabled": bool(schedule.enabled and allowed),
+            "owner_user_id": schedule.owner_user_id,
+            "api_with_scraping": db.query(CrawlerControl.api_with_scraping).filter_by(id=1).scalar() is not False,
+            "postal_code": (owner.logistics_postal_code if owner else None) or schedule.postal_code or '01001000',
             "start_time": schedule.start_time,
             "end_time": schedule.end_time,
             "days": _schedule_days(schedule.days),
@@ -138,7 +144,7 @@ def _known_skus(only_stale=False, postal_code=None):
         db.close()
 
 
-def _run_cycle(postal_code, run_key, force_refresh, mode="quick", only_stale=False):
+def _run_cycle(postal_code, run_key, force_refresh, mode="quick", only_stale=False, owner_user_id=None, api_with_scraping=True):
     with SessionLocal() as db:
         active = db.query(ExtractionJob).filter(
             ExtractionJob.schedule_run_key == run_key,
@@ -166,6 +172,8 @@ def _run_cycle(postal_code, run_key, force_refresh, mode="quick", only_stale=Fal
         scope="all",
         mode=mode,
         schedule_run_key=run_key,
+        owner_user_id=owner_user_id,
+        api_with_scraping=api_with_scraping,
     )
     print(
         f" LOG: Agendamento enfileirado para {len(skus)} SKUs "
@@ -185,6 +193,8 @@ def _tick():
         schedule.get("force_refresh", True),
         schedule.get("mode", "quick"),
         schedule.get("only_stale", False),
+        schedule.get('owner_user_id'),
+        schedule.get('api_with_scraping', True),
     )
 
 

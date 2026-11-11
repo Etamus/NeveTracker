@@ -183,10 +183,10 @@ class ExtractionQueueTests(unittest.TestCase):
         calls = []
         def processor(sku, options):
             calls.append(sku)
-            extraction_queue.cancel_extraction_job(options["job_id"])
+            extraction_queue.cancel_extraction_job(options["job_id"], owner_user_id=1)
             return {**self._processor(sku, options), "status": "partial"}
         extraction_queue.configure_extraction_processor(processor)
-        created = extraction_queue.enqueue_extraction_job(self._skus(2), mode="precise")
+        created = extraction_queue.enqueue_extraction_job(self._skus(2), mode="precise", owner_user_id=1)
         self.assertEqual(extraction_queue._process_job_batch(created["id"]), "cancelled")
         self.assertEqual(len(calls), 1)
         self.assertEqual(extraction_queue.get_extraction_job(created["id"])["processed_skus"], 0)
@@ -223,8 +223,8 @@ class ExtractionQueueTests(unittest.TestCase):
 
     def test_cancel_keeps_completed_work_and_skips_remaining_items(self):
         extraction_queue.configure_extraction_processor(self._processor)
-        created = extraction_queue.enqueue_extraction_job(self._skus(35))
-        extraction_queue.cancel_extraction_job(created["id"])
+        created = extraction_queue.enqueue_extraction_job(self._skus(35), owner_user_id=1)
+        extraction_queue.cancel_extraction_job(created["id"], owner_user_id=1)
 
         status = extraction_queue._process_job_batch(created["id"])
         cancelled = extraction_queue.get_extraction_job(created["id"], include_items=True)

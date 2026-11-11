@@ -8,9 +8,11 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from models.auth import AuthSession, AuthUser
-from schemas.auth import LoginRequest, UserCreateRequest, UserUpdateRequest
+from schemas.auth import LoginRequest, UserCreateRequest, UserUpdateRequest, UserPreferencesRequest
 from services.auth_service import (
     ROLE_DEVELOPER,
+    ROLE_ADMINISTRATOR,
+    FULL_ACCESS_ROLES,
     ROLE_GOVERNOR,
     ROLE_VIEWER,
     apply_user_role,
@@ -31,6 +33,13 @@ AVATAR_PATTERN = re.compile(r"^data:image/(jpeg|png|webp);base64,([A-Za-z0-9+/=]
 MAX_AVATAR_BYTES = 400 * 1024
 
 
+@auth_router.put('/me/preferences')
+def save_own_preferences(payload: UserPreferencesRequest, actor=Depends(get_current_user), db: Session = Depends(get_db)):
+    actor.logistics_postal_code = payload.logistics_postal_code
+    db.commit()
+    return {'logistics_postal_code': actor.logistics_postal_code}
+
+
 def _find_user_or_404(db, user_id):
     user = db.query(AuthUser).filter(AuthUser.id == user_id).first()
     if not user:
@@ -41,9 +50,9 @@ def _find_user_or_404(db, user_id):
 def _ensure_target_access(actor, target):
     actor_role = user_role(actor)
     target_role = user_role(target)
-    if target_role == ROLE_DEVELOPER and actor_role != ROLE_DEVELOPER:
+    if target_role in FULL_ACCESS_ROLES and actor_role not in FULL_ACCESS_ROLES:
         raise HTTPException(status_code=403, detail="O usuario principal e protegido.")
-    if target_role == ROLE_GOVERNOR and actor_role != ROLE_DEVELOPER and target.id != actor.id:
+    if target_role == ROLE_GOVERNOR and actor_role not in FULL_ACCESS_ROLES and target.id != actor.id:
         raise HTTPException(status_code=403, detail="Governantes so podem alterar a propria conta.")
 
 
@@ -133,7 +142,7 @@ def create_user(
     requested_role = _requested_role(payload)
     actor_role = user_role(actor)
     if requested_role == ROLE_DEVELOPER:
-        raise HTTPException(status_code=403, detail="Somente DEUSM2 possui o perfil Administrador.")
+        raise HTTPException(status_code=403, detail="O perfil interno de desenvolvedor é reservado ao usuário principal. Use Administrador.")
     if actor_role == ROLE_GOVERNOR and requested_role != ROLE_VIEWER:
         raise HTTPException(status_code=403, detail="Governantes so podem criar Visualizadores.")
 
@@ -166,11 +175,11 @@ def update_user(
 
     role_changed = payload.role is not None or payload.is_admin is not None
     if role_changed:
-        if user_role(actor) != ROLE_DEVELOPER:
-            raise HTTPException(status_code=403, detail="Somente DEUSM2 pode definir perfis.")
+        if user_role(actor) not in FULL_ACCESS_ROLES:
+            raise HTTPException(status_code=403, detail="Somente administradores podem definir perfis.")
         requested_role = _requested_role(payload, user_role(target))
         if target.is_owner or requested_role == ROLE_DEVELOPER:
-            raise HTTPException(status_code=400, detail="DEUSM2 deve permanecer o unico Administrador.")
+            raise HTTPException(status_code=400, detail="O perfil interno do usuário principal não pode ser atribuído ou alterado. Use Administrador para acesso completo.")
         apply_user_role(target, requested_role)
 
     password_changed = payload.password is not None

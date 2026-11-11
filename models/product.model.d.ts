@@ -132,6 +132,8 @@ export type ExtractionJobStatus =
   | "failed";
 
 export interface ExtractionJob {
+  owner_user_id?: number | null;
+  api_with_scraping?: boolean;
   id: string;
   kind: "single" | "manual" | "database" | "scheduled" | string;
   status: ExtractionJobStatus;
@@ -164,6 +166,7 @@ export interface ExtractionJob {
 }
 
 export interface CrawlerControlSettings {
+  api_with_scraping: boolean;
   default_mode: "quick" | "precise";
   external_discovery_fallback: boolean;
   playwright_product_fallback: boolean;
@@ -203,10 +206,11 @@ export interface SkuImportError {
 }
 
 export interface AuthUser {
+  logistics_postal_code?: string;
   id: number;
   username: string;
   avatar_data_url?: string | null;
-  role: "developer" | "governor" | "viewer";
+  role: "developer" | "administrator" | "governor" | "viewer";
   is_admin: boolean;
   is_owner: boolean;
   created_at: string;

@@ -11,6 +11,7 @@ from routes.auth import auth_router
 from routes.integrations import integration_router
 from routes.lead_time import lead_time_router
 from routes.analysis import analysis_router
+from routes.sku_metadata import sku_metadata_router
 from routes.products import process_extraction_queue_item, product_router
 from services.auth_service import ensure_owner_user
 from services.extraction_queue import (
@@ -29,6 +30,16 @@ def _ensure_sqlite_columns():
         return
 
     with engine.begin() as connection:
+        for table, columns in {
+            'auth_users': {'logistics_postal_code': "VARCHAR(8) NOT NULL DEFAULT '01001000'"},
+            'extraction_jobs': {'owner_user_id': 'INTEGER', 'api_with_scraping': 'BOOLEAN NOT NULL DEFAULT 1'},
+            'extraction_schedule': {'owner_user_id': 'INTEGER'},
+            'crawler_control': {'api_with_scraping': 'BOOLEAN NOT NULL DEFAULT 1'},
+        }.items():
+            existing = {row[1] for row in connection.exec_driver_sql(f'PRAGMA table_info({table})')}
+            for column, definition in columns.items():
+                if column not in existing:
+                    connection.exec_driver_sql(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
         control_columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(crawler_control)")}
         if "playwright_product_fallback" not in control_columns:
             connection.exec_driver_sql(
@@ -271,6 +282,7 @@ app.add_middleware(
 )
 
 app.include_router(product_router, prefix="/products", tags=["Products"])
+app.include_router(sku_metadata_router, prefix='/products/skus/metadata', tags=['Products'])
 app.include_router(lead_time_router, prefix='/products/lead-time', tags=['Lead Time'])
 app.include_router(analysis_router, prefix='/analysis', tags=['Analysis'])
 app.include_router(auth_router, prefix="/auth", tags=["Auth"])

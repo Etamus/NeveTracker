@@ -15,16 +15,18 @@ PASSWORD_ITERATIONS = 310_000
 SESSION_DURATION = timedelta(days=7)
 USERNAME_PATTERN = re.compile(r"^[A-Z0-9._-]{3,40}$")
 ROLE_DEVELOPER = "developer"
+ROLE_ADMINISTRATOR = "administrator"
+FULL_ACCESS_ROLES = {ROLE_DEVELOPER, ROLE_ADMINISTRATOR}
 ROLE_GOVERNOR = "governor"
 ROLE_VIEWER = "viewer"
-MANAGEMENT_ROLES = {ROLE_DEVELOPER, ROLE_GOVERNOR}
+MANAGEMENT_ROLES = FULL_ACCESS_ROLES | {ROLE_GOVERNOR}
 
 
 def user_role(user):
     if user.is_owner or user.username == "DEUSM2":
         return ROLE_DEVELOPER
     role = (getattr(user, "role", None) or "").strip().lower()
-    if role in {ROLE_DEVELOPER, ROLE_GOVERNOR, ROLE_VIEWER}:
+    if role in {ROLE_DEVELOPER, ROLE_ADMINISTRATOR, ROLE_GOVERNOR, ROLE_VIEWER}:
         return ROLE_GOVERNOR if role == ROLE_DEVELOPER else role
     return ROLE_GOVERNOR if user.is_admin else ROLE_VIEWER
 
@@ -93,6 +95,7 @@ def user_payload(user):
     return {
         "id": user.id,
         "username": user.username,
+        "logistics_postal_code": user.logistics_postal_code or '01001000',
         "avatar_data_url": user.avatar_data_url,
         "role": role,
         "is_admin": role in MANAGEMENT_ROLES,
@@ -146,7 +149,7 @@ def require_operator(user: AuthUser = Depends(get_current_user)):
 
 
 def require_developer(user: AuthUser = Depends(get_current_user)):
-    if user_role(user) != ROLE_DEVELOPER:
+    if user_role(user) not in FULL_ACCESS_ROLES:
         raise HTTPException(status_code=403, detail="Acesso restrito ao desenvolvedor.")
     return user
 

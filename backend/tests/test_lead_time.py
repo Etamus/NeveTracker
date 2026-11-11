@@ -103,5 +103,9 @@ class LeadTimeTests(unittest.TestCase):
             with self.sessions() as db:yield db
         app.dependency_overrides[get_db]=database
         with TestClient(app) as client:
+            self.assertEqual(client.get('/products/lead-time/W11199342').status_code,401)
+            from services.auth_service import get_current_user
+            from types import SimpleNamespace
+            app.dependency_overrides[get_current_user]=lambda: SimpleNamespace(id=1,username='READER',role='viewer',is_owner=False,is_admin=False)
             self.assertEqual(client.get('/products/lead-time/W11199342').status_code,200)
             self.assertIn(client.post('/products/lead-time/W11199342/refresh',json={'states':['SP']}).status_code,[401,403])

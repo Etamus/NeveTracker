@@ -223,6 +223,7 @@ Em uma instalação nova, o acesso inicial é baseado em um perfil de desenvolve
 ### Perfis de acesso
 
 - `Desenvolvedor`: reservado ao usuário principal; controla integrações, definições avançadas de extração, banco de dados e permissões.
+- `Administrador`: pode ser atribuído na criação ou no gerenciamento de usuários e possui os mesmos acessos funcionais do usuário principal, incluindo Integrações, Definições, Cadastros, Dados e atribuição de perfis. A conta principal continua protegida contra exclusão e alteração de perfil. Governantes não podem criar ou promover Administradores. O cancelamento de uma extração continua restrito a quem a iniciou.
 - `Governante`: acessa a operação e a administração, mas não acessa Integrações nem as áreas avançadas Definições e Dados; novos usuários criados por esse perfil são Visualizadores.
 - `Visualizador`: acessa as consultas e análises, sem acesso aos modais Integrações, Extrações e Administração.
 
@@ -363,6 +364,18 @@ Cada destino usa um CEP de referência da respectiva capital, exibido no cabeça
 Resultados ausentes permanecem como não consultados ou não informados; falta de cotação não significa que a loja não entrega no estado. Cotações com mais de 24 horas são sinalizadas.
 
 ## Agendamento incremental
+
+As filas registram o usuário responsável. Uma extração ativa ou na fila bloqueia a criação de extrações por outro usuário (HTTP 409); a restrição permanece até o cancelamento encerrar o trabalho atual. Somente quem iniciou a fila pode cancelá-la, incluindo as filas agendadas criadas após salvar o agendamento. O toast e a consulta de progresso exigem uma sessão com permissão de extração. A pesquisa pública consulta os dados salvos; novas coletas passam pela fila autenticada do modal.
+
+O agendador verifica o horário de São Paulo a cada 30 segundos, dentro dos dias e da janela definidos. O backend precisa permanecer ligado. Se outra pessoa estiver extraindo, a tentativa do agendamento aguarda uma verificação posterior dentro da janela; cada horário processado fica registrado para evitar duplicação. O usuário que salva o agendamento fica responsável pelas próximas execuções.
+
+Em **Extrações > Definições**, **APIs simultâneas ao scraping** controla a participação das APIs configuradas no modo preciso, incluindo descoberta e fallback oficial do Mercado Livre. Fica ligado inicialmente. O modo rápido mantém o uso das APIs habilitado e oculta o toggle; credenciais, ativação e política de uso de cada integração continuam necessárias. A opção é copiada para a fila ao iniciá-la.
+
+Em **Extrações > Cadastro de SKUs**, acima de **Dados** e com a mesma permissão administrativa dessa aba, selecione um SKU do banco para editar Categoria, Cluster, Subfamília e Mercado. Os botões **Baixar modelo** e **Importar planilha** permitem editar vários materiais no Excel. O modelo contém cinco colunas e os SKUs já salvos. Mercado aceita Cativo ou Competitivo. A edição individual também permite limpar campos; células vazias na importação preservam os valores existentes. A importação valida todas as linhas antes de salvar e recusa SKUs que não estejam no banco. Edição de cadastro não conta como nova coleta de preços.
+
+Visitantes podem pesquisar ofertas e catálogo somente nos dados salvos. Pesquisas sem correspondência permanecem vazias e não acionam scraping. Analytics, Lead Time, Database e suas rotas de dados exigem login. O CEP de referência não aparece em Configurações para visitantes. O analytics aberto por uma oferta permanece disponível, sem o mapa de fretes e com retorno para Ofertas.
+
+O **CEP de referência** de **Configurações > Geral** fica salvo na própria conta e é separado por usuário também no navegador. Contas sem CEP usam `01001-000`. A lista de destinos de **Lead Time > Definir CEPs** é uma configuração separada das cotações.
 
 Em **Extração > Agendamento**, o toggle **Consultar apenas desatualizados** filtra os materiais antes de criar a fila. Fica desligado por padrão, preservando a extração de todos os SKUs. Quando ligado, considera as últimas observações de cada oferta: sem coleta confirmada nas últimas oito horas, cache, CEP divergente, falhas de fontes ou descoberta incompleta mantêm o SKU pendente. Preço inalterado e confirmação de falta de estoque contam como observações válidas. Alterações de cadastro não contam como coleta. Clique em **Salvar** para persistir a opção; o controle Ativo/Inativo continua independente.
 

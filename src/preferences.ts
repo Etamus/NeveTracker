@@ -1,5 +1,15 @@
 export const INTERFACE_PREFERENCES_KEY = "nevetracker-interface-preferences";
 export const INTERFACE_PREFERENCES_EVENT = "nevetracker-interface-preferences-updated";
+let preferenceUserId: number | null = null;
+const postalPreferenceKey = () => `${INTERFACE_PREFERENCES_KEY}:cep:${preferenceUserId ?? 'guest'}`;
+const scopedPostalCode = () => window.localStorage.getItem(postalPreferenceKey()) || '01001000';
+export const setPreferenceUser = (userId: number | null, postalCode?: string) => {
+  preferenceUserId = userId;
+  if (postalCode && /^\d{8}$/.test(postalCode)) window.localStorage.setItem(postalPreferenceKey(), postalCode);
+  const preferences = getInterfacePreferences();
+  window.dispatchEvent(new CustomEvent(INTERFACE_PREFERENCES_EVENT, { detail: preferences }));
+  return preferences;
+};
 const PREVIOUS_INTERFACE_PREFERENCES_KEYS = [
   `${["neve", "track"].join("")}-interface-preferences`,
   `${["neve", "price"].join("")}-interface-preferences`,
@@ -58,7 +68,7 @@ export const getInterfacePreferences = (): InterfacePreferences => {
         break;
       }
     }
-    if (!storedPreferences) return defaultInterfacePreferences;
+    if (!storedPreferences) return { ...defaultInterfacePreferences, logisticsPostalCode: scopedPostalCode() };
 
     const parsed = JSON.parse(storedPreferences) as Partial<InterfacePreferences>;
     let defaultStores = Array.isArray(parsed.defaultStores)
@@ -76,10 +86,7 @@ export const getInterfacePreferences = (): InterfacePreferences => {
       currency,
       locale: regionFormat.locale,
       defaultStores: defaultStores.length ? defaultStores : defaultInterfacePreferences.defaultStores,
-      logisticsPostalCode:
-        typeof parsed.logisticsPostalCode === "string" && parsed.logisticsPostalCode.replace(/\D/g, "").length === 8
-          ? parsed.logisticsPostalCode.replace(/\D/g, "").slice(0, 8)
-          : defaultInterfacePreferences.logisticsPostalCode,
+      logisticsPostalCode: scopedPostalCode(),
     };
   } catch {
     return defaultInterfacePreferences;
@@ -87,7 +94,8 @@ export const getInterfacePreferences = (): InterfacePreferences => {
 };
 
 export const saveInterfacePreferences = (preferences: InterfacePreferences) => {
-  window.localStorage.setItem(INTERFACE_PREFERENCES_KEY, JSON.stringify(preferences));
+  window.localStorage.setItem(INTERFACE_PREFERENCES_KEY, JSON.stringify({ ...preferences, logisticsPostalCode: '01001000' }));
+  window.localStorage.setItem(postalPreferenceKey(), preferences.logisticsPostalCode || '01001000');
   window.dispatchEvent(new CustomEvent(INTERFACE_PREFERENCES_EVENT, { detail: preferences }));
 };
 
