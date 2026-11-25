@@ -13,12 +13,7 @@ sku_metadata_router = APIRouter(dependencies=[Depends(require_developer)])
 
 def saved_skus(db):
     from models.product import Product
-    from routes.products import _extract_skus
-    skus={value for (value,) in db.query(KnownSku.sku) if value}
-    for sku,name in db.query(Product.sku,Product.name):
-        if sku:skus.add(sku.strip().upper())
-        skus.update(_extract_skus(name or ''))
-    return skus
+    return {sku for (sku,) in db.query(KnownSku.sku).union(db.query(Product.sku)) if sku}
 
 
 class MetadataRow(BaseModel):

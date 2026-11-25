@@ -14,7 +14,6 @@ from sqlalchemy.pool import StaticPool
 from database import Base
 from models.product import CrawlerControl, KnownSku, PriceHistory, Product, ProductSource, ScrapeCursor
 from routes.products import (
-    _register_skus,
     _search_sku_summary,
     _sku_status_map,
     create_extraction_job,
@@ -41,6 +40,57 @@ def _workbook_bytes(rows):
 
 
 class SkuImportTests(unittest.TestCase):
+    def test_local_preview_keeps_sellers_and_destinations_when_prices_are_missing(self):
+        sku, url = "W10531315", "https://example.com/shared"
+        for seller, offers in {
+            "A": [("01001000", 30), ("30130003", 35), ("20211110", 12)],
+            "B": [("01001000", None)],
+        }.items():
+            product = Product(sku=sku, name=f"Sensor {sku}")
+            product.prices = [
+                PriceHistory(url=url, source="Magazine Luiza", store=seller, price=price, destination_zip=cep,
+                             availability="in_stock" if price is not None else "out_of_stock")
+                for cep, price in offers
+            ]
+            self.db.add(product)
+        self.db.commit()
+        expected = {("A", "01001000", 30), ("A", "30130003", 35), ("B", "01001000", None)}
+        for skus in ([sku], [sku, "BLF61AR"]):
+            payload = SkuBatchRequest(skus=skus, local_only=True, postal_codes=["01001000", "30130003"])
+            result = search_sku_batch(payload, self.db)
+            store = next(store for store in result["stores"] if store["key"] == "magalu")
+            for items in (result["results"], store["products"]):
+                self.assertEqual({(v["store"], v["destination_zip"], v["current_price"]) for v in items}, expected)
+            self.assertEqual(search_sku_batch(payload, self.db, include_stores=False), {**result, "stores": []})
+
+    def test_sources_pagination_reaches_beyond_old_500_limit_without_duplicates(self):
+        timestamp = datetime(2026, 11, 17, 12)
+        self.db.add_all(ProductSource(sku="W10531315", store="magalu", seller=f"Seller {index}", url=f"https://example.test/{index}", active=index % 2 == 0, last_collected_at=timestamp, first_seen_at=timestamp) for index in range(507))
+        self.db.commit()
+        ids = []
+        for page in range(1, 7):
+            response = list_product_sources(sku=None, active=None, _actor=None, db=self.db, page=page, page_size=100)
+            self.assertEqual(response["total"], 507)
+            self.assertEqual(response["active_count"], 254)
+            self.assertEqual(response["invalid_count"], 253)
+            self.assertLessEqual(len(response["items"]), 100)
+            ids.extend(row["id"] for row in response["items"])
+        self.assertEqual(len(ids), 507)
+        self.assertEqual(len(set(ids)), 507)
+        self.assertEqual(ids, sorted(ids, reverse=True))
+        response = list_product_sources(sku="W10531315", active=False, _actor=None, db=self.db, page=99, page_size=100)
+        self.assertEqual(response["page"], 3)
+        self.assertEqual(response["total"], 253)
+        self.assertTrue(all(not item["active"] for item in response["items"]))
+
+    def test_sources_pagination_validates_bounds_and_empty_page(self):
+        from fastapi import HTTPException
+        for page, size in ((0,50),(1,0),(1,101)):
+            with self.assertRaises(HTTPException):
+                list_product_sources(sku=None, active=None, _actor=None, db=self.db, page=page, page_size=size)
+        response = list_product_sources(sku=None, active=None, _actor=None, db=self.db, page=99, page_size=50)
+        self.assertEqual((response["page"], response["total"], response["items"]), (1,0,[]))
+
     @patch("routes.products.run_precise_extraction", return_value={"results": [], "comparison": []})
     def test_forced_precise_job_does_not_skip_stores_because_other_collector_saved_a_price(self, precise):
         product = Product(name="Filtro W11199342", sku="W11199342")
@@ -152,9 +202,12 @@ class SkuImportTests(unittest.TestCase):
                          ("Subfamilia importada", "Categoria importada", "Cluster importado", "Competitivo"))
 
     def test_registers_and_reads_more_than_sqlite_parameter_limit(self):
+        from services.extraction_queue import enqueue_extraction_job
         skus = [f"W{10600000 + index}" for index in range(1205)]
 
-        _register_skus(self.db, skus)
+        self.db.commit()
+        with patch("services.extraction_queue.SessionLocal", sessionmaker(bind=self.db.get_bind())):
+            enqueue_extraction_job(skus, owner_user_id=1, register_materials=True)
         statuses = _sku_status_map(self.db, skus)
 
         self.assertEqual(self.db.query(KnownSku).count(), 1205)

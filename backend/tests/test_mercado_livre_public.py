@@ -22,6 +22,10 @@ def money(amount):
 
 
 class MercadoLivrePublicTests(unittest.TestCase):
+    def setUp(self):
+        from tests.marketplace_fixture import isolate_marketplace_control
+        isolate_marketplace_control(self)
+
     def source(self, url=CATALOG):
         return SimpleNamespace(store='mercado_livre', url=url, seller='Previous seller', brand=None,
                                external_product_id=None, asin=None, item_id=None)

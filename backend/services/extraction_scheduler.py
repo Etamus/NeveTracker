@@ -1,18 +1,13 @@
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import func
-
 from database import SessionLocal
-from models.product import CrawlerControl, ExtractionSchedule, ExtractionJob, KnownSku, Product, PriceHistory, ProductSource, ScrapeCursor
+from models.product import CrawlerControl, ExtractionSchedule, ExtractionJob, KnownSku
 from services.extraction_queue import enqueue_extraction_job
-from services.offer_enrichment import normalize_postal_code
-from services.structured_products import offer_available
 
 
 LOCAL_TIMEZONE = timezone(timedelta(hours=-3), name="America/Sao_Paulo")
 SCHEDULER_INTERVAL_SECONDS = 30
-FRESHNESS_HOURS = 8
 
 _started = False
 _start_lock = threading.Lock()
@@ -52,7 +47,7 @@ def _schedule_snapshot():
             "enabled": bool(schedule.enabled and allowed),
             "owner_user_id": schedule.owner_user_id,
             "api_with_scraping": db.query(CrawlerControl.api_with_scraping).filter_by(id=1).scalar() is not False,
-            "postal_code": (owner.logistics_postal_code if owner else None) or schedule.postal_code or '01001000',
+            "postal_code": schedule.postal_code or '01001000',
             "start_time": schedule.start_time,
             "end_time": schedule.end_time,
             "days": _schedule_days(schedule.days),
@@ -99,39 +94,7 @@ def _due_run_key(schedule, now_utc=None):
     return f"{local_now.date().isoformat()}-{slot_minutes // 60:02d}{slot_minutes % 60:02d}"
 
 
-def _stale_skus(db, skus, postal_code, now=None):
-    """Check each saved offer, not the newest timestamp across a whole SKU.
-
-    Metadata edits, cached data and failed attempts never count as a collection.
-    A successful stock check without a price still counts as an observation.
-    """
-    cutoff = (now or datetime.utcnow()) - timedelta(hours=FRESHNESS_HOURS)
-    postal_code = normalize_postal_code(postal_code) or "01001000"
-    latest = db.query(
-        Product.sku.label("sku"), PriceHistory.timestamp.label("captured"),
-        PriceHistory.destination_zip.label("cep"), PriceHistory.is_cached.label("cached"),
-        PriceHistory.availability.label("availability"),
-        func.row_number().over(
-            partition_by=(Product.sku, PriceHistory.source, PriceHistory.store, PriceHistory.url),
-            order_by=(PriceHistory.timestamp.desc(), PriceHistory.id.desc()),
-        ).label("position"),
-    ).join(Product, Product.id == PriceHistory.product_id).subquery()
-    observed, stale = set(), set()
-    for row in db.query(latest).filter(latest.c.position == 1):
-        observed.add(row.sku)
-        wrong_destination = offer_available({"availability": row.availability}) and normalize_postal_code(row.cep) != postal_code
-        if row.cached or not row.captured or row.captured < cutoff or wrong_destination:
-            stale.add(row.sku)
-    for source in db.query(ProductSource).filter(ProductSource.active.is_(True)):
-        if (source.validation_status not in {"ok", "valid"} or not source.last_collected_at
-                or source.last_collected_at < cutoff or source.failure_reason):
-            stale.add(source.sku)
-    # Incomplete discovery must be resumed even when existing prices are fresh.
-    stale.update(row[0] for row in db.query(ScrapeCursor.sku).filter(ScrapeCursor.completed.is_(False)).distinct())
-    return [sku for sku in skus if sku not in observed or sku in stale]
-
-
-def _known_skus(only_stale=False, postal_code=None):
+def _known_skus():
     db = SessionLocal()
     try:
         skus = [
@@ -139,7 +102,7 @@ def _known_skus(only_stale=False, postal_code=None):
             for row in db.query(KnownSku.sku).order_by(KnownSku.sku.asc()).all()
             if row[0]
         ]
-        return _stale_skus(db, skus, postal_code) if only_stale else skus
+        return skus
     finally:
         db.close()
 
@@ -148,11 +111,11 @@ def _run_cycle(postal_code, run_key, force_refresh, mode="quick", only_stale=Fal
     with SessionLocal() as db:
         active = db.query(ExtractionJob).filter(
             ExtractionJob.schedule_run_key == run_key,
-            ExtractionJob.status.in_(("queued", "running")),
+            ExtractionJob.status.in_(("queued", "running", "waiting_access", "paused")),
         ).first()
         if active:
             return None
-    skus = _known_skus(only_stale, postal_code)
+    skus = _known_skus()
     if not skus:
         # Record a completed evaluation so an empty slot is not retried
         # every 30 seconds.
@@ -167,7 +130,7 @@ def _run_cycle(postal_code, run_key, force_refresh, mode="quick", only_stale=Fal
         skus,
         kind="scheduled",
         force_refresh=True if only_stale else force_refresh,
-        refresh_if_stale=False,
+        refresh_if_stale=only_stale,
         postal_code=postal_code,
         scope="all",
         mode=mode,

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import atexit
 from requests import Session
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from urllib3.util import Timeout
 from threading import BoundedSemaphore, Lock
 
 _tls_slots = {}
 _tls_slots_lock = Lock()
+_adapter_lock = Lock()
+_adapters = {}
 
 
 RETRYABLE_STATUS_CODES = (408, 425, 500, 502, 503, 504)
@@ -21,8 +25,29 @@ class BoundedRetry(Retry):
         return super().is_retry(method, status_code, has_retry_after)
 
 
-def create_resilient_session(pool_size=12):
-    session = Session()
+class SharedBudgetAdapter(HTTPAdapter):
+    def send(self, request, **kwargs):
+        from services.extraction_resources import remaining_request_time, request_slot, resource_key
+        with request_slot(resource_key(request.url)):
+            remaining = remaining_request_time()
+            if remaining is not None:
+                kwargs["timeout"] = Timeout(total=remaining, connect=remaining, read=remaining)
+                return HTTPAdapter.send(_quick_adapter, request, **kwargs)
+            return super().send(request, **kwargs)
+
+    def proxy_manager_for(self, proxy, **proxy_kwargs):
+        with _adapter_lock:
+            return super().proxy_manager_for(proxy, **proxy_kwargs)
+
+    def close(self):
+        # Sessions own their cookies and headers. The process owns the sockets.
+        pass
+
+
+_quick_adapter = SharedBudgetAdapter(max_retries=0, pool_connections=32, pool_maxsize=12)
+
+
+def _new_adapter(pool_size):
     retry = BoundedRetry(
         total=2,
         connect=1,
@@ -34,14 +59,30 @@ def create_resilient_session(pool_size=12):
         respect_retry_after_header=True,
         raise_on_status=False,
     )
-    adapter = HTTPAdapter(
+    return SharedBudgetAdapter(
         max_retries=retry,
         pool_connections=pool_size,
         pool_maxsize=pool_size,
     )
+
+
+def create_resilient_session(pool_size=12):
+    session = Session()
+    with _adapter_lock:
+        adapter = _adapters.get(pool_size)
+        if adapter is None:
+            adapter = _adapters[pool_size] = _new_adapter(pool_size)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
+
+
+@atexit.register
+def _close_adapters():
+    with _adapter_lock:
+        for adapter in _adapters.values():
+            HTTPAdapter.close(adapter)
+        HTTPAdapter.close(_quick_adapter)
 
 
 def recover_public_html(response, url, timeout=15):
@@ -50,6 +91,9 @@ def recover_public_html(response, url, timeout=15):
     This is still a normal GET to the original storefront, with no proxy or paid
     service. Authentication and captcha responses remain unavailable.
     """
+    from services.extraction_resources import remaining_request_time
+    if remaining_request_time() is not None:
+        return response
     if response.status_code != 403 or (getattr(response, "headers", None) or {}).get("Retry-After"):
         return response
     from urllib.parse import urlparse

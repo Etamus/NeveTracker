@@ -197,8 +197,8 @@ def _structured_offer(soup, item=None, url=""):
     return selected, bool(offers and selected is None)
 
 
-def _jsonld_offer_details(soup, item=None, postal_code=None, url=""):
-    offer, _ = _structured_offer(soup, item, url)
+def _jsonld_offer_details(soup, item=None, postal_code=None, url="", selected_offer=None):
+    offer, _ = selected_offer if selected_offer is not None else _structured_offer(soup, item, url)
     if not offer:
         return {}
     selected = shipping_details(offer, postal_code)
@@ -209,6 +209,18 @@ def _jsonld_offer_details(soup, item=None, postal_code=None, url=""):
 
 def _payment_scope_text(soup):
     return payment_text(soup)
+
+
+def prepare_page_context(context, item):
+    """Parse one freshly fetched offer once; destination simulations stay separate."""
+    soup = BeautifulSoup(context['html'], 'html.parser')
+    selected = _structured_offer(soup, item, context['page_url'])
+    from services.fulfillment import fulfillment_details
+    return {**context, '_parsed': {
+        'soup': soup, 'selected': selected, 'payment_text': _payment_scope_text(soup),
+        'fulfillment': fulfillment_details(context['html'], item.get('source') or '',
+                                           item.get('seller') or item.get('store') or '') if selected[0] else {},
+    }}
 
 
 def _loja_integrada_shipping(session, soup, html, url, postal_code):
@@ -554,33 +566,35 @@ def _manufacturer_shipping(session, soup, url, postal_code, item):
     base = f'{urlparse(url).scheme}://{urlparse(url).netloc}'
     response = session.post(base + '/api/checkout/pub/orderForms/simulation',
         json={'items': [{'id': sku_id, 'quantity': 1, 'seller': seller_id}], 'postalCode': postal_code, 'country': 'BRA'},
+        params={'sc': params.get('sc') or '1'},
         headers=_headers(url, 'application/json'), timeout=12)
     if response.status_code != 200:
         return {}
-    data = response.json()
-    options = []
-    for package in data.get('logisticsInfo') or []:
-        if package.get('itemIndex') != 0:
-            continue
-        for sla in package.get('slas') or []:
-            if sla.get('deliveryChannel') != 'delivery':
-                continue
-            cost = number(sla.get('price'), allow_zero=True)
-            if cost is None:
-                continue
-            estimate = re.fullmatch(r'(\d+)(bd|d|h)', str(sla.get('shippingEstimate') or ''))
-            days = math.ceil(int(estimate[1]) / 24) if estimate and estimate[2] == 'h' else int(estimate[1]) if estimate else None
-            options.append({'shipping_cost': round(cost / 100, 2), 'shipping_method': sla.get('name') or sla.get('id'),
-                            'delivery_min_days': days, 'delivery_max_days': days,
-                            'delivery_days_type': 'business' if estimate and estimate[2] == 'bd' else 'calendar' if estimate else None,
-                            'logistics_source': 'manufacturer_public_simulation'})
-    return min(options, key=lambda option: shipping_sort_key(option['shipping_cost'], option['delivery_max_days']), default={})
+    from services.vtex_public import simulation_shipping
+    return simulation_shipping(response.json(), postal_code, sku_id, seller_id, 'manufacturer_public_simulation')
 
 
 def _fetch_details_uncached(url, current_price, postal_code=None, item=None):
     parsed = urlparse(url or "")
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return {}
+    if postal_code and (parsed.hostname=='mercadolivre.com.br' or (parsed.hostname or '').endswith('.mercadolivre.com.br')):
+        from services.mercado_livre_pages import quote_offer
+        try:
+            quoted=quote_offer({**(item or {}),'url':url},postal_code)
+            if quoted is not None:return quoted
+        except Exception:
+            pass  # Keep the configured official API and page parsers as fallbacks.
+
+    if postal_code and parsed.hostname=='www.magazinevoce.com.br':
+        from services.magalu_public_shipping import quote_offer
+        return quote_offer({**(item or {}),'url':url},postal_code)
+    if postal_code and re.search(r'(?:electrolux|midea|consul|brastemp)\.com\.br$',parsed.hostname or ''):
+        from urllib.parse import parse_qs
+        if 'idsku' in parse_qs(parsed.query):
+            from services.vtex_public import quote_offer
+            quoted=quote_offer({**(item or {}),'url':url},postal_code)
+            if quoted is not None:return quoted
 
     session = _session()
     try:
@@ -607,18 +621,19 @@ def _fetch_details_uncached(url, current_price, postal_code=None, item=None):
                 return _mercado_livre_shipping(session, url, postal_code)
             return {}
 
-        soup = BeautifulSoup(response.text, "html.parser")
-        _offer, ambiguous = _structured_offer(soup, item, response.url or url)
+        prepared = context.get('_parsed') if reusable else None
+        soup = prepared['soup'] if prepared else BeautifulSoup(response.text, "html.parser")
+        _offer, ambiguous = prepared['selected'] if prepared else _structured_offer(soup, item, response.url or url)
         if ambiguous:
             return {}
-        text = _payment_scope_text(soup)
+        text = prepared['payment_text'] if prepared else _payment_scope_text(soup)
         details = {
             **_parse_payment_details(text, offer_price(_offer) if _offer and offer_price(_offer) is not None else current_price),
-            **_jsonld_offer_details(soup, item, postal_code, response.url or url),
+            **_jsonld_offer_details(soup, item, postal_code, response.url or url, selected_offer=(_offer, ambiguous)),
         }
         if item and _offer:
             from services.fulfillment import fulfillment_details
-            details.update(fulfillment_details(response.text, item.get('source') or '', item.get('seller') or item.get('store') or ''))
+            details.update(prepared['fulfillment'] if prepared else fulfillment_details(response.text, item.get('source') or '', item.get('seller') or item.get('store') or ''))
 
         if postal_code:
             shipping = {}
@@ -681,6 +696,14 @@ def _fetch_details(url, current_price, postal_code=None, item=None, force_refres
 
 def enrich_offer(item, postal_code=None, force_refresh=False):
     postal_code = normalize_postal_code(postal_code)
+    if postal_code and urlparse(item.get('url') or '').hostname in {'www.magazinevoce.com.br','www.magazineluiza.com.br'}:
+        try:
+            from services.magalu_public_shipping import quote_offer
+            result=quote_offer(item,postal_code)
+            result['_http_logistics_attempted_zip']=postal_code
+            return result
+        except Exception as exc:
+            print(f" WARNING: Magalu não liberou a cotação: {exc}")
     details = _fetch_details(item.get("url"), item.get("price"), postal_code, item=item,
                              force_refresh=force_refresh or bool(item.get('_page_context')))
     enriched = merge_offer_details(item, details)
@@ -700,7 +723,10 @@ def enrich_offers(items, postal_code=None, force_refresh=False, per_domain=2):
         return []
     worker_count = min(DETAIL_WORKERS, len(items))
     slots = {urlparse(item.get("url") or "").netloc: BoundedSemaphore(max(1, per_domain)) for item in items}
+    from services.extraction_resources import check_cancelled, submit_in_context
+
     def enrich_safely(item):
+        check_cancelled()
         try:
             with slots[urlparse(item.get("url") or "").netloc]:
                 return enrich_offer(item, postal_code, force_refresh=True) if force_refresh else enrich_offer(item, postal_code)
@@ -708,4 +734,5 @@ def enrich_offers(items, postal_code=None, force_refresh=False, per_domain=2):
             print(f" WARNING: Nao foi possivel enriquecer {item.get('url')}: {exc}")
             return item
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        return list(executor.map(enrich_safely, items))
+        futures = [submit_in_context(executor, enrich_safely, item) for item in items]
+        return [future.result() for future in futures]

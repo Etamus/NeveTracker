@@ -19,8 +19,9 @@ def _fetch_indexed_html(url, timeout, use_browser):
     # TLS and HTTP/2 match a current browser. This avoids transport-only failures;
     # a CAPTCHA or HTTP denial remains a failure, never a successful empty search.
     from curl_cffi.requests import Session
+    from services.extraction_resources import request_slot, resource_key, pooled_curl_session
     try:
-        with Session(impersonate="chrome") as session:
+        with request_slot(resource_key(url)), pooled_curl_session(Session) as session:
             response = session.get(url, timeout=(5, timeout), headers={"Accept-Language": "pt-BR,pt;q=0.9"})
             if response.status_code != 200:
                 status = "BLOCKED" if response.status_code in {202, 401, 403, 429} else "HTTP_ERROR"

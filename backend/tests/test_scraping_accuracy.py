@@ -15,7 +15,7 @@ from sqlalchemy.orm import sessionmaker
 from crawlers.base import parse_product_response
 from crawlers.profiles import DEFAULT_PROFILE
 from database import Base
-from models.product import PriceHistory, ProductSource, ScrapeCursor
+from models.product import PriceHistory, Product, ProductSource, ScrapeCursor
 from routes.products import _latest_products_query
 from services.http_client import create_resilient_session
 from services.offer_enrichment import DETAIL_CACHE, _fetch_details, _jsonld_offer_details, _shopify_shipping
@@ -30,7 +30,22 @@ from services.analytics_export import _excel_datetime
 
 
 class ScrapingAccuracyTests(unittest.TestCase):
+    def test_full_appliance_sku_needs_code_or_unambiguous_voltage(self):
+        from services.product_resolver import ProductIdentity, resolve_candidate
+        identity = ProductIdentity(sku='BWJ14A9BNA', model='BWJ14A9')
+        self.assertTrue(resolve_candidate(identity, {'name': 'Lavadora Brastemp BWJ14A9 220 Volts'}).accepted)
+        self.assertTrue(resolve_candidate(identity, {'name': 'Lavadora Brastemp', 'model': 'BWJ14A9BNA'}).accepted)
+        self.assertFalse(resolve_candidate(identity, {'name': 'Lavadora Brastemp BWJ14A9 127V'}).accepted)
+        self.assertFalse(resolve_candidate(identity, {'name': 'Lavadora Brastemp BWJ14A9 127V ou 220V'}).accepted)
+        self.assertFalse(resolve_candidate(identity, {'name': 'Lavadora Brastemp BWJ14A9', 'url': 'https://example.test/BWJ14A9BNA'}).accepted)
+        self.assertFalse(resolve_candidate(identity, {'name': 'Lavadora Brastemp BWJ14A9ANA 220V'}).accepted)
+
     def setUp(self):
+        from services.browser_health import reset_browser_health
+        reset_browser_health()
+        self.addCleanup(reset_browser_health)
+        from tests.marketplace_fixture import isolate_marketplace_control
+        isolate_marketplace_control(self)
         self.identity = ProductIdentity(sku="W10531315", model="W10531315", name="Sensor W10531315")
         self.source = SimpleNamespace(
             store="dufrio", seller="Seller A", brand=None,
@@ -516,3 +531,24 @@ class ScrapingAccuracyTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0][1].price, 20)
         engine.dispose()
+
+    def test_latest_offer_lookup_preserves_sku_seller_and_legacy_postal_scope(self):
+        engine = create_engine("sqlite://")
+        self.addCleanup(engine.dispose)
+        Base.metadata.create_all(engine)
+        with sessionmaker(bind=engine)() as db:
+            offer = {"name": "Sensor W10531315", "price": 20, "store": "Peças A",
+                     "source": "Magalu", "url": self.source.url, "brand": "Brastemp",
+                     "category": "Sensor", "image_url": None, "sku": "W10531315"}
+            for sku, seller, cep in (('W10531315','Peças A','01001-000'), ('W10531315','PEÇAS A','30111000'),
+                                     ('W10531315','Peças B','01001000'), ('W11199342','Peças A','01001000')):
+                _save_result({**offer, 'sku':sku, 'store':seller, 'destination_zip':cep}, db)
+            db.commit()
+            _save_result({**offer, 'source':'Magazine Luiza', 'store':'Pecas A',
+                          'destination_zip':'01001000', 'price':25, 'delivery_max_days':3}, db)
+            db.commit()
+            newest = db.query(PriceHistory).filter_by(price=25).one()
+            original = db.query(PriceHistory).filter_by(destination_zip='01001-000').one()
+            self.assertEqual(newest.product_id, original.product_id)
+            self.assertEqual(db.query(Product).count(), 3)
+            self.assertEqual(newest.delivery_max_days, 3)

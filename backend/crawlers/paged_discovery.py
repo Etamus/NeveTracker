@@ -94,6 +94,56 @@ def _same_store_url(base, href, host):
     return absolute.split("#", 1)[0]
 
 
+SEARCH_QUERY_FIELDS = {'s','q','query','ft','search','searchTerm','searchQuery','keyword','keywords','k','searchtext','term','text','search_query'}
+
+
+def preserve_search_scope(initial_url, next_url):
+    """Pagination must keep its search, rather than crawl the entire storefront."""
+    from urllib.parse import parse_qsl
+    initial = urlparse(initial_url)
+    following = urlparse(next_url)
+    if initial.hostname != following.hostname:
+        return next_url
+    fields = SEARCH_QUERY_FIELDS | {'post_type'}
+    scope = {key:value for key,value in parse_qsl(initial.query, keep_blank_values=True) if key in fields}
+    if not scope:
+        return next_url
+    params = [(key,scope.get(key,value)) for key,value in parse_qsl(following.query, keep_blank_values=True)]
+    existing = {key for key,value in params}
+    params.extend((key,value) for key,value in scope.items() if key not in existing)
+    return following._replace(query=urlencode(params)).geturl()
+
+
+def search_scope_matches(requested_url, returned_url, soup):
+    from services.product_resolver import normalize_text
+    from urllib.parse import unquote
+    requested = {key:values[0] for key,values in parse_qs(urlparse(requested_url).query).items()
+                 if key in SEARCH_QUERY_FIELDS and values and values[0]}
+    if not requested:
+        return True
+    # WordPress declares an actual search in body_class. An archive with an
+    # empty search form is explicit evidence that the query was discarded.
+    classes = set(soup.body.get('class', [])) if soup.body else set()
+    search_inputs = soup.find_all('input', attrs={'name':'s'})
+    if requested.get('s') and 'post-type-archive-product' in classes and 'search' not in classes and search_inputs and all(not node.get('value') for node in search_inputs):
+        return False
+    if requested_url == returned_url:
+        return True
+    returned = parse_qs(urlparse(returned_url).query)
+    heading = normalize_text(' '.join(node.get_text(' ',strip=True) for node in soup.select('title,h1')))
+    path = normalize_text(unquote(urlparse(returned_url).path))
+    for key, value in requested.items():
+        normalized = normalize_text(value)
+        if any(normalize_text(term)==normalized for term in returned.get(key, [])):
+            continue
+        if normalized and (normalized in heading or normalized in path):
+            continue  # Canonical redirects may move a query into the search path.
+        if any(normalize_text(node.get('value') or '')==normalized for node in soup.find_all('input',attrs={'name':key})):
+            continue
+        return False
+    return True
+
+
 def _next_page(soup, base, host):
     selectors = (
         'a[rel="next"][href]',
@@ -105,13 +155,14 @@ def _next_page(soup, base, host):
     for selector in selectors:
         link = soup.select_one(selector)
         if link and (next_url := _same_store_url(base, link.get("href"), host)):
+            next_url = preserve_search_scope(base, next_url)
             return next_url if next_url != base else None
     for link in soup.select("a[href]"):
         label = " ".join((link.get_text(" ", strip=True), link.get("title") or ""))
         if re.search(r"\b(pr[oó]xima|seguinte|next)\b", label, re.I):
             next_url = _same_store_url(base, link.get("href"), host)
             if next_url and next_url != base:
-                return next_url
+                return preserve_search_scope(base, next_url)
     return None
 
 
@@ -149,9 +200,12 @@ def _fetch_html_result(url, timeout, use_browser=False):
         ):
             return None, "BLOCKED", "Redirecionado para outro dominio"
         return _checked_html(*rendered)
+    from contextlib import nullcontext
+    from services.extraction_resources import remaining_request_time
+    slot = nullcontext() if remaining_request_time() is not None else _request_slot(requested_host)
     session = create_resilient_session(pool_size=2)
     try:
-        with _request_slot(requested_host):
+        with slot:
             response = session.get(
                 url,
                 headers={
@@ -177,7 +231,42 @@ def _fetch_html(url, timeout):
     return _fetch_html_result(url, timeout)[0]
 
 
+_LISTING_PRICE_SELECTORS = {
+    "dufrio": ("li.product, .product-item", ".special-price .price, [data-price-type='finalPrice'] .price, .price"),
+    "friolar": (".listagem-item", ".preco-promocional, .preco-produto strong"),
+    "gold_service": (".listagem-item", ".preco-promocional, .preco-produto strong"),
+    "refrigeracao_mota": ("li.product", ".price ins .amount, .price > .amount"),
+    "mg_parts": ("product-card, .product-card", ".price > ins .amount, .price > .amount, sale-price, .price-item--sale, .price-item--regular"),
+    "comclick": (".product", ".price .price-off, .price .current-price, .price > strong"),
+}
+
+
+def _search_card_price(link, store):
+    selectors = _LISTING_PRICE_SELECTORS.get(store)
+    if selectors is None:
+        return None
+    card = link.css.closest(selectors[0])
+    if card:
+        for selector in selectors[1].split(", "):
+            for node in card.select(selector):
+                if node.css.closest("del, s, strike, .old-price, .preco-venda"):
+                    continue
+                price = number(node.get_text(" ", strip=True))
+                if price is not None:
+                    return price
+    return None
+
+
 def fetch_search_page(store, url, timeout=15, diagnostics=None, use_browser=False):
+    if store in {'mercado_livre','shopee'}:
+        from services.marketplace_intervention import suspension as pending
+        access=pending(store)
+        if access:
+            if diagnostics is not None:diagnostics.update(status='ACCESS_REQUIRED',reason=access['reason'])
+            return [],None,False
+    if store=='shopee' and use_browser:
+        from services.shopee_session_search import search
+        return search(url,timeout,diagnostics)
     if store in {'electrolux', 'midea', 'consul', 'brastemp'} and not use_browser:
         from services.manufacturer_pages import sitemap_candidates
         query = parse_qs(urlparse(url).query)
@@ -199,6 +288,10 @@ def fetch_search_page(store, url, timeout=15, diagnostics=None, use_browser=Fals
     if not fetched:
         return [], None, False
     soup, final_url = fetched
+    if not search_scope_matches(url, final_url, soup):
+        if diagnostics is not None:
+            diagnostics.update(status='SEARCH_MISMATCH', reason='A loja redirecionou a busca para uma página que não preserva o material pesquisado.')
+        return [], None, False
     host = STORE_HOSTS[store]
     if store == "magalu":
         from services.magalu_public import is_public_storefront
@@ -217,7 +310,10 @@ def fetch_search_page(store, url, timeout=15, diagnostics=None, use_browser=Fals
                 product_url = f"https://www.amazon.com.br/dp/{asin}"
             if title and product_url and product_url not in seen:
                 seen.add(product_url)
-                items.append({"name": title.get_text(" ", strip=True), "url": product_url, "seller": "Amazon Brasil"})
+                price_node = card.select_one(".a-price:not(.a-text-price) .a-offscreen")
+                price = number(price_node.get_text(" ", strip=True)) if price_node else None
+                items.append({"name": title.get_text(" ", strip=True), "url": product_url, "_seller_unknown": True,
+                              **({"price": price} if price is not None else {})})
     elif store == "mercado_livre":
         from crawlers.mercado_livre_public import parse_search_html
         items, ml_next = parse_search_html(str(soup), final_url)
@@ -233,7 +329,8 @@ def fetch_search_page(store, url, timeout=15, diagnostics=None, use_browser=Fals
                 title = title_node.get_text(" ", strip=True) if title_node else (image.get("alt") if image else title)
                 price_node = link.select_one('[data-testid="price-value"]')
                 price = number(price_node.get_text(" ", strip=True)) if price_node else None
-                items.append({"name": title, "url": product_url, "seller": seller_id + "-Magalu" if seller_id else "Magazine Luiza",
+                items.append({"name": title, "url": product_url, "seller": seller_id + "-Magalu" if seller_id else None,
+                              "_seller_unknown": not seller_id,
                               **({"price": price} if price is not None and price > 0 else {})})
     else:
         query = parse_qs(urlparse(url).query)
@@ -277,7 +374,12 @@ def fetch_search_page(store, url, timeout=15, diagnostics=None, use_browser=Fals
                 continue
             if product_url and title and product_url not in seen:
                 seen.add(product_url)
-                items.append({"name": title, "url": product_url, "seller": SEARCH_LABELS[store]})
+                card = link.css.closest('product-card, .product-card') if store == 'mg_parts' else None
+                sold_out = card is not None and card.select_one('.badge.out-of-stock') is not None
+                price = None if sold_out else _search_card_price(link, store)
+                items.append({"name": title, "url": product_url, "seller": SEARCH_LABELS[store],
+                              **({"availability": "out_of_stock"} if sold_out else {}),
+                              **({"price": price} if price is not None else {})})
         if store == "dufrio" and final_url != url:
             title_node = soup.select_one("h1")
             title = title_node.get_text(" ", strip=True) if title_node else ""

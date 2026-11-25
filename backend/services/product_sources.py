@@ -4,9 +4,11 @@ import re
 from datetime import datetime
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunsplit
 
-from models.product import PriceHistory, ProductSource
+from models.product import PriceHistory, Product, ProductSource
 from services.product_resolver import canonical_brand
 from services.structured_products import number
+
+HIDDEN_CURRENT_SOURCE_STATUSES = ('invalid_match', 'not_found', 'consolidated')
 
 
 def source_identifiers(item):
@@ -37,7 +39,7 @@ def canonical_source_url(value):
         (key, item)
         for key, item in parse_qsl(parsed.query, keep_blank_values=False)
         if key.lower() in {
-            "item_id", "wid", "pdp_filters", "offer_id", "oid", "seller", "seller_id", "shop_id", "m", "smid", "variant"
+            "item_id", "wid", "pdp_filters", "offer_id", "oid", "seller", "seller_id", "shop_id", "m", "smid", "variant", "idsku", "skuid", "sc"
         }
     ]
     return urlunsplit(
@@ -69,12 +71,13 @@ def upsert_product_source(db, identity, store_key, item, match):
     identifiers = source_identifiers(item)
     if not source:
         latest_price = (
-            db.query(PriceHistory)
+            db.query(PriceHistory.product_id).join(Product, PriceHistory.product_id == Product.id)
             .filter(
                 PriceHistory.url == url,
                 PriceHistory.store == seller,
+                Product.sku == identity.sku,
             )
-            .order_by(PriceHistory.timestamp.desc())
+            .order_by(PriceHistory.timestamp.desc(), PriceHistory.id.desc())
             .first()
         )
         source = ProductSource(

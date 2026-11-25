@@ -46,6 +46,13 @@ def _style_sheet(sheet, widths):
         sheet.column_dimensions[get_column_letter(index)].width = width
 
 
+NOT_INFORMED = 'Não informado'
+
+
+def export_value(value):
+    return NOT_INFORMED if value is None or isinstance(value, str) and not value.strip() else value
+
+
 def _write_analytics_sheet(workbook, rows):
     sheet = workbook.active
     sheet.title = "Analytics"
@@ -105,7 +112,7 @@ def _write_analytics_sheet(workbook, rows):
         sheet.cell(row_index, 14).number_format = PERCENT_FORMAT
 
 
-def _write_stores_sheet(workbook, rows):
+def _write_stores_sheet(workbook, rows, date_order=None):
     stats = defaultdict(
         lambda: {
             "source": "",
@@ -160,6 +167,9 @@ def _write_stores_sheet(workbook, rows):
         stats.items(),
         key=lambda item: (-len(item[1]["prices"]), min(item[1]["prices"])),
     )
+    if date_order:
+        ordered.sort(key=lambda item: item[1]["last_update"] or
+                     (datetime.max if date_order == 'asc' else datetime.min), reverse=date_order == 'desc')
     for _store_key, store in ordered:
         prices = store["prices"]
         sheet.append(
@@ -194,7 +204,7 @@ def _write_stores_sheet(workbook, rows):
         sheet.cell(row_index, 10).number_format = "dd/mm/yyyy hh:mm"
 
 
-def _write_offers_sheet(workbook, rows):
+def _write_offers_sheet(workbook, rows, date_order=None):
     sheet = workbook.create_sheet("Ofertas")
     sheet.append(
         [
@@ -232,52 +242,62 @@ def _write_offers_sheet(workbook, rows):
         ]
     )
 
-    for row in rows:
-        for offer in sorted(row.offers, key=lambda item: item.current_price if item.current_price is not None else float('inf')):
-            cash_price = offer.cash_price or offer.current_price
-            total_with_shipping = (
-                cash_price + offer.shipping_cost
-                if offer.shipping_cost is not None and cash_price is not None
-                else None
-            )
-            sheet.append(
-                [
-                    row.sku or "",
-                    row.name,
-                    row.description or "",
-                    row.subfamily or "",
-                    row.sku_category or "",
-                    row.cluster or "",
-                    row.market_type or "",
-                    offer.store,
-                    offer.source or offer.store,
-                    offer.current_price if offer_available({"availability": offer.availability}) else "Sem estoque",
-                    cash_price,
-                    offer.installment_price,
-                    offer.installment_count,
-                    offer.installment_value,
-                    offer.payment_difference,
-                    offer.shipping_cost,
-                    total_with_shipping,
-                    offer.delivery_min_days,
-                    offer.delivery_max_days,
-                    offer.shipping_method or "",
-                    offer.destination_zip or "",
-                    "Sem estoque" if not offer_available({'availability': offer.availability}) else offer.availability or "",
-                    offer.logistics_source or "",
-                    offer.discovery_source or "",
-                    "Sim" if offer.is_cached else "Não",
-                    _excel_datetime(offer.last_update),
-                    offer.url,
-                    {"business": "Dias uteis", "calendar": "Dias corridos"}.get(offer.delivery_days_type, "Nao informado"),
-                    offer.fulfillment_type or "",
-                    offer.fulfilled_by or "",
-                    offer.fulfillment_evidence or "",
-                ]
-            )
-            link_cell = sheet.cell(sheet.max_row, 27)
-            link_cell.hyperlink = offer.url
-            link_cell.font = LINK_FONT
+    ranked_offers = [
+        (row, offer) for row in rows
+        for offer in sorted(row.offers, key=lambda item: item.current_price if item.current_price is not None else float('inf'))
+    ]
+    if date_order:
+        ranked_offers.sort(key=lambda pair: pair[0].sku or "")
+        ranked_offers.sort(
+            key=lambda pair: _excel_datetime(pair[1].last_update) or
+            (datetime.max if date_order == 'asc' else datetime.min),
+            reverse=date_order == 'desc',
+        )
+    for row, offer in ranked_offers:
+        cash_price = offer.cash_price or offer.current_price
+        total_with_shipping = (
+            cash_price + offer.shipping_cost
+            if offer.shipping_cost is not None and cash_price is not None
+            else None
+        )
+        sheet.append(
+            [
+                row.sku or "",
+                row.name,
+                row.description or "",
+                row.subfamily or "",
+                row.sku_category or "",
+                row.cluster or "",
+                row.market_type or "",
+                offer.store,
+                offer.source or offer.store,
+                offer.current_price if offer_available({"availability": offer.availability}) else "Sem estoque",
+                cash_price,
+                offer.installment_price,
+                offer.installment_count,
+                offer.installment_value,
+                offer.payment_difference,
+                offer.shipping_cost,
+                total_with_shipping,
+                offer.delivery_min_days,
+                offer.delivery_max_days,
+                offer.shipping_method or "",
+                offer.destination_zip or "",
+                "Sem estoque" if not offer_available({'availability': offer.availability}) else offer.availability or "",
+                offer.logistics_source or "",
+                offer.discovery_source or "",
+                "Sim" if offer.is_cached else "Não",
+                _excel_datetime(offer.last_update),
+                offer.url,
+                {"business": "Dias uteis", "calendar": "Dias corridos"}.get(offer.delivery_days_type, "Nao informado"),
+                offer.fulfillment_type or "",
+                offer.fulfilled_by or "",
+                offer.fulfillment_evidence or "",
+            ]
+        )
+        link_cell = sheet.cell(sheet.max_row, 27)
+        link_cell.hyperlink = offer.url
+        link_cell.font = LINK_FONT
 
     _style_sheet(
         sheet,
@@ -290,11 +310,15 @@ def _write_offers_sheet(workbook, rows):
         sheet.cell(row_index, 27).font = LINK_FONT
 
 
-def build_analytics_workbook(payload):
+def build_analytics_workbook(payload, *, date_order=None):
     workbook = Workbook()
     _write_analytics_sheet(workbook, payload.rows)
-    _write_stores_sheet(workbook, payload.rows)
-    _write_offers_sheet(workbook, payload.rows)
+    _write_stores_sheet(workbook, payload.rows, date_order)
+    _write_offers_sheet(workbook, payload.rows, date_order)
+    for sheet in workbook:
+        for row in sheet.iter_rows(min_row=2):
+            for cell in row:
+                cell.value = export_value(cell.value)
 
     workbook.properties.title = "NeveTracker Analytics"
     workbook.properties.subject = payload.query or "Dados de analytics e lojistas"

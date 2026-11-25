@@ -1,7 +1,8 @@
-from sqlalchemy import Boolean, Column, Integer, String, Float, DateTime, ForeignKey, Text, UniqueConstraint
-from sqlalchemy.orm import relationship
+from sqlalchemy import Boolean, Column, Integer, String, Float, DateTime, ForeignKey, Text, UniqueConstraint, Index, select, false
+from sqlalchemy.orm import relationship, deferred, aliased
 from database import Base
 from datetime import datetime
+from storage_codec import PackedJSONText
 
 class Product(Base):
     __tablename__ = "products"
@@ -19,12 +20,19 @@ class Product(Base):
 
 class PriceHistory(Base):
     __tablename__ = "price_history"
+    __table_args__ = (
+        Index('ix_price_latest_offer', 'product_id', 'destination_zip', 'timestamp', 'id'),
+        Index('ix_price_product_latest', 'product_id', 'timestamp', 'id'),
+        Index('ix_price_source_seller', 'source', 'store'),
+        Index('ix_price_timestamp', 'timestamp'),
+        Index('ix_price_url_latest', 'url', 'timestamp', 'id'),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     product_id = Column(Integer, ForeignKey("products.id"))
     price = Column(Float, nullable=True)
     store = Column(String, index=True)
-    source = Column(String, index=True, nullable=True)
+    source = Column(String, nullable=True)
     discovery_source = Column(String, index=True, nullable=True)
     url = Column(String)
     cash_price = Column(Float, nullable=True)
@@ -52,6 +60,14 @@ class PriceHistory(Base):
     product = relationship("Product", back_populates="prices")
 
 
+def latest_price_at_destination(candidate):
+    newer = aliased(PriceHistory)
+    return (select(newer.id).where(newer.product_id == candidate.product_id,
+        newer.destination_zip.is_not_distinct_from(candidate.destination_zip))
+        .order_by(newer.timestamp.desc(), newer.id.desc()).limit(1)
+        .correlate(candidate).scalar_subquery())
+
+
 class KnownSku(Base):
     __tablename__ = "known_skus"
 
@@ -76,6 +92,7 @@ class KnownSku(Base):
 
 class LeadTimeQuote(Base):
     __tablename__ = 'lead_time_quotes'
+    __table_args__ = (Index('ix_quote_sku_captured', 'sku', 'captured_at', 'status'),)
     id = Column(Integer, primary_key=True)
     quote_key = Column(String, unique=True, nullable=False, index=True)
     sku = Column(String, nullable=False, index=True)
@@ -84,7 +101,7 @@ class LeadTimeQuote(Base):
     url = Column(String, nullable=False)
     uf = Column(String(2), nullable=False)
     postal_code = Column(String(8), nullable=False)
-    item_json = Column(Text, nullable=False)
+    item_json = Column(PackedJSONText(), nullable=False)
     attempts = Column(Integer, nullable=False, default=0)
     status = Column(String, nullable=False, default='queued', index=True)
     shipping_cost = Column(Float, nullable=True)
@@ -109,6 +126,7 @@ class LeadTimeDestination(Base):
 class OfferObservation(Base):
     """Append-only observations, independent from mutable latest-price rows."""
     __tablename__ = 'offer_observations'
+    __table_args__ = (Index('ix_observation_offer_latest', 'offer_key', 'observed_at', 'id'),)
     id = Column(Integer, primary_key=True)
     legacy_price_id = Column(Integer, unique=True, nullable=True)
     offer_key = Column(String(64), nullable=False, index=True)
@@ -124,7 +142,7 @@ class OfferObservation(Base):
     observed_at = Column(DateTime, nullable=False, index=True)
     changed = Column(Boolean, nullable=False, default=False)
     origin = Column(String, nullable=False, default='collection')
-    snapshot_json = Column(Text, nullable=False)
+    snapshot_json = Column(PackedJSONText(), nullable=False)
 
 
 class ExtractionSchedule(Base):
@@ -164,6 +182,9 @@ class ExtractionJob(Base):
     refresh_if_stale = Column(Boolean, default=False, nullable=False)
     postal_code = Column(String, nullable=True)
     schedule_run_key = Column(String, nullable=True, index=True)
+    postal_codes_json = Column(Text, nullable=True)
+    stores_json = Column(Text, nullable=True)
+    sellers_json = Column(Text, nullable=True)
     batch_size = Column(Integer, default=30, nullable=False)
     total_skus = Column(Integer, default=0, nullable=False)
     processed_skus = Column(Integer, default=0, nullable=False)
@@ -261,7 +282,17 @@ class CrawlerControl(Base):
     api_with_scraping = Column(Boolean, nullable=False, default=True)
     concurrent_requests_per_domain = Column(Integer, nullable=False, default=2)
     request_timeout_seconds = Column(Integer, nullable=False, default=15)
+    precise_sku_workers = Column(Integer, nullable=False, default=8)
+    quick_sku_workers = Column(Integer, nullable=False, default=4)
+    quote_workers = Column(Integer, nullable=False, default=12)
+    quick_timeout_seconds = Column(Integer, nullable=False, default=5)
+    discovery_stores_per_round = Column(Integer, nullable=False, default=3)
+    adaptive_parallelism = Column(Boolean, nullable=False, default=True)
+    reuse_public_browser = Column(Boolean, nullable=False, default=True)
+    browser_failure_cooldown_seconds = Column(Integer, nullable=False, default=30)
+
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    hardware_acceleration = Column(Boolean, nullable=False, default=False, server_default=false())
 
 
 class ExtractionJobItem(Base):
@@ -273,6 +304,9 @@ class ExtractionJobItem(Base):
     position = Column(Integer, nullable=False)
     status = Column(String(20), default="queued", nullable=False, index=True)
     attempts = Column(Integer, default=0, nullable=False)
+    store_phase = Column(String(20), nullable=False, default="legacy")
+    waiting_stores_json = Column(Text, nullable=True)
+    resume_stores_json = Column(Text, nullable=True)
     message = Column(Text, nullable=True)
     results_count = Column(Integer, default=0, nullable=False)
     stores_count = Column(Integer, default=0, nullable=False)
@@ -281,6 +315,8 @@ class ExtractionJobItem(Base):
     offer_count = Column(Integer, default=0, nullable=False)
     store_count = Column(Integer, default=0, nullable=False)
     last_update = Column(DateTime, nullable=True)
+    results_json = deferred(Column(PackedJSONText(), nullable=True))
+    progress_json = Column(Text, nullable=True)
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
 

@@ -13,6 +13,7 @@ export default defineConfig([
     '.tools/**',
     '.logs/**',
     '.artifacts/**',
+    'Nevereferencia/**',
     'backend/.scrapy-cache/**',
     'playwright-report/**',
     'test-results/**',

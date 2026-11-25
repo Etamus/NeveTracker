@@ -70,6 +70,20 @@ class ShopeePublicTests(unittest.TestCase):
         self.assertNotEqual(result['status'], 'OK')
         result = parse_payload({'data': {**self.item, 'name': 'Sensor W99999999'}}, self.source, self.identity)
         self.assertEqual(result['status'], 'INVALID_MATCH')
+
+    def test_personal_voucher_price_is_not_saved_as_ordinary_price(self):
+        payload = {'data': {'item': {**self.item, 'price': 399900000},
+            'product_price': {'has_final_price': True, 'price': {'single_value': 358708000},
+                'installment_info': {'recommended_plan': {'months': 12, 'pay_per_month': 32491666}}}}}
+        result = parse_payload(payload, self.source, self.identity)
+        self.assertEqual(result['item']['price'], 3999)
+        self.assertEqual(result['item']['installment_count'], 12)
+
+    def test_model_stock_flags_are_used_when_numeric_stock_is_hidden(self):
+        payload = {'data': {**self.item, 'stock': None, 'models': [{'has_stock': True}]}}
+        self.assertEqual(parse_payload(payload, self.source, self.identity)['item']['availability'], 'in_stock')
+        payload['data']['models'] = [{'has_stock': False}, {'has_stock': False}]
+        self.assertEqual(parse_payload(payload, self.source, self.identity)['item']['availability'], 'out_of_stock')
         result = parse_payload({'data': {**self.item, 'currency': 'IDR'}}, self.source, self.identity)
         self.assertEqual(result['status'], 'INVALID_MATCH')
 

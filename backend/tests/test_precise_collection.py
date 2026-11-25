@@ -41,6 +41,11 @@ HTTP_STORES = (
 
 class PreciseCollectionTests(unittest.TestCase):
     def setUp(self):
+        from tempfile import TemporaryDirectory
+        folder = TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        control = patch('services.marketplace_intervention._path', side_effect=lambda store, kind: Path(folder.name) / f'{store}-{kind}.json')
+        control.start(); self.addCleanup(control.stop)
         self.html = FIXTURE.read_bytes()
         self.identity = ProductIdentity(
             sku="W10531315",
@@ -72,6 +77,124 @@ class PreciseCollectionTests(unittest.TestCase):
         self.assertTrue(_source_due(source, now - timedelta(minutes=10), now))
         source.validation_status = "ok"
         self.assertTrue(_source_due(source, now - timedelta(minutes=10), now))
+
+    def test_bootstrap_recovers_each_seller_from_shared_pdp(self):
+        from models.product import PriceHistory, Product
+        from services.precise_extraction import _bootstrap_existing_sources
+        engine = create_engine("sqlite://")
+        self.addCleanup(engine.dispose)
+        Base.metadata.create_all(engine)
+        url = 'https://www.dufrio.com.br/sensor-w10531315'
+        with sessionmaker(bind=engine)() as db:
+            product = Product(sku=self.identity.sku, name="Sensor Whirlpool W10531315")
+            other = Product(sku="W11199342", name="Outra peça")
+            db.add_all([product, other])
+            db.flush()
+            for target, seller in [(product, 'A'), (product, 'B'), (other, 'B')]:
+                db.add(PriceHistory(product_id=target.id, url=url, store=seller, source='Dufrio', price=10))
+            db.add(ProductSource(sku=self.identity.sku, store='dufrio', seller='A', url=url, active=False))
+            db.commit()
+            self.assertEqual(_bootstrap_existing_sources(db, self.identity, [product]), 1)
+            sources = {row.seller: row for row in db.query(ProductSource)}
+            self.assertFalse(sources['A'].active)
+            self.assertEqual(sources['B'].product_id, product.id)
+            self.assertEqual(_bootstrap_existing_sources(db, self.identity, [product]), 0)
+
+    def test_variant_bootstrap_reuses_only_confirmed_sources_in_selected_stores(self):
+        from services.precise_extraction import _bootstrap_existing_sources
+        engine = create_engine('sqlite://')
+        self.addCleanup(engine.dispose)
+        Base.metadata.create_all(engine)
+        identity = ProductIdentity(sku='BRM46MBBNA', model='BRM46MB')
+        with sessionmaker(bind=engine)() as db:
+            db.add_all([
+                ProductSource(sku='BRM46MB', store='magalu', seller='Loja A',
+                              url='https://www.magazineluiza.com.br/geladeira/p/1/ed/refr/',
+                              listing_name='Geladeira Brastemp BRM46MB 220V'),
+                ProductSource(sku='BRM46MB', store='magalu', seller='Loja B',
+                              url='https://www.magazineluiza.com.br/geladeira/p/2/ed/refr/',
+                              listing_name='Geladeira Brastemp BRM46MB 127V'),
+                ProductSource(sku='BRM46MB', store='shopee', seller='Loja C',
+                              url='https://shopee.com.br/product/1/2',
+                              listing_name='Geladeira Brastemp BRM46MB 220V'),
+            ])
+            db.commit()
+            self.assertEqual(_bootstrap_existing_sources(db, identity, [], {'magalu'}), 1)
+            saved = db.query(ProductSource).filter_by(sku=identity.sku).one()
+            self.assertEqual((saved.store, saved.seller, saved.validation_status), ('magalu', 'Loja A', 'discovered'))
+
+    def test_confirmed_old_channel_alias_leaves_current_views_and_keeps_history(self):
+        from models.product import OfferObservation, PriceHistory
+        from services.product_sources import canonical_source_url
+        from services.scraper_service import _save_result, _cached_sku_observations
+        from routes.products import _find_sku_products
+        engine = create_engine('sqlite://')
+        self.addCleanup(engine.dispose)
+        Base.metadata.create_all(engine)
+        sku = self.identity.sku
+        url = 'https://www.brastemp.com.br/sensor/p'
+        alias = canonical_source_url(url + '?skuId=42&seller_id=1')
+        primary = canonical_source_url(url + '?idsku=42&seller_id=1&sc=2')
+        old = dict(sku=sku, name='Sensor W10531315', brand='Brastemp', price=19, source='Brastemp',
+                   store='Brastemp', seller='Brastemp', url=alias, image_url=None, category='Sensor')
+        catalog = [{ 'productName': old['name'], 'link': url, 'items': [{'itemId':'42',
+            'sellers':[{'sellerName':'Brastemp','sellerId':'1','addToCartLink':'/checkout/cart/add?sc=2',
+                        'commertialOffer':{'IsAvailable':True,'Price':20}}]}]}]
+        with sessionmaker(bind=engine, autoflush=False)() as db:
+            _save_result(old, db)
+            previous = ProductSource(sku=sku, store='brastemp', seller='Brastemp', url=alias)
+            db.add(previous)
+            db.commit()
+            match = resolve_candidate(self.identity, old)
+            current = {**old, 'price':20}
+            with patch('services.precise_extraction.collect_sources_with_scrapy',
+                    return_value={previous.id:{'status':'OK','item':current,'match':match}}):
+                offers, _ = _collect_sources(db, self.identity, [previous], None,
+                    SimpleNamespace(concurrent_requests_per_domain=2,request_timeout_seconds=5),
+                    catalog_snapshots={'brastemp':catalog})
+            for item in offers:
+                _save_result(item, db)
+            db.commit()
+            self.assertEqual(previous.validation_status, 'consolidated')
+            self.assertFalse(previous.active)
+            self.assertEqual([r.url for _, r in _cached_sku_observations(db, sku)], [primary])
+            self.assertEqual([r.url for _, r in _find_sku_products(db, sku)], [primary])
+            self.assertEqual(db.query(PriceHistory).count(), 2)
+            self.assertEqual(db.query(OfferObservation).count(), 2)
+
+    @patch('services.precise_extraction.collect_sources_with_scrapy')
+    def test_invalid_price_is_not_a_successful_store(self, scrape):
+        source = self._source()
+        source.id = 1
+        item = {'url': 'https://www.dufrio.com.br/sensor-w10531315', 'name': 'Sensor W10531315',
+                'source': 'Dufrio', 'store': 'A', 'seller': 'A', 'price': -1}
+        scrape.return_value = {1: {'status': 'OK', 'item': item, 'match': resolve_candidate(self.identity, item)}}
+        collected, success = _collect_sources(Mock(), self.identity, [source], None,
+            SimpleNamespace(concurrent_requests_per_domain=2, request_timeout_seconds=5))
+        self.assertEqual((collected, success, source.validation_status), ([], set(), 'parser_error'))
+        self.assertFalse(hasattr(source, 'last_collected_at'))
+
+    def test_native_collection_starts_as_soon_as_each_catalog_is_ready(self):
+        from threading import Event
+        ready = Event()
+        sources = [self._source(store) for store in ('brastemp', 'consul', 'brastemp')]
+        for i, source in enumerate(sources):
+            source.id = i + 1
+            source.url = f'https://www.{source.store}.com.br/sensor/p?idsku={i+1}&seller_id=1'
+        def catalog(store, *_):
+            if store == 'consul' and not ready.wait(1):
+                raise TimeoutError('Outro catálogo atrasou a coleta')
+            return []
+        def collect(source, *_args, **_kwargs):
+            if source.store == 'brastemp':
+                ready.set()
+            return {'status': 'NOT_FOUND'}
+        with patch('services.vtex_public.catalog', side_effect=catalog) as read, \
+             patch('services.vtex_public.collect_source', side_effect=collect):
+            _collect_sources(Mock(), self.identity, sources, None,
+                SimpleNamespace(concurrent_requests_per_domain=2, request_timeout_seconds=5))
+        self.assertEqual(read.call_count, 2)
+        self.assertEqual([source.validation_status for source in sources], ['not_found'] * 3)
 
     def test_discovery_batch_rotates_recently_attempted_store(self):
         db = Mock()
@@ -380,6 +503,32 @@ class PreciseCollectionTests(unittest.TestCase):
         )
         collect_scrapy.assert_called_once()
         self.assertEqual(collect_scrapy.call_args.args[0], sources)
+
+    def test_native_catalog_can_finish_before_slow_scrapy(self):
+        from threading import Event
+
+        http = self._source("dufrio")
+        http.id = 1
+        native = self._source("brastemp")
+        native.id = 2
+        native.url = "https://www.brastemp.com.br/sensor/p?idsku=42&seller_id=1"
+        catalog_finished = Event()
+
+        def collect_scrapy(sources, *_):
+            if not catalog_finished.wait(2):
+                return {1: {"status": "TIMEOUT", "reason": "catalog pipeline did not run"}}
+            return {1: {"status": "NOT_FOUND"}}
+
+        def read_catalog(*_):
+            catalog_finished.set()
+            return []
+
+        with patch("services.precise_extraction.collect_sources_with_scrapy", side_effect=collect_scrapy), \
+             patch("services.vtex_public.catalog", side_effect=read_catalog):
+            _collect_sources(Mock(), self.identity, [http, native], None,
+                             SimpleNamespace(concurrent_requests_per_domain=2, request_timeout_seconds=5))
+        self.assertEqual(http.validation_status, "not_found")
+        self.assertEqual(native.validation_status, "invalid_match")
 
     @patch("services.precise_extraction.collect_shipping_with_playwright")
     @patch("services.precise_extraction.enrich_offers")

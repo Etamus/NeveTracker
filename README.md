@@ -145,6 +145,11 @@ As fontes diretas e os fallbacks sem chave podem bloquear, limitar ou omitir inf
 
 ## Banco de Dados
 
+Os snapshots de ofertas, cotações e checkpoints grandes usam compactação sem perda, identificada pelo prefixo `ntz1:` no armazenamento. O ORM devolve o JSON original automaticamente e continua lendo registros antigos sem compactação. Consultas, histórico e exportações mantêm todos os valores. Para ler esses campos por SQL direto, use `storage_codec.unpack_text`; bancos compactados precisam desta versão atualizada do projeto.
+
+A manutenção do SQLite ocorre enquanto as coletas estão inativas, atualizando estatísticas, controlando o WAL e recuperando páginas livres de bancos com vacuum incremental. Ela não remove histórico. Para compactar um banco legado inteiro, feche o backend e execute `backend\.venv\Scripts\python.exe backend\optimize_database.py`: o comando cria uma cópia em `.backups`, verifica todos os registros e compara hashes de todos os valores antes e depois.
+
+
 Por padrão, o backend usa SQLite local em:
 
 ```text
@@ -153,7 +158,7 @@ backend/precos.db
 
 As tabelas são criadas automaticamente ao iniciar o backend. O sistema também mantém uma lista de SKUs conhecidos e pode pré-carregar dados para acelerar consultas futuras.
 
-Para pré-carregar SKUs conhecidos:
+Para pré-carregar ofertas dos SKUs cadastrados no banco:
 
 ```bat
 cd backend

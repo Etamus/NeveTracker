@@ -31,6 +31,14 @@ def record_browser_result(url, status, channel="browser"):
         elif status in BLOCKED_STATUSES:
             failures += 1
             _states[host] = (failures, time.monotonic() + COOLDOWN_SECONDS if failures >= 2 else deadline)
+        elif status in {'TIMEOUT','BROWSER_ERROR','HTTP_ERROR'}:
+            from services.extraction_resources import settings
+            cooldown = settings()['browser_failure_cooldown_seconds']
+            failures += 1
+            # A transient error must never shorten a previously confirmed block.
+            # Retry transport failures sooner, then back off if the host stays sick.
+            delay = min(COOLDOWN_SECONDS, cooldown * (2 ** min(max(0, failures - 2), 5)))
+            _states[host] = (failures, max(deadline, time.monotonic() + delay) if failures >= 2 else deadline)
 
 
 def reset_browser_health():

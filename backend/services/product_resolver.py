@@ -12,6 +12,7 @@ GENERIC_TOKENS = {
     "a", "as", "com", "da", "das", "de", "do", "dos", "e", "em", "para",
     "peca", "produto", "unidade", "original", "novo",
 }
+SPARE_PART_HEADING = r'^(?:\d+\s+)?(?:kit|jogo|conjunto|pecas?|capa|refil|puxador|gaveta|prateleira|placa|sensor|motor|filtro|suporte|bandeja|compressor|resistencia|borracha|gaxeta|rotor|impeller|impelidor|cabo|vara|vareta|botao|queimador|pe|pes|bocal|condensador|rodizio|protetor|grade|dobradica|termostato|tampa|porta|dispenser|vedacao|anel|trava|rede|chicote|atuador|suspensao|agitador|painel)\b'
 
 
 def normalize_text(value):
@@ -25,6 +26,52 @@ def normalize_text(value):
 
 def canonical_brand(value):
     return "Brastemp" if normalize_text(value) == "brastemp" else value
+
+
+def _voltage_options(value):
+    voltages = re.findall(r"\b(110|115|120|127|208|220|230|240)\s*v\b", normalize_text(value))
+    return {127 if int(voltage) <= 127 else 220 for voltage in voltages}
+
+
+def appliance_kind(value):
+    text=normalize_text(value)
+    if re.match(SPARE_PART_HEADING,text):return None
+    found=[]
+    for kind,pattern in (
+        ('dishwasher',r'\blava loucas?\b'),
+        ('washer',r'\b(?:maquina (?:de )?lavar|lavadoras?|lava ?roupas?)\b'),
+        ('refrigerator',r'\b(?:geladeira|refrigerador)\b'),
+        ('freezer',r'\bfreezer\b'),
+        ('stove',r'\bfogao\b'),
+        ('beer_cooler',r'\bcervejeira\b'),
+    ):
+        if match:=re.search(pattern,text):found.append((match.start(),kind))
+    return min(found)[1] if found else None
+
+
+def appliance_match_error(identity, candidate):
+    """A compatible spare part must not be mistaken for a complete appliance."""
+    expected=appliance_kind(identity.name)
+    if not expected:
+        code=str(identity.model or identity.sku or '').upper()
+        for kind,pattern in (
+            ('dishwasher',r'(?:BLF\d+[A-Z0-9]*|LS\d+[A-Z0-9]*)'),
+            ('washer',r'(?:(?:BWF|BWJ|CWB|CWH|CWN|LEE|LEP|LED|LDA)\d+[A-Z0-9]*|MA512W\d+[A-Z0-9]*)'),
+            ('refrigerator',r'(?:(?:BRE|BRM|BRO|CRA|CRD|CRE|CRM|IB|IF|IM|TF|RE)\d+[A-Z0-9]*|MD-RT[A-Z0-9]*)'),
+            ('freezer',r'(?:CHA|CHB|CVU|HI|FEI)\d+[A-Z0-9]*'),
+            ('stove',r'CFO\d+[A-Z0-9]*'),
+            ('beer_cooler',r'(?:CZD|MDRX)\d+[A-Z0-9]*'),
+        ):
+            if re.fullmatch(pattern,code):expected=kind;break
+    if not expected:return None
+    title=normalize_text(candidate.get('name') or candidate.get('title'))
+    if not title:return None
+    if re.match(SPARE_PART_HEADING,title):
+        return 'Peça ou acessório compatível não é o eletrodoméstico solicitado.'
+    actual=appliance_kind(title)
+    if actual and actual!=expected:return 'Tipo de eletrodoméstico diferente do produto cadastrado.'
+    if not actual:return 'O título não confirma o eletrodoméstico completo solicitado.'
+    return None
 
 
 def normalize_identifier(value):
@@ -78,6 +125,8 @@ def _identifier_in_text(identifier, *values):
     # 1/2. The explicit pair also lets saved listings retain a correct match.
     if expected == 'mdrt411fgf01' and any(_identifier_in_text(value, *values) for value in ('MD-RT411FGF011', 'MD-RT411FGF012')):
         return True
+    if expected == 'mdrt611evk46' and _identifier_in_text('MD-RT611EVK463', *values):
+        return True
     for value in values:
         tokens = re.findall(r"[a-z0-9]+", normalize_text(value))
         for start in range(len(tokens)):
@@ -103,6 +152,7 @@ def _pack_quantity(name):
 
 def _component(name):
     prefix = re.split(r"\b(?:para|compativel|aplicacao)\b", normalize_text(name), maxsplit=1)[0]
+    prefix = re.sub(r'\b(?:controle|modulo) eletronico\b','placa',prefix)
     groups = {
         "sensor": {"sensor", "sensores"}, "placa": {"placa", "placas"},
         "cabo": {"cabo", "cabos"}, "adaptador": {"adaptador", "adaptadores"},
@@ -123,7 +173,40 @@ def _component(name):
     return None
 
 
+def appliance_variant(sku):
+    return re.fullmatch(r'((?:BRM|BRE|BRO|CRM|CWH|BWF|BWJ)\d{2}[A-Z0-9]{2})(ANA|BNA|XNA)', sku.upper())
+
+
+def _appliance_variant_match(identity, candidate, title):
+    variant = appliance_variant(identity.sku)
+    if not variant:
+        return None
+    base, suffix = variant.groups()
+    structured = [_candidate_value(candidate, field) for field in ('structured_sku', 'mpn', 'model')]
+    text = ' '.join([title, *structured]).upper()
+    codes = set(re.findall(r'(?<![A-Z0-9])' + base + r'(?:ANA|BNA|XNA)(?![A-Z0-9])', text))
+    tension = normalize_text(candidate.get('voltage')) or title
+    expected = {'ANA': '127', 'BNA': '220', 'XNA': 'bivolt'}[suffix]
+    observed = {'bivolt'} if re.search(r'\bbivolt\b', tension) else {
+        '127' if int(value) <= 127 else '220'
+        for value in re.findall(r'\b(110|115|120|127|208|220|230|240)\s*v(?:olts?)?\b', tension)
+    }
+    if tension in {'110', '127', '220'}:
+        observed = {'220' if tension == '220' else '127'}
+    if (observed and observed != {expected}) or (codes and codes != {variant.group(0)}):
+        return MatchResult(False, 0.0, 'invalid_match', 'Código ou tensão da variante divergente.')
+    if codes or any(normalize_identifier(value) == normalize_identifier(identity.sku) for value in structured):
+        return MatchResult(True, .98, 'variant_code_exact', 'Código completo da variante confirmado.')
+    if observed == {expected} and _identifier_in_text(base, title, *structured):
+        return MatchResult(True, .95, 'variant_model_voltage', 'Modelo e tensão da variante confirmados.')
+    if identity.ean and normalize_identifier(_candidate_value(candidate, 'ean')) == normalize_identifier(identity.ean):
+        return MatchResult(True, 1.0, 'ean_exact', 'EAN da variante confirmado.')
+    return MatchResult(False, 0.0, 'invalid_match', 'A oferta não confirma o código completo nem a tensão da variante.')
+
+
 def resolve_candidate(identity: ProductIdentity, candidate) -> MatchResult:
+    if error:=appliance_match_error(identity,candidate):
+        return MatchResult(False,0.0,'invalid_match',error)
     searchable = " ".join(str(candidate.get(key) or "") for key in ("name", "title"))
     heading = normalize_text(searchable)
     if re.search(r'\b(?:garantia estendida|seguro garantia|servico de instalacao)\b', heading):
@@ -135,16 +218,24 @@ def resolve_candidate(identity: ProductIdentity, candidate) -> MatchResult:
     if _pack_quantity(searchable) != _pack_quantity(identity.name):
         return MatchResult(False, 0.0, "invalid_match", "Quantidade do kit diferente da unidade pesquisada")
     expected_component, observed_component = _component(identity.name), _component(searchable)
-    if expected_component and observed_component and expected_component != observed_component:
+    if not appliance_kind(identity.name) and expected_component and observed_component and expected_component != observed_component:
         return MatchResult(False, 0.0, "invalid_match", "Componente anunciado diferente da peca pesquisada")
     url_path = urlparse(str(candidate.get("url") or "")).path
     identifier_text = (searchable, url_path)
+    expected_voltage = _voltage_options(identity.name)
+    observed_voltage = _voltage_options(f"{searchable} {url_path} {candidate.get('voltage') or ''}")
+    if len(expected_voltage) == len(observed_voltage) == 1 and expected_voltage != observed_voltage:
+        return MatchResult(False, 0.0, "invalid_match", "Tensão diferente da especificação pesquisada")
 
-    for field in IDENTIFIER_FIELDS[:3]:
+    identity_fields = IDENTIFIER_FIELDS[:2] if appliance_variant(identity.sku) else IDENTIFIER_FIELDS[:3]
+    for field in identity_fields:
         expected = normalize_identifier(getattr(identity, field))
         observed = _candidate_value(candidate, field)
         if expected and observed and not _identifier_in_text(expected, observed):
             return MatchResult(False, 0.0, "invalid_match", f"{field.upper()} divergente")
+
+    if variant := _appliance_variant_match(identity, candidate, heading):
+        return variant
 
     for field, method in (("ean", "ean_exact"), ("mpn", "mpn_exact")):
         expected = normalize_identifier(getattr(identity, field))
@@ -157,11 +248,16 @@ def resolve_candidate(identity: ProductIdentity, candidate) -> MatchResult:
         return MatchResult(True, 0.98, "sku_exact", "SKU estruturado exato")
 
     model = normalize_identifier(identity.model or identity.sku)
+    distinct_model = bool(model and model != expected_sku)
+    if distinct_model and _identifier_in_text(expected_sku, *identifier_text):
+        return MatchResult(True, 0.95, "sku_exact", "SKU exato no título ou URL")
     candidate_model = normalize_identifier(_candidate_value(candidate, "model"))
     model_exact = bool(model and (
         candidate_model == model
         or _identifier_in_text(model, _candidate_value(candidate, "model"), *identifier_text)
     ))
+    if model_exact and distinct_model and len(expected_voltage) == 1 and expected_voltage != observed_voltage:
+        return MatchResult(False, 0.0, "invalid_match", "Modelo encontrado sem confirmação da tensão")
     brand = normalize_text(identity.brand)
     candidate_brand = normalize_text(
         _candidate_value(candidate, "brand") or searchable

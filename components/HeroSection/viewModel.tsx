@@ -1,11 +1,10 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   ComparisonRow,
   Product,
   SearchResponse,
-  StoreSearchResult,
 } from "../../models/product.model";
-import { getInterfacePreferences } from "../../src/preferences";
+import { LOCAL_DATA_CHANGED } from "../../src/localData";
 import { apiAuthHeaders } from "../../src/apiAuth";
 
 export const getApiBaseUrl = () => {
@@ -21,31 +20,56 @@ export const getApiBaseUrl = () => {
   return apiUrlWithProtocol.replace(/\/+$/, "");
 };
 
-const useHeroSection = () => {
+const useHeroSection = (postalCodes: string[] = ['01001000']) => {
   const [productName, setProductName] = useState("");
   const [products, setProducts] = useState<Product[]>([]);
-  const [storeResults, setStoreResults] = useState<StoreSearchResult[]>([]);
   const [comparisonRows, setComparisonRows] = useState<ComparisonRow[]>([]);
   const [loading, setLoading] = useState(false);
-  const [feedback, setFeedback] = useState("");
+  const [searchError, setSearchError] = useState("");
   const [lastQuery, setLastQuery] = useState("");
+  const [searchCleared, setSearchCleared] = useState(false);
+  const request = useRef<AbortController | null>(null);
+  const previousInput = useRef("");
+  const clearSearch = useCallback(() => {
+    request.current?.abort();
+    request.current = null;
+    setProducts([]); setComparisonRows([]);
+    setLastQuery(""); setSearchError(""); setLoading(false);
+  }, []);
+  useEffect(() => {
+    if (!productName.trim()) {
+      if (previousInput.current.trim()) setSearchCleared(true);
+      clearSearch();
+    } else setSearchCleared(false);
+    previousInput.current = productName;
+  }, [productName, clearSearch]);
+  useEffect(() => () => request.current?.abort(), []);
+  useEffect(()=>{
+    const update=(event:Event)=>{const sku=(event as CustomEvent<{sku:string}>).detail?.sku;setProducts(rows=>rows.filter(row=>row.sku!==sku));setComparisonRows([]);};
+    window.addEventListener(LOCAL_DATA_CHANGED,update);return()=>window.removeEventListener(LOCAL_DATA_CHANGED,update);
+  },[]);
 
-  const handleSearch = async (selectedSkus: string[] = [], queryLabel?: string) => {
+  const handleSearch = useCallback(async (selectedSkus: string[] = [], queryLabel?: string) => {
     if (loading) return;
 
     const query = productName.trim();
     if (!query && !selectedSkus.length) return;
 
     setLoading(true);
-    setFeedback("");
+    setSearchCleared(false);
+    setSearchError("");
     setLastQuery(queryLabel || query);
 
     const apiBase = getApiBaseUrl();
     const skus = [...new Set(selectedSkus.map((sku) => sku.trim().toUpperCase()).filter(Boolean))];
+    request.current?.abort();
+    const controller = new AbortController();
+    request.current = controller;
 
     try {
       const response = skus.length
-        ? await fetch(`${apiBase}/products/search/batch`, {
+        ? await fetch(`${apiBase}/products/search/batch?include_stores=false`, {
+            signal: controller.signal,
             method: "POST",
             headers: apiAuthHeaders({ "Content-Type": "application/json" }),
             body: JSON.stringify({
@@ -53,43 +77,45 @@ const useHeroSection = () => {
               force_refresh: false,
               refresh_if_stale: false,
               local_only: true,
-              postal_code: getInterfacePreferences().logisticsPostalCode || null,
+              postal_code: postalCodes[0] || '01001000',
+              postal_codes: postalCodes,
               scope: "all",
             }),
           })
-        : await fetch(`${apiBase}/products/search?q=${encodeURIComponent(query)}`, { headers: apiAuthHeaders() });
+        : await fetch(`${apiBase}/products/search?${new URLSearchParams([['q',query],['include_stores','false'],...postalCodes.map(code=>['postal_codes',code])])}`, { headers: apiAuthHeaders(), signal: controller.signal });
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+        const detail = await response.json().catch(() => null);
+        throw new Error(response.status < 500 && typeof detail?.detail === "string"
+          ? detail.detail : "Não foi possível carregar as ofertas. Tente novamente.");
       }
 
       const data = (await response.json()) as SearchResponse;
+      if (controller.signal.aborted || request.current !== controller) return;
       const receivedProducts = data.results || [];
-      const receivedStores = data.stores || [];
       const receivedComparison = data.comparison || [];
 
       setProducts(receivedProducts);
-      setStoreResults(receivedStores);
       setComparisonRows(receivedComparison);
-      setFeedback(data.message || "");
     } catch (e) {
+      if (controller.signal.aborted || request.current !== controller) return;
       console.error("Erro ao buscar dados:", e);
       setProducts([]);
-      setStoreResults([]);
       setComparisonRows([]);
-      setFeedback("Não foi possível buscar os preços agora.");
+      setSearchError(e instanceof Error && !(e instanceof TypeError) && !(e instanceof SyntaxError)
+        ? e.message : "Não foi possível carregar as ofertas. Verifique a conexão e tente novamente.");
     } finally {
-      setLoading(false);
+      if (request.current === controller) { request.current = null; setLoading(false); }
     }
-  };
+  }, [loading, productName, postalCodes]);
 
   return {
     productName,
     products,
-    storeResults,
     comparisonRows,
     loading,
-    feedback,
+    searchError,
     lastQuery,
+    searchCleared,
     setProductName,
     handleSearch,
   };

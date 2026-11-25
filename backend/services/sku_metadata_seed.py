@@ -181,7 +181,7 @@ SKU_SUBFAMILY_CORRECTIONS = {
 }
 
 
-def seed_sku_business_metadata(db):
+def seed_sku_business_metadata(db, create_missing=True):
     skus = list(SKU_BUSINESS_METADATA)
     existing = {
         item.sku: item
@@ -191,6 +191,8 @@ def seed_sku_business_metadata(db):
     for sku, (cluster, _portfolio, subfamily) in SKU_BUSINESS_METADATA.items():
         item = existing.get(sku)
         if item is None:
+            if not create_missing:
+                continue
             item = KnownSku(sku=sku)
             db.add(item)
         if cluster.startswith("CONSUM"):

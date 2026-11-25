@@ -1,7 +1,7 @@
 """Serve the built interface and a same-origin proxy to the local API.
 
 Reusing the loopback API avoids a second extraction worker against the same DB.
-Only dist/ is exposed as static files; the workspace and database stay private.
+Only the frontend build directory is exposed as static files.
 """
 from contextlib import asynccontextmanager
 import os
@@ -68,5 +68,5 @@ def create_lan_app(directory, backend_url, transport=None):
     return application
 
 
-app = create_lan_app(Path(__file__).resolve().parents[1] / 'dist',
+app = create_lan_app(os.getenv('NEVETRACKER_LAN_DIST') or Path(__file__).resolve().parents[1] / 'dist',
                      os.getenv('NEVETRACKER_BACKEND_URL', 'http://127.0.0.1:8000'))

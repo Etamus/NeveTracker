@@ -1,0 +1,203 @@
+{
+  "generated_at_utc": "2026-11-17T01:58:32.866782+00:00",
+  "benchmarks": {
+    "controlled_queue_16_skus_240_quotes": {
+      "before_seconds": 8.049,
+      "after_seconds": 3.338,
+      "speedup": 2.41,
+      "same_results": true,
+      "skus_completed": 16,
+      "quotes": 240
+    },
+    "live_stores_20_quotes_5_postals": {
+      "before_seconds": 7.072,
+      "after_seconds": 5.927,
+      "speedup": 1.19,
+      "same_results": true,
+      "quotes": 20,
+      "complete": 20
+    },
+    "real_browser_8_isolated_pages": {
+      "before_seconds": 14.233,
+      "after_seconds": 4.518,
+      "speedup": 3.15,
+      "same_results": true,
+      "successful": 8,
+      "fresh_contexts": 8
+    },
+    "real_database_15_queries_6546_rows": {
+      "before_seconds": 13.404,
+      "after_seconds": 0.924,
+      "speedup": 14.51,
+      "same_results": true,
+      "rows": 6546,
+      "queries": 15
+    }
+  },
+  "validation": {
+    "backend_tests_passed": 513,
+    "backend_seconds": 185.024,
+    "typescript": "passed",
+    "eslint": "passed",
+    "production_build": "passed",
+    "browser_ui": "passed",
+    "scoped_pagination_150_pages": "passed",
+    "shared_network_budget": "passed",
+    "concurrent_sqlite_counters": "passed",
+    "independent_27_postal_quotes_single_page_parse": "passed"
+  },
+  "profile": {
+    "precise_sku_workers": 6,
+    "quick_sku_workers": 4,
+    "global_io_budget": 12,
+    "per_store_requests": 2,
+    "public_browser_workers": 2,
+    "adaptive_parallelism": true,
+    "public_browser_reuse": true
+  },
+  "recovered_material": {
+    "seconds": 0.822,
+    "before": {
+      "status": "queued",
+      "attempts": 105,
+      "phase": "general"
+    },
+    "result": "partial",
+    "after": {
+      "status": "queued",
+      "attempts": 106,
+      "phase": "marketplaces",
+      "message": "Coleta concluída em 27 CEPs; 0 resultados por oferta e destino. 46 paginas de loja nao avancaram por bloqueio ou falha de leitura; a cobertura pode estar incompleta. Lojas afetadas: Electrolux (5 paginas, 0 produtos), Midea (2 paginas, 0 produtos), Consul (5 paginas, 0 produtos), Brastemp (5 paginas, 0 produtos), Leroy Merlin (5 paginas, 0 produtos), Amazon Brasil (4 paginas, 0 produtos), Magazine Luiza (2 paginas, 0 produtos), Dufrio (5 paginas, 0 produtos), Friolar (2 paginas, 0 produtos), Refrigeração Mota (3 paginas, 0 produtos), MG Parts (2 paginas, 0 produtos), Gold Service (2 paginas, 0 produtos), ComClick (4 paginas, 0 produtos)."
+    }
+  },
+  "production_snapshot": {
+    "poll_seconds": 0.3478,
+    "job": {
+      "active_skus": [
+        {
+          "sku": "BRE66AK",
+          "phase": "general",
+          "message": "BRE66AK: 189/625 cotações verificadas; CEP 73083570",
+          "progress": {
+            "phase": "quoting",
+            "done": 189,
+            "total": 625,
+            "message": "BRE66AK: 189/625 cotações verificadas; CEP 73083570"
+          }
+        },
+        {
+          "sku": "BRM62AK",
+          "phase": "general",
+          "message": "Rodada 5: BRM62AK: coletando 0 paginas de produto conhecidas",
+          "progress": {}
+        },
+        {
+          "sku": "BRO88AK",
+          "phase": "general",
+          "message": "Processando BRO88AK: demais lojas.",
+          "progress": {}
+        },
+        {
+          "sku": "BWF16AB",
+          "phase": "general",
+          "message": "Rodada 1: BWF16AB: coletando 35 paginas de produto conhecidas",
+          "progress": {}
+        },
+        {
+          "sku": "BWF18AB",
+          "phase": "general",
+          "message": "Rodada 1: BWF18AB: coletando 31 paginas de produto conhecidas",
+          "progress": {}
+        },
+        {
+          "sku": "BWJ14A9",
+          "phase": "general",
+          "message": "Rodada 1: BWJ14A9: coletando 28 paginas de produto conhecidas",
+          "progress": {}
+        }
+      ],
+      "general_skus_done": 27,
+      "quotes_checked": 11232,
+      "quotes_complete": 7010,
+      "quotes_out_of_stock": 945,
+      "quotes_incomplete": 3277,
+      "resources": {
+        "active_requests": 0,
+        "active_by_store": {},
+        "peak_requests": 0,
+        "io_budget": 12,
+        "cpu_percent": 0.0,
+        "available_memory_mb": 6749,
+        "logical_cpus": 12
+      },
+      "waiting_access": [],
+      "waiting_skus": 0,
+      "id": "888809d7-a310-4628-98be-369e6064c0cf",
+      "owner_user_id": 1,
+      "api_with_scraping": true,
+      "postal_codes": [
+        "69900060",
+        "57020000",
+        "68900073",
+        "69005040",
+        "40026032",
+        "60025060",
+        "73083570",
+        "29010001",
+        "74003010",
+        "65010000",
+        "78005000",
+        "79002000",
+        "30111000",
+        "66010000",
+        "58010000",
+        "80020000",
+        "50010000",
+        "64000040",
+        "20040020",
+        "59025000",
+        "90010000",
+        "76801000",
+        "69301000",
+        "88010000",
+        "01001000",
+        "49010000",
+        "77001006"
+      ],
+      "stores": [],
+      "kind": "manual",
+      "status": "running",
+      "scope": "all",
+      "mode": "precise",
+      "force_refresh": true,
+      "refresh_if_stale": false,
+      "batch_size": 1,
+      "total_skus": 311,
+      "processed_skus": 0,
+      "visited_skus": 36,
+      "started_rounds": 461,
+      "store_steps_done": 427,
+      "store_steps_total": 4665,
+      "work_progress_percent": 4.7,
+      "success_count": 0,
+      "cached_count": 0,
+      "error_count": 0,
+      "current_sku": "BRO88AK",
+      "message": "BRE66AK: 189/625 cotações verificadas; CEP 73083570",
+      "cancel_requested": false,
+      "progress_percent": 0.0,
+      "batches_total": 311,
+      "batches_completed": 0,
+      "created_at": "2026-11-16 22:47:58.099031",
+      "started_at": "2026-11-16 22:48:00.332229",
+      "completed_at": null,
+      "updated_at": "2026-11-17 01:58:30.988062"
+    }
+  },
+  "scope": "Performance validation; the 311-SKU production job remains in progress. External access failures remain explicitly reported.",
+  "research_references": [
+    "https://github.com/apify/crawlee-python/blob/master/src/crawlee/_autoscaling/autoscaled_pool.py",
+    "https://docs.scrapy.org/en/latest/topics/autothrottle.html",
+    "https://psutil.io/"
+  ]
+}

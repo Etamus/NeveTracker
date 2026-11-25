@@ -66,9 +66,19 @@ if DATABASE_URL.startswith("sqlite"):
         cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.execute("PRAGMA busy_timeout=30000")
         cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA journal_size_limit=67108864")
         cursor.close()
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+def begin_report_snapshot(db):
+    # sqlite3 legacy transaction control starts transactions on writes only.
+    # A multi-query report needs one snapshot even during collection/deletion.
+    if db.get_bind().dialect.name == 'sqlite':
+        connection = db.connection()
+        if not connection.connection.driver_connection.in_transaction:
+            connection.exec_driver_sql('BEGIN')
 
 
 def get_db():

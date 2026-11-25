@@ -1,0 +1,25 @@
+{
+  "checado_em": "2026-11-18T12:27:49.219381+00:00",
+  "skus": 213,
+  "anuncios": 315,
+  "ceps": 27,
+  "anuncios_sem_estoque": 56,
+  "verificados": {
+    "precos_db": 7049,
+    "cotacoes_db": 6993,
+    "data_frete_prazo_conferem": 6981,
+    "atualizada_posteriormente": 12
+  },
+  "fretes_e_prazos": {
+    "com_frete_e_prazo": 6855,
+    "incompleta": 138
+  },
+  "linhas": 7049,
+  "fabricantes": {
+    "Electrolux": 709,
+    "Brastemp": 3315,
+    "Consul": 2879,
+    "Midea": 146
+  },
+  "sem_observacao": []
+}

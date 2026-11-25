@@ -43,6 +43,8 @@ def _walk(value):
 
 
 def _product_url(value, base):
+    if re.match(r'^(?:www\.|produto\.)?mercadolivre\.com\.br/', str(value or ''), re.I):
+        value='https://'+str(value)
     url = urljoin(base, str(value or ''))
     if not allowed_url(url):
         return None
@@ -118,22 +120,32 @@ def _state_card(node, base):
     title_part = by_id.get('title') or {}
     embedded_title = title_part.get('title') or {}
     title = title or (embedded_title.get('text') if isinstance(embedded_title, dict) else embedded_title) or title_part.get('text')
-    url = _product_url(metadata.get('url') or node.get('permalink') or node.get('url'), base)
+    raw_url=metadata.get('url') or node.get('permalink') or node.get('url')
+    if raw_url and metadata.get('url_fragments'):raw_url=str(raw_url).split('#',1)[0]+metadata['url_fragments']
+    url = _product_url(raw_url, base)
     if not isinstance(title, str) or not url:
         return None
     item_id = node.get('item_id') or metadata.get('item_id') or _item_id(url)
     metadata_id = metadata.get('id')
     if not item_id and re.fullmatch(r'MLB\d+', str(metadata_id or ''), re.I) and metadata_id.lower() not in urlparse(url).path.lower():
         item_id = metadata_id
-    if item_id and '/p/' in urlparse(url).path:
+    if item_id and re.search(r'/(?:p|up)/',urlparse(url).path):
         parsed = urlparse(url)
         query = parse_qs(parsed.query)
         query['wid'] = [item_id]
         query['pdp_filters'] = ['item_id:' + item_id]
         url = urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
-    price_part = by_id.get('price') or {}
+    price_part = by_id.get('price_v2') or by_id.get('price') or {}
     seller_part = by_id.get('seller') or {}
-    seller = _seller(node.get('seller') or seller_part.get('seller') or seller_part.get('text'))
+    seller_data=node.get('seller') or seller_part.get('seller') or seller_part.get('text')
+    if isinstance(seller_data,dict) and seller_data.get('text'):
+        template=seller_data['text']
+        for value in seller_data.get('values') or []:
+            replacement=value.get('label') or value.get('text') or ''
+            if isinstance(replacement,dict):replacement=replacement.get('text') or ''
+            template=template.replace('{'+str(value.get('key'))+'}',str(replacement))
+        seller_data=template.strip()
+    seller = _seller(seller_data)
     price = _price(price_part.get('price') or node.get('price'))
     return {'name': title, 'url': url, 'seller': seller, 'store': seller, 'price': price,
             'source': 'Mercado Livre', 'item_id': item_id, '_seller_unknown': not bool(seller),
@@ -141,7 +153,6 @@ def _state_card(node, base):
 
 
 def parse_search_html(html, base):
-    soup = BeautifulSoup(html, 'html.parser')
     items, seen = [], set()
     def add(item):
         if not item:
@@ -155,6 +166,18 @@ def parse_search_html(html, base):
             # A catalog's price without a seller cannot become a seller's quote.
             item['price'] = None
         items.append(item)
+    from services.mercado_livre_pages import initial_state
+    nordic=initial_state(html)
+    if isinstance(nordic.get('results'),list) and nordic['results']:
+        for node in nordic['results']:
+            if isinstance(node,dict) and node.get('id')=='POLYCARD':add(_state_card(node,base))
+        if items:
+            next_page=(nordic.get('pagination') or {}).get('next_page') or {}
+            candidate=urljoin(base,next_page.get('url') or '')
+            next_url=candidate if (next_page.get('show') is True and next_page.get('url') and allowed_url(candidate)
+                                  and urlparse(candidate).hostname==urlparse(base).hostname and candidate!=base) else None
+            return items,next_url
+    soup = BeautifulSoup(html, 'html.parser')
     for card in soup.select('li.ui-search-layout__item, div.poly-card'):
         link = card.select_one('a.poly-component__title[href], h2 a[href], a.ui-search-link[href]')
         url = _product_url(link.get('href'), base) if link else None
@@ -166,15 +189,25 @@ def parse_search_html(html, base):
         add({'name': link.get_text(' ', strip=True), 'url': url, 'seller': seller,
              'store': seller, 'source': 'Mercado Livre', 'price': price,
              'item_id': _item_id(url), 'discovery_source': 'mercado_livre_html'})
-    for state in embedded_states(soup):
-        for node in _walk(state):
-            add(_state_card(node, base))
+    if isinstance(nordic.get('results'),list):
+        for node in nordic['results']:
+            if isinstance(node,dict) and node.get('id')=='POLYCARD':add(_state_card(node,base))
+    else:
+        for state in embedded_states(soup):
+            for node in _walk(state):
+                add(_state_card(node, base))
     next_url = None
     next_link = soup.select_one('.andes-pagination__button--next a[href], a[rel="next"][href]')
     if next_link:
         absolute = urljoin(base, next_link.get('href'))
         if allowed_url(absolute) and urlparse(absolute).hostname == urlparse(base).hostname and absolute != base:
             next_url = absolute
+    if not next_url:
+        paging=nordic.get('pagination') or {}
+        next_page=paging.get('next_page') or {}
+        candidate=urljoin(base,next_page.get('url') or '')
+        if next_page.get('show') is True and next_page.get('url') and allowed_url(candidate) and urlparse(candidate).hostname==urlparse(base).hostname and candidate!=base:
+            next_url=candidate
     if not next_url:
         control = soup.select_one('a[data-andes-pagination-control="next"]:not([data-andes-state="disabled"])')
         selected = soup.select_one('[data-andes-pagination-item][data-andes-state="selected"]')
@@ -330,7 +363,8 @@ def _parse_product_html(html, url, source, identity, postal_code=None):
 
 
 def parse_product_html(html, url, source, identity, postal_code=None):
-    result = _parse_product_html(html, url, source, identity, postal_code)
+    from services.mercado_livre_pages import parse_primary
+    result = parse_primary(html,url,identity) or _parse_product_html(html, url, source, identity, postal_code)
     if len(result.get('items', [])) == 1:
         from services.fulfillment import fulfillment_details
         item = result['items'][0]
@@ -339,11 +373,36 @@ def parse_product_html(html, url, source, identity, postal_code=None):
 
 
 def collect_public_product(source, identity, postal_code=None, timeout=15, use_browser=False):
+    def complete(result, selected_url=None):
+        expected=_item_id(selected_url or source.url)
+        if expected and result.get('status')=='OK':
+            selected=[item for item in result.get('items') or [] if (item.get('item_id') or _item_id(item.get('url'))) == expected]
+            if not selected:return {'status':'INVALID_MATCH','reason':'O redirecionamento selecionou outro anúncio/lojista.'}
+            result={**result,'item':selected[0],'items':selected}
+        if postal_code and result.get('status')=='OK':
+            from services.mercado_livre_pages import quote_offer
+            for item in result.get('items') or []:
+                if item.get('discovery_source')=='mercado_livre_nordic' and item.get('availability')!='out_of_stock':
+                    try:
+                        quoted=quote_offer(item,postal_code,timeout)
+                        if quoted:item.update(quoted)
+                    except Exception as exc:item['_logistics_error']=str(exc)[:200]
+        return result
     def parse_page(page):
         return parse_product_html(page.content(), page.url, source, identity, postal_code)
     fetched = fetch_public_html(source.url, timeout, use_browser, page_handler=parse_page)
     if fetched['status'] != 'OK' or 'items' in fetched:
         if fetched['status'] in {'LOGIN_REQUIRED', 'JS_REQUIRED', 'HTTP_ERROR'}:
             fetched = {**fetched, '_access_status': fetched['status'], 'status': 'BLOCKED'}
-        return fetched
-    return parse_product_html(fetched['html'], fetched['url'], source, identity, postal_code)
+        return complete(fetched)
+    result = parse_product_html(fetched['html'], fetched['url'], source, identity, postal_code)
+    if result.get('status') == 'INVALID_MATCH':
+        from services.mercado_livre_pages import parse_primary, voltage_variant_url
+        selected = voltage_variant_url(fetched['html'], fetched['url'], identity)
+        if selected:
+            candidate = fetch_public_html(selected, timeout)
+            if candidate.get('status') == 'OK':
+                confirmed = parse_primary(candidate['html'], candidate['url'], identity)
+                if confirmed and confirmed.get('status') == 'OK':
+                    return complete(confirmed, selected_url=selected)
+    return complete(result)

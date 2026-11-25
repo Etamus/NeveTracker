@@ -2,8 +2,8 @@ import argparse
 from datetime import datetime
 
 from database import SessionLocal
-from models.product import PriceHistory, Product
-from services.scraper_service import KNOWN_SKUS, run_all_scrapers
+from models.product import KnownSku, PriceHistory, Product
+from services.scraper_service import run_all_scrapers
 
 
 def _has_cached_sku(db, sku):
@@ -17,12 +17,10 @@ def _has_cached_sku(db, sku):
 
 
 def preload_skus(force=False, limit=None):
-    skus = sorted(KNOWN_SKUS)
-    if limit:
-        skus = skus[:limit]
-
     db = SessionLocal()
     try:
+        query = db.query(KnownSku.sku).order_by(KnownSku.sku)
+        skus = [sku for (sku,) in (query.limit(limit) if limit else query)]
         total = len(skus)
         for index, sku in enumerate(skus, start=1):
             if not force and _has_cached_sku(db, sku):

@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useFilterExpansion } from "../src/useFilterExpansion";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { LOCAL_DATA_CHANGED } from "../src/localData";
 import { createPortal } from "react-dom";
-import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import type { ReactNode } from "react";
 import {
   ArrowLeft,
   ArrowUpDown,
@@ -8,6 +10,7 @@ import {
   Boxes,
   Building2,
   Check,
+  CheckCircle2,
   ChevronDown,
   ExternalLink,
   Funnel,
@@ -16,13 +19,20 @@ import {
   Search,
   Store,
   TrendingDown,
+  RefreshCw,
+  FileSpreadsheet,
   X,
 } from "lucide-react";
 import type { ComparisonRow, Product } from "../models/product.model";
-import { PriceChart } from "./PriceChart";
-import AnalyticsSpreadsheet from "./AnalyticsSpreadsheet";
 import PaginationFooter from "./PaginationFooter";
-import { offerIsAvailable, offerSellerKey } from "../src/offerAvailability";
+import DatePeriodSelect from "./DatePeriodSelect";
+import OrbitingSpheres from "./OrbitingSpheres";
+import { useAnchoredPopover } from "./useAnchoredPopover";
+import { downloadExcel } from "../src/download";
+import { apiAuthHeaders } from "../src/apiAuth";
+import { getApiBaseUrl } from "./HeroSection/viewModel";
+import { canonicalStoreLabel, offerIsAvailable, offerSellerKey } from "../src/offerAvailability";
+import { formatDeliveryRange } from "../src/deliveryRange";
 import {
   createCompactFormatter,
   createCurrencyFormatter,
@@ -36,18 +46,28 @@ interface SlidingTabsProps {
   isAuthenticated?: boolean;
   activeTab: number;
   onTabChange: (tab: number) => void;
+  analyticsMode: AnalyticsView;
+  selectedRow: ComparisonRow | null;
+  setSelectedRow: (row: ComparisonRow | null) => void;
   loading: boolean;
   products: Product[];
   comparisonRows: ComparisonRow[];
   lastQuery: string;
+  searchCleared?: boolean;
+  searchFailure?: ReactNode;
   analyticsMap?: (stores: string[]) => ReactNode;
-  analyticsReport?: (mode: "comparison" | "history", stores: string[], brands: string[]) => ReactNode;
+  analyticsReport?: (mode: "comparison" | "history", stores: string[], brands: string[], controls: {dateFrom:string;dateTo:string;search:string;actionsContainer:HTMLElement|null}) => ReactNode;
+  onRefresh?: () => void;
 }
 
 type SortOrder = "stores_desc" | "price_asc" | "price_desc";
-type DateRange = "all" | "today" | "7d" | "30d" | "90d";
-type StoreRankingState = { row: ComparisonRow; left: number; top: number };
+type DateRange = "all" | { from: string; to: string };
+type StoreRankingState = { row: ComparisonRow; anchor: HTMLElement };
 
+export type AnalyticsView = "overview" | "comparison" | "history";
+
+const PriceChart = lazy(() => import("./PriceChart").then((module) => ({ default: module.PriceChart })));
+const AnalyticsSpreadsheet = lazy(() => import("./AnalyticsSpreadsheet"));
 const OFFER_PAGE_SIZE = 5;
 const CATALOG_PAGE_SIZE = 12;
 const BRAND_FILTERS = ["Consul", "Brastemp", "Whirlpool", "Electrolux", "Midea"];
@@ -76,14 +96,6 @@ const sortOptions: Array<{ value: SortOrder; label: string }> = [
   { value: "price_desc", label: "Maior preço" },
 ];
 
-const dateOptions: Array<{ value: DateRange; label: string }> = [
-  { value: "all", label: "Qualquer data" },
-  { value: "today", label: "Hoje" },
-  { value: "7d", label: "Últimos 7 dias" },
-  { value: "30d", label: "Últimos 30 dias" },
-  { value: "90d", label: "Últimos 90 dias" },
-];
-
 const offerDataOptions = [
   "Frete grátis",
   "Frete informado",
@@ -91,7 +103,7 @@ const offerDataOptions = [
   "Pagamento a prazo",
 ];
 
-const formatCurrency = (value: number | null | undefined) => value == null || !Number.isFinite(value) ? "—" : createCurrencyFormatter(getInterfacePreferences()).format(value);
+type CurrencyLabel = (value: number | null | undefined) => string;
 
 const truncateText = (value: string, maxLength = 28) =>
   value.length > maxLength ? `${value.slice(0, maxLength - 3).trimEnd()}...` : value;
@@ -189,20 +201,21 @@ const escapeRegExp = (value: string) =>
 const detectBrandInText = (value?: string | null) => {
   if (/\bbrastem\b/i.test(value || "")) return "Brastemp";
   const text = normalize(value);
-  const matches = BRAND_FILTERS.map((brand) => {
-    const match = text.match(new RegExp(`\\b${escapeRegExp(normalize(brand))}\\b`));
-    return match?.index === undefined ? null : { brand, index: match.index };
-  }).filter((match): match is { brand: string; index: number } => Boolean(match));
-
-  return matches.sort((a, b) => a.index - b.index)[0]?.brand || null;
+  const match = brandPattern.exec(text);
+  return match ? brandLabels.get(match[0]) || null : null;
 };
 
+const brandLabels = new Map(BRAND_FILTERS.map((brand) => [normalize(brand), brand]));
+const brandPattern = new RegExp(`\\b(?:${[...brandLabels.keys()].map(escapeRegExp).join("|")})\\b`);
 export const detectProductBrand = (product: Pick<Product, "name" | "brand">) =>
   detectBrandInText(product.name) || detectBrandInText(product.brand);
 
 const getRowBrand = (row: ComparisonRow) => {
-  const brand = row.offers.map(detectProductBrand).find(Boolean);
-  return brand || detectBrandInText(row.name) || "—";
+  for (const offer of row.offers) {
+    const brand = detectProductBrand(offer);
+    if (brand) return brand;
+  }
+  return detectBrandInText(row.name) || "—";
 };
 
 const productMatchesBrand = (product: Product, selectedBrands: string[]) =>
@@ -210,9 +223,8 @@ const productMatchesBrand = (product: Product, selectedBrands: string[]) =>
 
 const productMatchesStore = (product: Product, selectedStores: string[]) => {
   if (selectedStores.length === 0) return true;
-  const source = normalize(product.source);
-  const canonical = STORE_FILTERS.find((store) => [store.label, ...store.aliases].some((alias) => normalize(alias) === source));
-  if (canonical) return selectedStores.includes(canonical.label);
+  const canonical = canonicalStoreLabel(product.source || "");
+  if (canonical) return selectedStores.includes(canonical);
   let host = "";
   try { host = new URL(product.url).hostname.toLowerCase().replace(/[^a-z0-9]/g, ""); } catch { /* Legacy offers can lack a valid URL. */ }
   return selectedStores.some((store) => {
@@ -231,9 +243,10 @@ const bestOffersByStore = (offers: Product[]) => {
   const stores = new Map<string, Product>();
 
   offers.forEach((offer) => {
-    const current = stores.get(offerSellerKey(offer));
+    const key = offerSellerKey(offer);
+    const current = stores.get(key);
     if (!current || (offer.current_price ?? Infinity) < (current.current_price ?? Infinity)) {
-      stores.set(offerSellerKey(offer), offer);
+      stores.set(key, offer);
     }
   });
 
@@ -247,8 +260,7 @@ const rebuildRowWithOffers = (
   offers: Product[],
 ): ComparisonRow | null => {
   const validOffers = offers
-    .filter((offer) => offerIsAvailable(offer) && Number.isFinite(Number(offer.current_price)) && Number(offer.current_price) > 0)
-    .sort((a, b) => (a.current_price ?? Infinity) - (b.current_price ?? Infinity));
+    .filter((offer) => offerIsAvailable(offer) && Number.isFinite(Number(offer.current_price)) && Number(offer.current_price) > 0);
 
   if (!validOffers.length) return null;
 
@@ -287,7 +299,9 @@ const splitRowsByBrand = (rows: ComparisonRow[]) =>
     const offersByBrand = new Map<string, Product[]>();
     offers.forEach((offer) => {
       const brand = detectProductBrand(offer) || "Sem marca";
-      offersByBrand.set(brand, [...(offersByBrand.get(brand) || []), offer]);
+      const group = offersByBrand.get(brand);
+      if (group) group.push(offer);
+      else offersByBrand.set(brand, [offer]);
     });
 
     if (offersByBrand.size <= 1) return [row];
@@ -348,30 +362,22 @@ const buildComparisonRows = (products: Product[]) => {
     );
 };
 
+const displayDate = new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+const localDay = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" });
 const formatDate = (value?: string) => {
   if (!value) return "—";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "—";
-  return new Intl.DateTimeFormat("pt-BR", {
-    day: "2-digit",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
+  return displayDate.format(date);
 };
 
 const productMatchesDate = (product: Product, dateRange: DateRange) => {
   if (dateRange === "all") return true;
-  const updatedAt = new Date(product.last_update);
+  const updatedAt = new Date(/Z|[+-]\d\d:\d\d$/.test(product.last_update) ? product.last_update : `${product.last_update}Z`);
   if (Number.isNaN(updatedAt.getTime())) return false;
 
-  const now = new Date();
-  if (dateRange === "today") {
-    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    return updatedAt >= startOfToday;
-  }
-  const days = dateRange === "7d" ? 7 : dateRange === "30d" ? 30 : 90;
-  return updatedAt.getTime() >= now.getTime() - days * 24 * 60 * 60 * 1000;
+  const day = localDay.format(updatedAt);
+  return (!dateRange.from || day >= dateRange.from) && (!dateRange.to || day <= dateRange.to);
 };
 
 const productMatchesMetadata = (
@@ -389,7 +395,7 @@ const productMatchesMetadata = (
 
 const productMatchesOfferData = (product: Product, selectedData: string[]) =>
   selectedData.every((filter) => {
-    if (filter === "Frete grátis") return Number(product.shipping_cost) === 0;
+    if (filter === "Frete grátis") return product.shipping_cost === 0;
     if (filter === "Frete informado") return product.shipping_cost !== null && product.shipping_cost !== undefined;
     if (filter === "Lead time informado") {
       return (
@@ -401,7 +407,7 @@ const productMatchesOfferData = (product: Product, selectedData: string[]) =>
     return true;
   });
 
-const paymentLabel = (offer: Product) => {
+const paymentLabel = (offer: Product, formatCurrency: CurrencyLabel) => {
   if (offer.current_price == null) return "Preço não informado";
   const cash = offer.cash_price ?? offer.current_price ?? 0;
   if (offer.installment_price && offer.installment_price > cash) {
@@ -410,7 +416,7 @@ const paymentLabel = (offer: Product) => {
   return "À vista";
 };
 
-const shippingLabel = (offer: Product) =>
+const shippingLabel = (offer: Product, formatCurrency: CurrencyLabel) =>
   offer.shipping_cost === 0
     ? "Frete grátis"
     : offer.shipping_cost != null
@@ -418,16 +424,10 @@ const shippingLabel = (offer: Product) =>
       : "Frete não informado";
 
 const leadTimeLabel = (offer: Product) => {
-  if (offer.delivery_min_days == null && offer.delivery_max_days == null) return "Prazo não informado";
-  const minimum = offer.delivery_min_days ?? offer.delivery_max_days;
-  const maximum = offer.delivery_max_days ?? offer.delivery_min_days;
-  const unit = offer.delivery_days_type === "business" ? "dias úteis" : "dias";
-  if (offer.delivery_min_days == null) return `Até ${maximum} ${unit}`;
-  if (offer.delivery_max_days == null) return `A partir de ${minimum} ${unit}`;
-  return minimum === maximum ? `${minimum} ${unit}` : `${minimum}-${maximum} ${unit}`;
+  return formatDeliveryRange(offer, "Prazo não informado");
 };
 
-const analyticsShippingLabel = (offer: Product) => {
+const analyticsShippingLabel = (offer: Product, formatCurrency: CurrencyLabel) => {
   if (offer.shipping_cost == null) return "";
   return `Frete: ${formatCurrency(offer.shipping_cost)}`;
 };
@@ -435,19 +435,15 @@ const analyticsShippingLabel = (offer: Product) => {
 const analyticsLeadTimeLabel = (offer: Product) =>
   offer.delivery_min_days == null && offer.delivery_max_days == null ? "" : leadTimeLabel(offer);
 
-const tableShippingLabel = (offer?: Product) => {
-  if (offer?.shipping_cost == null) return "—";
+const tableShippingLabel = (offer: Product | undefined, formatCurrency: CurrencyLabel) => {
+  if (offer?.shipping_cost == null) return "Não informado";
   return offer.shipping_cost === 0 ? "Grátis" : formatCurrency(offer.shipping_cost);
 };
 
 const tableLeadTimeLabel = (offer?: Product) => {
-  if (!offer || (offer.delivery_min_days == null && offer.delivery_max_days == null)) return "—";
-  const minimum = offer.delivery_min_days ?? offer.delivery_max_days;
-  const maximum = offer.delivery_max_days ?? offer.delivery_min_days;
-  const unit = offer.delivery_days_type === "business" ? "dias úteis" : "dias";
-  if (offer.delivery_min_days == null) return `Até ${maximum} ${unit}`;
-  if (offer.delivery_max_days == null) return `A partir de ${minimum} ${unit}`;
-  return minimum === maximum ? `${minimum} ${unit}` : `${minimum}-${maximum} ${unit}`;
+  const label = offer ? formatDeliveryRange(offer) : "Não informado";
+  const note = " (tipo não informado)";
+  return label.endsWith(note) ? <>{label.slice(0, -note.length)}<br />{note.trim()}</> : label;
 };
 
 const installmentDetails = (offers: Product[]) => {
@@ -470,15 +466,16 @@ const initials = (name: string) =>
     .toUpperCase();
 
 const StoreMarks = ({ offers }: { offers: Product[] }) => {
-  const stores = bestOffersByStore(offers).slice(0, 4);
-  const remaining = Math.max(0, bestOffersByStore(offers).length - stores.length);
+  const ranked = bestOffersByStore(offers);
+  const stores = ranked.slice(0, 4);
+  const remaining = ranked.length - stores.length;
 
   return (
-    <div className="flex items-center justify-center">
+    <div className="store-marks flex items-center justify-center">
       {stores.map((offer, index) => (
         <span
           key={offer.store}
-          title={offer.store}
+          data-tooltip={offer.store}
           className="store-mark"
           style={{ zIndex: stores.length - index }}
         >
@@ -492,14 +489,51 @@ const StoreMarks = ({ offers }: { offers: Product[] }) => {
 
 const StoreRankingPreview = ({
   row,
-  left,
-  top,
-}: StoreRankingState) => {
+  anchor,
+  formatCurrency,
+}: StoreRankingState & { formatCurrency: CurrencyLabel }) => {
+  const panelRef = useRef<HTMLDivElement>(null);
   const offers = bestOffersByStore(row.offers || []).slice(0, 10);
+
+  useLayoutEffect(() => {
+    const panel = panelRef.current;
+    if (!panel) return;
+    const scrollRegion = anchor.closest(".paginated-list");
+    const position = () => {
+      const rect = anchor.getBoundingClientRect();
+      const region = scrollRegion?.getBoundingClientRect();
+      if (!anchor.isConnected || (region && (rect.bottom <= region.top || rect.top >= region.bottom))) {
+        panel.style.visibility = "hidden";
+        return;
+      }
+      const zoom = panel.currentCSSZoom || 1;
+      const gap = 6;
+      const margin = 8;
+      const below = window.innerHeight - rect.bottom - gap - margin;
+      const above = rect.top - gap - margin;
+      const naturalHeight = panel.scrollHeight * zoom + 2;
+      const openBelow = below >= naturalHeight || below >= above;
+      panel.style.maxHeight = `${Math.max(0, openBelow ? below : above) / zoom}px`;
+      const panelBox = panel.getBoundingClientRect();
+      const left = Math.min(window.innerWidth - margin - panelBox.width,
+        Math.max(margin, rect.left + (rect.width - panelBox.width) / 2));
+      panel.style.left = `${left / zoom}px`;
+      panel.style.top = `${(openBelow ? rect.bottom + gap : rect.top - gap - panelBox.height) / zoom}px`;
+      panel.style.visibility = "visible";
+    };
+    position();
+    window.addEventListener("resize", position);
+    window.addEventListener("scroll", position, true);
+    return () => {
+      window.removeEventListener("resize", position);
+      window.removeEventListener("scroll", position, true);
+    };
+  }, [anchor, row]);
+
   if (!offers.length) return null;
 
   return (
-    <div className="store-ranking-popover" style={{ left, top, transform: "translateX(-50%)" }}>
+    <div ref={panelRef} className="store-ranking-popover">
       <div className="store-ranking-popover__header">
         <span>Ranking</span>
         <span>{offers.length} resultados</span>
@@ -507,7 +541,7 @@ const StoreRankingPreview = ({
       {offers.map((offer, index) => (
         <div key={`${offer.store}-${offer.url}`} className="store-ranking-popover__row">
           <span className="store-ranking-popover__position">{String(index + 1).padStart(2, "0")}</span>
-          <span className="min-w-0 flex-1 truncate" title={`${offer.store} · ${offer.source || offer.store}`}>{offer.store}{offer.source && offer.source !== offer.store ? ` · ${offer.source}` : ""}</span>
+          <span className="min-w-0 flex-1 truncate" data-tooltip={`${offer.store} · ${offer.source || offer.store}`}>{offer.store}{offer.source && offer.source !== offer.store ? ` · ${offer.source}` : ""}</span>
           <strong>{(offerIsAvailable(offer) ? formatCurrency(offer.current_price) : "Sem estoque")}</strong>{!offerIsAvailable(offer) && <small>Sem estoque</small>}
         </div>
       ))}
@@ -515,13 +549,13 @@ const StoreRankingPreview = ({
   );
 };
 
-const EmptyState = ({ searched }: { searched: boolean }) => (
-  <div className="flex min-h-[410px] flex-col items-center justify-center px-6 text-center">
+const EmptyState = ({ searched, fillPanel = false }: { searched: boolean; fillPanel?: boolean }) => (
+  <div className={`flex flex-col items-center px-6 text-center ${fillPanel ? "min-h-0 flex-1 justify-center-safe overflow-y-auto py-4" : "min-h-[410px] justify-center"}`}>
     <span className="flex h-12 w-12 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface-subtle)] text-[var(--muted)]">
       <PackageOpen size={22} />
     </span>
     <h3 className="mt-4 text-sm font-semibold text-[var(--foreground)]">
-      {searched ? "Nenhum resultado encontrado" : "Sua pesquisa começa aqui"}
+      {searched ? "Nenhum resultado encontrado" : "Nenhum SKU pesquisado"}
     </h3>
     <p className="mt-1 max-w-sm text-xs leading-5 text-[var(--muted)]">
       {searched
@@ -556,20 +590,29 @@ const LoadingState = () => (
 
 export default function SlidingTabs({
   activeTab,
+  analyticsMode,
+  selectedRow,
+  setSelectedRow,
   onTabChange,
   loading,
   products,
   comparisonRows,
   lastQuery,
+  searchCleared = false,
+  searchFailure,
   analyticsMap,
   analyticsReport,
+  onRefresh,
   isAuthenticated = true,
 }: SlidingTabsProps) {
   const [resultSearch, setResultSearch] = useState("");
   const [sortOrder, setSortOrder] = useState<SortOrder>("stores_desc");
   const [selectedBrands, setSelectedBrands] = useState<string[]>([]);
   const [selectedStores, setSelectedStores] = useState<string[]>([]);
-  const [analyticsMode, setAnalyticsMode] = useState<"overview" | "comparison" | "history">("overview");
+  const showingReport = activeTab === 2 && analyticsMode !== "overview";
+  const [reportActions,setReportActions]=useState<HTMLDivElement|null>(null);
+  const [exportingOverview,setExportingOverview]=useState(false);
+  const [overviewExportError,setOverviewExportError]=useState("");
   const [selectedSubfamilies, setSelectedSubfamilies] = useState<string[]>([]);
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
   const [selectedClusters, setSelectedClusters] = useState<string[]>([]);
@@ -579,11 +622,10 @@ export default function SlidingTabs({
   const [priceRange, setPriceRange] = useState<[number, number]>([0, 0]);
   const [filterOpen, setFilterOpen] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
-  const [openFilterGroups, setOpenFilterGroups] = useState({
-    price: true,
-    date: false,
-    brands: true,
-    stores: true,
+  const [openFilterGroups, setOpenFilterGroups] = useFilterExpansion("pesquisa", {
+    price: false,
+    brands: false,
+    stores: false,
     subfamilies: false,
     categories: false,
     clusters: false,
@@ -592,11 +634,19 @@ export default function SlidingTabs({
   });
   const [offerPage, setOfferPage] = useState(1);
   const [catalogPage, setCatalogPage] = useState(1);
-  const [selectedRow, setSelectedRow] = useState<ComparisonRow | null>(null);
+  useEffect(()=>{const update=()=>setSelectedRow(null);window.addEventListener(LOCAL_DATA_CHANGED,update);return()=>window.removeEventListener(LOCAL_DATA_CHANGED,update);},[setSelectedRow]);
   const [hoveredStoreRanking, setHoveredStoreRanking] = useState<StoreRankingState | null>(null);
   const [interfacePreferences, setInterfacePreferences] = useState<InterfacePreferences>(getInterfacePreferences);
   const filterControlRef = useRef<HTMLDivElement>(null);
+  const filterButton = useRef<HTMLButtonElement>(null);
+  const filterMenu = useRef<HTMLDivElement>(null);
+  const showSelectedAnalytics = selectedRow && (activeTab === 2 || (!isAuthenticated && activeTab === 0));
+  const showToolbar = activeTab !== 3 && (!loading || activeTab === 2) && !showSelectedAnalytics;
+  useAnchoredPopover(filterOpen && showToolbar, filterButton, filterMenu);
   const sortControlRef = useRef<HTMLDivElement>(null);
+  const sortButton = useRef<HTMLButtonElement>(null);
+  const sortMenu = useRef<HTMLDivElement>(null);
+  useAnchoredPopover(sortOpen && showToolbar && !showingReport, sortButton, sortMenu);
 
   const rows = useMemo(() => {
     const sourceRows = comparisonRows.length
@@ -633,22 +683,26 @@ export default function SlidingTabs({
     };
   }, [marketProducts]);
   const priceBounds = useMemo(() => {
-    const prices = marketProducts
-      .map((product) => Number(product.current_price))
-      .filter((price) => Number.isFinite(price) && price > 0);
-    if (!prices.length) return { min: 0, max: 0 };
-    return {
-      min: Math.floor(Math.min(...prices)),
-      max: Math.ceil(Math.max(...prices)),
-    };
+    let min = Infinity, max = 0;
+    for (const product of marketProducts) {
+      const price = Number(product.current_price);
+      if (!Number.isFinite(price) || price <= 0) continue;
+      min = Math.min(min, price);
+      max = Math.max(max, price);
+    }
+    return { min: max ? Math.floor(min) : 0, max: Math.ceil(max) };
   }, [marketProducts]);
   const compactFormatter = useMemo(() => createCompactFormatter(interfacePreferences), [interfacePreferences]);
+  const formatCurrency = useMemo<CurrencyLabel>(() => {
+    const formatter = createCurrencyFormatter(interfacePreferences);
+    return value => value == null || !Number.isFinite(value) ? "—" : formatter.format(value);
+  }, [interfacePreferences]);
   const defaultStoreSelection = useMemo(
     () =>
       STORE_FILTERS.every((store) => interfacePreferences.defaultStores.includes(store.label))
         ? []
-        : interfacePreferences.defaultStores.filter((store) => stores.includes(store)),
-    [interfacePreferences.defaultStores, stores],
+        : interfacePreferences.defaultStores,
+    [interfacePreferences.defaultStores],
   );
 
   useEffect(() => {
@@ -663,23 +717,23 @@ export default function SlidingTabs({
   }, []);
 
   useEffect(() => {
-    const syncPreferences = () => {
-      const nextPreferences = getInterfacePreferences();
-      setInterfacePreferences(nextPreferences);
-      setSelectedStores(
-        STORE_FILTERS.every((store) => nextPreferences.defaultStores.includes(store.label))
-          ? []
-          : nextPreferences.defaultStores.filter((store) => stores.includes(store)),
-      );
+    const syncPreferences = (event: Event) => {
+      const next = (event as CustomEvent<InterfacePreferences>).detail ?? getInterfacePreferences();
+      setInterfacePreferences(previous => {
+        const sameStores = next.defaultStores.length === previous.defaultStores.length &&
+          next.defaultStores.every((store, index) => store === previous.defaultStores[index]);
+        return sameStores ? { ...next, defaultStores: previous.defaultStores } : next;
+      });
     };
 
     window.addEventListener(INTERFACE_PREFERENCES_EVENT, syncPreferences);
     return () => window.removeEventListener(INTERFACE_PREFERENCES_EVENT, syncPreferences);
-  }, [stores]);
+  }, []);
 
   useEffect(() => {
     setPriceRange([priceBounds.min, priceBounds.max]);
   }, [lastQuery, priceBounds.min, priceBounds.max]);
+  useEffect(() => { if (searchCleared || loading) setSelectedRow(null); }, [searchCleared, loading, setSelectedRow]);
 
   useEffect(() => {
     setOfferPage(1);
@@ -716,9 +770,10 @@ export default function SlidingTabs({
   useEffect(() => {
     if (isAuthenticated ? activeTab !== 2 : activeTab !== 0) setSelectedRow(null);
     setHoveredStoreRanking(null);
-  }, [activeTab, isAuthenticated]);
+  }, [activeTab, isAuthenticated, setSelectedRow]);
 
   const filteredRows = useMemo(() => {
+    if (showingReport) return [];
     const query = normalize(resultSearch);
     const rowsWithOfferFilters = rows
       .map((row) => {
@@ -761,6 +816,7 @@ export default function SlidingTabs({
       );
     });
   }, [
+    showingReport,
     rows,
     resultSearch,
     selectedBrands,
@@ -776,6 +832,7 @@ export default function SlidingTabs({
   ]);
 
   const filteredProducts = useMemo(() => {
+    if (showingReport) return [];
     const query = normalize(resultSearch);
     const filtered = marketProducts.filter((product) => {
       const matchesQuery =
@@ -803,6 +860,7 @@ export default function SlidingTabs({
       return (a.current_price ?? Infinity) - (b.current_price ?? Infinity);
     });
   }, [
+    showingReport,
     marketProducts,
     resultSearch,
     selectedBrands,
@@ -818,34 +876,35 @@ export default function SlidingTabs({
   ]);
 
   useEffect(() => {
+    if (showingReport) return;
     const totalPages = Math.max(1, Math.ceil(filteredRows.length / OFFER_PAGE_SIZE));
     setOfferPage((currentPage) => Math.min(currentPage, totalPages));
-  }, [filteredRows.length]);
+  }, [filteredRows.length, showingReport]);
 
   useEffect(() => {
+    if (showingReport) return;
     const totalPages = Math.max(1, Math.ceil(filteredProducts.length / CATALOG_PAGE_SIZE));
     setCatalogPage((currentPage) => Math.min(currentPage, totalPages));
-  }, [filteredProducts.length]);
+  }, [filteredProducts.length, showingReport]);
 
-  const allPrices = filteredProducts
-    .map((product) => Number(product.current_price))
-    .filter((price) => Number.isFinite(price) && price > 0);
-  const lowestPrice = allPrices.length ? Math.min(...allPrices) : 0;
-  const averagePrice = allPrices.length
-    ? allPrices.reduce((sum, price) => sum + price, 0) / allPrices.length
-    : 0;
+  const { priceCount, lowestPrice, averagePrice, availableStores } = useMemo(() => {
+    let count = 0, total = 0, minimum = Infinity;
+    const sellers = new Set<string>();
+    for (const product of filteredProducts) {
+      sellers.add(product.store);
+      const price = Number(product.current_price);
+      if (!Number.isFinite(price) || price <= 0) continue;
+      minimum = Math.min(minimum, price);
+      total += price;
+      count++;
+    }
+    return { priceCount: count, lowestPrice: count ? minimum : 0, averagePrice: count ? total / count : 0, availableStores: sellers.size };
+  }, [filteredProducts]);
   const priceFilterActive = priceRange[0] > priceBounds.min || priceRange[1] < priceBounds.max;
-  const activeFilterCount =
-    selectedBrands.length +
-    selectedStores.length +
-    selectedSubfamilies.length +
-    selectedCategories.length +
-    selectedClusters.length +
-    selectedMarkets.length +
-    selectedOfferData.length +
-    (dateRange === "all" ? 0 : 1) +
-    (priceFilterActive ? 1 : 0);
-  const availableStores = new Set(filteredProducts.map((product) => product.store)).size;
+  const overviewFilterCount = selectedSubfamilies.length + selectedCategories.length + selectedClusters.length +
+    selectedMarkets.length + selectedOfferData.length + Number(priceFilterActive);
+  const activeFilterCount = selectedBrands.length + selectedStores.length +
+    (showingReport ? 0 : overviewFilterCount);
   const sortLabel = sortOptions.find((option) => option.value === sortOrder)?.label;
 
   const marketStoreRanking = useMemo(() => {
@@ -877,30 +936,13 @@ export default function SlidingTabs({
   const clearFilters = () => {
     setSelectedBrands([]);
     setSelectedStores(defaultStoreSelection);
+    if (showingReport) return;
     setSelectedSubfamilies([]);
     setSelectedCategories([]);
     setSelectedClusters([]);
     setSelectedMarkets([]);
     setSelectedOfferData([]);
-    setDateRange("all");
     setPriceRange([priceBounds.min, priceBounds.max]);
-  };
-
-  const showStoreRanking = (
-    row: ComparisonRow,
-    event: ReactMouseEvent<HTMLDivElement>,
-  ) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    const panelWidth = Math.min(360, window.innerWidth - 24);
-    const offerCount = Math.min(10, bestOffersByStore(row.offers || []).length);
-    const panelHeight = 43 + offerCount * 39;
-    const left = Math.min(
-      Math.max(rect.left + rect.width / 2, panelWidth / 2 + 14),
-      window.innerWidth - panelWidth / 2 - 14,
-    );
-    const fitsBelow = rect.bottom + panelHeight + 12 < window.innerHeight;
-    const top = fitsBelow ? rect.bottom + 7 : Math.max(72, rect.top - panelHeight - 7);
-    setHoveredStoreRanking({ row, left, top });
   };
 
   const metricCards = [
@@ -920,23 +962,44 @@ export default function SlidingTabs({
     },
     {
       label: "Menor preço",
-      value: lowestPrice ? formatCurrency(lowestPrice) : "—",
+      value: priceCount ? formatCurrency(lowestPrice) : "0",
       helper: "Melhor preço disponível",
       icon: TrendingDown,
       tone: "green",
     },
     {
       label: "Preço médio",
-      value: averagePrice ? formatCurrency(averagePrice) : "—",
-      helper: allPrices.length ? `${allPrices.length} preços analisados` : "Sem dados ainda",
+      value: priceCount ? formatCurrency(averagePrice) : "0",
+      helper: priceCount ? `${priceCount} preços analisados` : "Sem dados ainda",
       icon: BarChart3,
       tone: "amber",
     },
   ];
 
+  const selectedDates = dateRange === "all" ? { from: "", to: "" } : dateRange;
+  const renderAnalyticsPanel = () => {
+    if (analyticsMode !== "overview") {
+      if (searchCleared) return <EmptyState searched={false} />;
+      return analyticsReport?.(analyticsMode, selectedStores, selectedBrands, {
+        dateFrom: selectedDates.from, dateTo: selectedDates.to, search: resultSearch, actionsContainer: reportActions,
+      });
+    }
+    if (loading) return <LoadingState />;
+    if (searchFailure) return searchFailure;
+    return <MarketAnalytics formatCurrency={formatCurrency} freightMap={analyticsMap?.(selectedStores)} products={filteredProducts} rows={filteredRows}
+      stores={marketStoreRanking} searched={Boolean(lastQuery)} onOpenProduct={openAnalytics} />;
+  };
+  const exportOverview = async () => {
+    if(exportingOverview)return;
+    setExportingOverview(true);setOverviewExportError("");
+    try {await downloadExcel(`${getApiBaseUrl()}/products/export/analytics`,"nevetracker-analytics.xlsx",apiAuthHeaders({"Content-Type":"application/json"}),180_000,{method:"POST",body:JSON.stringify({query:lastQuery,rows:filteredRows})});}
+    catch(reason){setOverviewExportError(reason instanceof Error ? reason.message : "Falha ao exportar.");}
+    finally{setExportingOverview(false);}
+  };
+
   return (
-    <div className={`sliding-tabs mx-auto w-full max-w-[1600px] ${activeTab === 1 || activeTab === 2 || activeTab === 3 ? "sliding-tabs--fixed" : ""}`}>
-      {!selectedRow && activeTab !== 1 && activeTab !== 3 && (
+    <div className="sliding-tabs mx-auto w-full max-w-[1600px] sliding-tabs--fixed">
+      {!selectedRow && activeTab !== 1 && activeTab !== 2 && activeTab !== 3 && (
         <section className="metrics-grid" aria-label="Resumo da pesquisa">
           {metricCards.map((metric) => {
             const Icon = metric.icon;
@@ -947,8 +1010,8 @@ export default function SlidingTabs({
                   <p className="metric-card__value">{metric.value}</p>
                   <p className="metric-card__helper">{metric.helper}</p>
                 </div>
-                <span className={`metric-card__icon metric-card__icon--${metric.tone}`}>
-                  <Icon size={18} />
+                <span className="metric-card__icon metric-card__icon--plain">
+                  <Icon size={23} />
                 </span>
               </article>
             );
@@ -957,40 +1020,46 @@ export default function SlidingTabs({
       )}
 
       {activeTab === 3 ? (
-        <AnalyticsSpreadsheet />
-      ) : loading ? (
+        <Suspense fallback={<LoadingState />}><AnalyticsSpreadsheet clearOnEmpty={searchCleared} /></Suspense>
+      ) : loading && activeTab !== 2 ? (
         <div className="mt-5"><LoadingState /></div>
-      ) : selectedRow && (activeTab === 2 || (!isAuthenticated && activeTab === 0)) ? (
-        <div className="tab-scroll-region"><ProductAnalytics row={selectedRow} backLabel={isAuthenticated ? "Voltar para visão geral" : "Voltar para ofertas"} onBack={() => { setSelectedRow(null); if (!isAuthenticated) onTabChange(0); }} />{isAuthenticated && analyticsMap?.(selectedStores)}</div>
+      ) : showSelectedAnalytics ? (
+        <div className="tab-scroll-region"><ProductAnalytics row={selectedRow} formatCurrency={formatCurrency} backLabel="Voltar para ofertas" onBack={() => { setSelectedRow(null); onTabChange(0); }} />{isAuthenticated && analyticsMap?.(selectedStores)}</div>
       ) : (
         <>
           <div className="workspace-toolbar">
-            <div className="result-search">
-              <Search size={16} />
-              <input
-                type="search"
-                value={resultSearch}
-                onChange={(event) => setResultSearch(event.target.value)}
-                placeholder="Filtrar resultados..."
-                aria-label="Filtrar resultados"
-              />
-              {resultSearch && (
-                <button type="button" onClick={() => setResultSearch("")} aria-label="Limpar filtro textual">
-                  <X size={14} />
-                </button>
-              )}
-            </div>
-
-            {activeTab === 2 && (
-              <div className="analytics-report-tabs" role="tablist" aria-label="Visões do Analytics">
-                {([{ key: "overview", label: "Visão geral" }, { key: "comparison", label: "Comparar lojas" }, { key: "history", label: "Histórico de preços" }] as const).map((tab) => <button type="button" key={tab.key} role="tab" aria-selected={analyticsMode === tab.key} className={analyticsMode === tab.key ? "is-active" : ""} onClick={() => setAnalyticsMode(tab.key)}>{tab.label}</button>)}
+            <div className="analytics-search-controls">
+              <div className="result-search">
+                <Search size={16} />
+                <input
+                  type="search"
+                  value={resultSearch}
+                  maxLength={250}
+                  onChange={(event) => setResultSearch(event.target.value)}
+                  placeholder="Buscar"
+                  aria-label="Filtrar resultados"
+                />
+                {resultSearch && (
+                  <button className="icon-only-button" type="button" onClick={() => setResultSearch("")} aria-label="Limpar filtro textual">
+                    <X size={14} />
+                  </button>
+                )}
               </div>
-            )}
+              <DatePeriodSelect
+                from={selectedDates.from}
+                to={selectedDates.to}
+                ariaLabel={activeTab !== 2 ? "Data de atualização" : analyticsMode === "history" ? "Período do histórico" : "Período do Analytics"}
+                maxDays={activeTab === 2 && analyticsMode === "history" ? 366 : undefined}
+                onChange={(from, to) => setDateRange(from || to ? { from, to } : "all")}
+              />
+            </div>
 
             <div ref={filterControlRef} className="relative ml-auto">
               <button
+                ref={filterButton}
                 type="button"
-                className={`toolbar-button ${filterOpen ? "toolbar-button--active" : ""}`}
+                className={`toolbar-button workspace-dropdown-trigger ${filterOpen ? "toolbar-button--active" : ""}`}
+                aria-expanded={filterOpen}
                 onClick={() => {
                   setFilterOpen((open) => !open);
                   setSortOpen(false);
@@ -1002,8 +1071,8 @@ export default function SlidingTabs({
               </button>
 
               {filterOpen && (
-                <div className="filter-popover">
-                  <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
+                <div ref={filterMenu} popover="manual" className="filter-popover workspace-filter-popover">
+                  <div className="workspace-filter-popover__header flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
                     <div>
                       <p className="text-xs font-semibold text-[var(--foreground)]">Filtrar resultados</p>
                     </div>
@@ -1014,7 +1083,8 @@ export default function SlidingTabs({
                     )}
                   </div>
                   <div className="filter-sections">
-                    <PriceRangeFilter
+                    {!showingReport && <PriceRangeFilter
+                      formatCurrency={formatCurrency}
                       min={priceBounds.min}
                       max={priceBounds.max}
                       value={priceRange}
@@ -1023,16 +1093,8 @@ export default function SlidingTabs({
                         setOpenFilterGroups((groups) => ({ ...groups, price: !groups.price }))
                       }
                       onChange={setPriceRange}
-                    />
-                    <DateFilterColumn
-                      value={dateRange}
-                      open={openFilterGroups.date}
-                      onOpenChange={() =>
-                        setOpenFilterGroups((groups) => ({ ...groups, date: !groups.date }))
-                      }
-                      onChange={setDateRange}
-                    />
-                    <FilterColumn
+                    />}
+                    {!showingReport && <FilterColumn
                       title="Dados da oferta"
                       items={offerDataOptions}
                       selected={selectedOfferData}
@@ -1041,7 +1103,7 @@ export default function SlidingTabs({
                         setOpenFilterGroups((groups) => ({ ...groups, offerData: !groups.offerData }))
                       }
                       onToggle={(value) => toggleFilter(value, selectedOfferData, setSelectedOfferData)}
-                    />
+                    />}
                     <FilterColumn
                       title="Marcas"
                       items={brands}
@@ -1062,7 +1124,7 @@ export default function SlidingTabs({
                       }
                       onToggle={(value) => toggleFilter(value, selectedStores, setSelectedStores)}
                     />
-                    <FilterColumn
+                    {!showingReport && <><FilterColumn
                       title="Subfamília"
                       items={metadataOptions.subfamilies}
                       selected={selectedSubfamilies}
@@ -1101,16 +1163,19 @@ export default function SlidingTabs({
                         setOpenFilterGroups((groups) => ({ ...groups, markets: !groups.markets }))
                       }
                       onToggle={(value) => toggleFilter(value, selectedMarkets, setSelectedMarkets)}
-                    />
+                    /></>}
                   </div>
                 </div>
               )}
             </div>
 
-            <div ref={sortControlRef} className="relative">
+            <div className="toolbar-sort-actions">
+            {!showingReport && <div ref={sortControlRef} className="relative">
               <button
+                ref={sortButton}
                 type="button"
-                className={`toolbar-button min-w-[138px] justify-between ${sortOpen ? "toolbar-button--active" : ""}`}
+                className={`toolbar-button workspace-dropdown-trigger min-w-[138px] justify-between ${sortOpen ? "toolbar-button--active" : ""}`}
+                aria-expanded={sortOpen}
                 onClick={() => {
                   setSortOpen((open) => !open);
                   setFilterOpen(false);
@@ -1123,7 +1188,7 @@ export default function SlidingTabs({
                 <ChevronDown size={14} className={`transition-transform duration-200 ${sortOpen ? "rotate-180" : ""}`} />
               </button>
               {sortOpen && (
-                <div className="sort-menu">
+                <div ref={sortMenu} popover="manual" className="sort-menu">
                   {sortOptions.map((option) => (
                     <button
                       key={option.value}
@@ -1135,16 +1200,25 @@ export default function SlidingTabs({
                       className={sortOrder === option.value ? "sort-menu__item--active" : ""}
                     >
                       <span>{option.label}</span>
-                      {sortOrder === option.value && <Check size={14} />}
+                      {sortOrder === option.value && <CheckCircle2 size={14} />}
                     </button>
                   ))}
                 </div>
               )}
+            </div>}
+            {activeTab === 2 && <div className="analytics-toolbar-actions" ref={setReportActions}>
+              {(analyticsMode === "overview" || searchCleared || !analyticsReport) && <>
+                <button type="button" className="icon-only-button icon-button" aria-label="Atualizar" data-tooltip="Atualizar" disabled={!onRefresh || !lastQuery || loading || analyticsMode !== "overview"} onClick={onRefresh}><RefreshCw size={17}/></button>
+                <button type="button" className="icon-only-button icon-button" aria-label="Exportar para Excel" data-tooltip="Exportar para Excel" disabled={!filteredRows.length || exportingOverview || loading || analyticsMode !== "overview"} onClick={()=>void exportOverview()}>{exportingOverview ? <OrbitingSpheres size={17}/> : <FileSpreadsheet size={17}/>}</button>
+              </>}
+            </div>}
             </div>
           </div>
 
+          {activeTab === 2 && !showingReport && overviewExportError && <p role="alert" className="analytics-sheet__error">{overviewExportError}</p>}
           {activeTab === 0 && (
             <OffersTable
+              formatCurrency={formatCurrency}
               rows={filteredRows.slice(
                 (offerPage - 1) * OFFER_PAGE_SIZE,
                 offerPage * OFFER_PAGE_SIZE,
@@ -1154,15 +1228,16 @@ export default function SlidingTabs({
               pageSize={OFFER_PAGE_SIZE}
               searched={Boolean(lastQuery)}
               onAnalytics={openAnalytics}
-              onStoreEnter={showStoreRanking}
+              onStoreEnter={(row, anchor) => setHoveredStoreRanking({ row, anchor })}
               onStoreLeave={() => setHoveredStoreRanking(null)}
               onPageChange={setOfferPage}
             />
           )}
 
           {activeTab === 1 && (
-            <div className="tab-scroll-region">
+            <div className="tab-scroll-region paginated-region">
               <CatalogGrid
+                formatCurrency={formatCurrency}
                 products={filteredProducts.slice(
                   (catalogPage - 1) * CATALOG_PAGE_SIZE,
                   catalogPage * CATALOG_PAGE_SIZE,
@@ -1177,26 +1252,20 @@ export default function SlidingTabs({
           )}
 
           {activeTab === 2 && (
-            <div className="tab-scroll-region">
-              {analyticsMode !== "overview" ? analyticsReport?.(analyticsMode, selectedStores, selectedBrands) : <MarketAnalytics
-                freightMap={analyticsMap?.(selectedStores)}
-                products={filteredProducts}
-                rows={filteredRows}
-                stores={marketStoreRanking}
-                searched={Boolean(lastQuery)}
-                onOpenProduct={openAnalytics}
-              />}
+            <div className="tab-scroll-region" role="region" aria-labelledby={`analytics-sidebar-${analyticsMode}`} tabIndex={0}>
+              {renderAnalyticsPanel()}
             </div>
           )}
         </>
       )}
       {hoveredStoreRanking &&
-        createPortal(<StoreRankingPreview {...hoveredStoreRanking} />, document.body)}
+        createPortal(<StoreRankingPreview {...hoveredStoreRanking} formatCurrency={formatCurrency} />, document.body)}
     </div>
   );
 }
 
 const PriceRangeFilter = ({
+  formatCurrency,
   min,
   max,
   value,
@@ -1204,6 +1273,7 @@ const PriceRangeFilter = ({
   onOpenChange,
   onChange,
 }: {
+  formatCurrency: CurrencyLabel;
   min: number;
   max: number;
   value: [number, number];
@@ -1262,43 +1332,6 @@ const PriceRangeFilter = ({
   );
 };
 
-const DateFilterColumn = ({
-  value,
-  open,
-  onOpenChange,
-  onChange,
-}: {
-  value: DateRange;
-  open: boolean;
-  onOpenChange: () => void;
-  onChange: (value: DateRange) => void;
-}) => (
-  <div className="filter-section">
-    <button type="button" className="filter-section__trigger" onClick={onOpenChange}>
-      <span>Data de atualização</span>
-      <span className="flex items-center gap-2">
-        {value !== "all" && <span className="filter-section__count">1</span>}
-        <ChevronDown size={15} className={`transition-transform duration-200 ${open ? "rotate-180" : ""}`} />
-      </span>
-    </button>
-    {open && (
-      <div className="filter-section__content">
-        {dateOptions.map((option) => (
-          <button
-            key={option.value}
-            type="button"
-            className="filter-option"
-            onClick={() => onChange(option.value)}
-          >
-            <span className={`filter-radio ${value === option.value ? "filter-radio--active" : ""}`} />
-            <span>{option.label}</span>
-          </button>
-        ))}
-      </div>
-    )}
-  </div>
-);
-
 const FilterColumn = ({
   title,
   items,
@@ -1313,7 +1346,7 @@ const FilterColumn = ({
   open: boolean;
   onOpenChange: () => void;
   onToggle: (value: string) => void;
-}) => (
+}) => items.length > 0 ? (
   <div className="filter-section">
     <button type="button" className="filter-section__trigger" onClick={onOpenChange}>
       <span>{title}</span>
@@ -1325,8 +1358,7 @@ const FilterColumn = ({
 
     {open && (
       <div className="filter-section__content">
-        {items.length ? (
-          items.map((item) => {
+        {items.map((item) => {
             const active = selected.includes(item);
             return (
               <button key={item} type="button" onClick={() => onToggle(item)} className="filter-option">
@@ -1336,16 +1368,30 @@ const FilterColumn = ({
                 <span className="truncate">{item}</span>
               </button>
             );
-          })
-        ) : (
-          <p className="px-1 py-3 text-xs text-[var(--muted)]">Sem opções</p>
-        )}
+          })}
       </div>
     )}
   </div>
+): null;
+
+const offerColumnNames = ["Produto", "Marca / SKU", "Lojas", "Preço médio", "Melhor preço", "Á PRAZO", "Frete", "Lead time", "Atualização", ""];
+
+const OfferColumns = () => (
+  <colgroup>
+    <col className="w-[30%]" />
+    {offerColumnNames.slice(1, -1).map((name) => <col key={name} />)}
+    <col className="w-14" />
+  </colgroup>
+);
+
+const OfferColumnHeaders = ({ hidden = false }: { hidden?: boolean }) => (
+  <thead className={hidden ? "sr-only" : undefined}>
+    <tr>{offerColumnNames.map((name) => <th key={name} scope="col">{name}</th>)}</tr>
+  </thead>
 );
 
 const OffersTable = ({
+  formatCurrency,
   rows,
   total,
   searched,
@@ -1356,42 +1402,56 @@ const OffersTable = ({
   pageSize,
   onPageChange,
 }: {
+  formatCurrency: CurrencyLabel;
   rows: ComparisonRow[];
   total: number;
   page: number;
   pageSize: number;
   searched: boolean;
   onAnalytics: (row: ComparisonRow) => void;
-  onStoreEnter: (row: ComparisonRow, event: ReactMouseEvent<HTMLDivElement>) => void;
+  onStoreEnter: (row: ComparisonRow, anchor: HTMLElement) => void;
   onStoreLeave: () => void;
   onPageChange: (page: number) => void;
-}) => (
-  <section className="data-panel">
+}) => {
+  const header = useRef<HTMLDivElement>(null);
+  const list = useRef<HTMLDivElement>(null);
+  const hasRows = rows.length > 0;
+
+  useLayoutEffect(() => {
+    const body = list.current;
+    const columns = header.current;
+    if (!body || !columns) return;
+    const align = () => {
+      columns.style.maxWidth = `${body.clientWidth}px`;
+      columns.scrollLeft = body.scrollLeft;
+    };
+    align();
+    const observer = new ResizeObserver(align);
+    observer.observe(body);
+    return () => observer.disconnect();
+  }, [hasRows]);
+
+  return (
+  <section className={`data-panel paginated-panel ${!rows.length && !searched ? "flex-[0_1_420px]" : ""}`}>
     <div className="data-panel__header">
       <div>
         <h2>Lista de produtos</h2>
-        <p>{total} {total === 1 ? "produto encontrado" : "produtos encontrados"}</p>
+
       </div>
     </div>
 
     {rows.length ? (
       <>
-        <div className="overflow-x-auto">
-          <table className="offer-table">
-            <thead>
-              <tr>
-                <th className="w-[30%]">Produto</th>
-                <th>Marca / SKU</th>
-                <th className="text-center">Lojas</th>
-                <th className="text-center">Preço médio</th>
-                <th className="text-center">Melhor preço</th>
-                <th className="text-center">Á PRAZO</th>
-                <th className="text-center">Frete</th>
-                <th className="text-center">Lead time</th>
-                <th>Atualização</th>
-                <th className="w-14" />
-              </tr>
-            </thead>
+        <div className="offer-columns" aria-hidden="true">
+          <div ref={header} className="offer-columns__viewport">
+            <table className="offer-table"><OfferColumns /><OfferColumnHeaders /></table>
+          </div>
+        </div>
+        <div ref={list} className="paginated-list" role="region" aria-label="Linhas da lista de produtos" tabIndex={0}
+          onScroll={(event) => { if (header.current) header.current.scrollLeft = event.currentTarget.scrollLeft; }}>
+          <table className="offer-table" aria-label="Ofertas por produto">
+            <OfferColumns />
+            <OfferColumnHeaders hidden />
             <tbody>
               {rows.map((row) => {
                 const image = getRowImage(row);
@@ -1421,7 +1481,10 @@ const OffersTable = ({
                     <td className="text-center">
                       <div
                         className="inline-flex cursor-help flex-col items-center"
-                        onMouseEnter={(event) => onStoreEnter(row, event)}
+                        onMouseEnter={(event) => {
+                          const anchor = event.currentTarget.querySelector<HTMLElement>(".store-marks");
+                          if (anchor) onStoreEnter(row, anchor);
+                        }}
                         onMouseLeave={onStoreLeave}
                       >
                         <StoreMarks offers={row.offers} />
@@ -1438,7 +1501,7 @@ const OffersTable = ({
                             <strong>{formatCurrency(row.cheapest_price)}</strong>
                             <ExternalLink size={13} />
                           </span>
-                          <small title={row.cheapest_store}>{truncateText(row.cheapest_store)}</small>
+                          <small data-tooltip={row.cheapest_store}>{truncateText(row.cheapest_store)}</small>
                         </span>
                       </a>
                     </td>
@@ -1449,12 +1512,12 @@ const OffersTable = ({
                           <small>+{formatCurrency(installment.difference)} vs. à vista</small>
                         </span>
                       ) : (
-                        <span className="offer-data-cell offer-data-cell--empty">—</span>
+                        <span className="offer-data-cell offer-data-cell--empty">Não informado</span>
                       )}
                     </td>
                     <td className="text-center">
                       <span className="offer-data-cell">
-                        <strong>{tableShippingLabel(cheapestOffer)}</strong>
+                        <strong>{tableShippingLabel(cheapestOffer, formatCurrency)}</strong>
                       </span>
                     </td>
                     <td className="text-center">
@@ -1466,7 +1529,7 @@ const OffersTable = ({
                       <span className="text-[13px] text-[var(--muted)]">{formatDate(row.offers[0]?.last_update)}</span>
                     </td>
                     <td>
-                      <button type="button" className="table-action" onClick={() => onAnalytics(row)} aria-label="Abrir analytics" title="Abrir analytics">
+                      <button type="button" className="icon-only-button table-action" onClick={() => onAnalytics(row)} aria-label="Abrir analytics" data-tooltip="Abrir analytics">
                         <BarChart3 size={17} />
                       </button>
                     </td>
@@ -1484,12 +1547,14 @@ const OffersTable = ({
         />
       </>
     ) : (
-      <EmptyState searched={searched} />
+      <EmptyState searched={searched} fillPanel={!searched} />
     )}
   </section>
-);
+  );
+};
 
 const CatalogGrid = ({
+  formatCurrency,
   products,
   total,
   page,
@@ -1497,6 +1562,7 @@ const CatalogGrid = ({
   searched,
   onPageChange,
 }: {
+  formatCurrency: CurrencyLabel;
   products: Product[];
   total: number;
   page: number;
@@ -1504,18 +1570,18 @@ const CatalogGrid = ({
   searched: boolean;
   onPageChange: (page: number) => void;
 }) => (
-  <section className="data-panel">
+  <section className="data-panel paginated-panel">
     <div className="data-panel__header">
       <div>
         <h2>Todos os itens</h2>
-        <p>{total} {total === 1 ? "oferta no catálogo" : "ofertas no catálogo"}</p>
+
       </div>
     </div>
     {products.length ? (
       <>
-        <div className="catalog-grid">
+        <div className="catalog-grid paginated-list">
           {products.map((product) => (
-            <article key={`${product.id}-${product.url}`} className="catalog-card">
+            <article key={`${product.id}-${product.url}-${product.destination_zip || ''}`} className="catalog-card">
               <div className="catalog-card__media">
                 {product.image_url ? (
                   <img src={product.image_url} alt={product.name} loading="lazy" />
@@ -1536,10 +1602,14 @@ const CatalogGrid = ({
                   <div>
                     <p className="text-xs font-medium text-[var(--muted)]">Preço atual</p>
                     <p className="mt-0.5 text-lg font-semibold tracking-tight text-[var(--foreground)]">{(offerIsAvailable(product) ? formatCurrency(product.current_price) : "Sem estoque")}</p>
-                    <p className="mt-1 text-xs font-medium text-[var(--muted)]">{paymentLabel(product)}</p>
-                    <p className="mt-0.5 text-xs text-[var(--muted)]">{shippingLabel(product)} · {leadTimeLabel(product)}</p>
+                    {offerIsAvailable(product) && <>
+                      <p className="mt-1 text-xs font-medium text-[var(--muted)]">{paymentLabel(product, formatCurrency)}</p>
+                      <p className="mt-0.5 text-xs text-[var(--muted)]">
+                        {shippingLabel(product, formatCurrency)}{analyticsLeadTimeLabel(product) && ` · ${analyticsLeadTimeLabel(product)}`}
+                      </p>
+                    </>}
                   </div>
-                  <a href={product.url} target="_blank" rel="noreferrer" className="catalog-link" aria-label={`Abrir ${product.name}`}>
+                  <a href={product.url} target="_blank" rel="noreferrer" className="icon-only-button catalog-link" aria-label={`Abrir ${product.name}`} data-tooltip="Abrir oferta">
                     <ExternalLink size={15} />
                   </a>
                 </div>
@@ -1561,6 +1631,7 @@ const CatalogGrid = ({
 );
 
 const MarketAnalytics = ({
+  formatCurrency,
   freightMap,
   products,
   rows,
@@ -1568,6 +1639,7 @@ const MarketAnalytics = ({
   searched,
   onOpenProduct,
 }: {
+  formatCurrency: CurrencyLabel;
   freightMap?: ReactNode;
   products: Product[];
   rows: ComparisonRow[];
@@ -1584,14 +1656,14 @@ const MarketAnalytics = ({
       <div className="analytics-layout">
         <section className="data-panel analytics-chart-panel">
           <div className="data-panel__header">
-            <div><h2>Preço mínimo por loja</h2><p>Melhor condição encontrada em cada fonte</p></div>
+            <div><h2>Preço mínimo por loja</h2></div>
           </div>
-          <div className="p-4 sm:p-5">{products.length ? <PriceChart products={products} /> : <EmptyState searched={searched} />}</div>
+          <div className="p-4 sm:p-5">{products.length ? <Suspense fallback={<LoadingState />}><PriceChart products={products} /></Suspense> : <EmptyState searched={searched} />}</div>
         </section>
 
         <section className="data-panel">
           <div className="data-panel__header">
-            <div><h2>Cobertura das lojas</h2><p>Participação nas ofertas encontradas</p></div>
+            <div><h2>Cobertura das lojas</h2></div>
           </div>
           <div className="store-ranking-list">
             {stores.slice(0, 8).map((store, index) => (
@@ -1614,7 +1686,7 @@ const MarketAnalytics = ({
         <div className="analytics-freight-panel">{freightMap}</div>
         <section className="data-panel analytics-products-panel">
           <div className="data-panel__header">
-            <div><h2>Produtos em destaque</h2><p>Itens com maior cobertura entre lojas</p></div>
+            <div><h2>Produtos em destaque</h2></div>
           </div>
           <div className="divide-y divide-[var(--border)]">
             {rows.slice(0, 6).map((row) => (
@@ -1640,7 +1712,7 @@ const MarketAnalytics = ({
   );
 };
 
-const ProductAnalytics = ({ row, onBack, backLabel }: { row: ComparisonRow; onBack: () => void; backLabel: string }) => {
+const ProductAnalytics = ({ row, onBack, backLabel, formatCurrency }: { row: ComparisonRow; onBack: () => void; backLabel: string; formatCurrency: CurrencyLabel }) => {
   const offers = bestOffersByStore(row.offers);
   const pricedOffers = offers.filter((offer) => offerIsAvailable(offer) && offer.current_price != null);
   const spread = pricedOffers.length > 1 ? Number(pricedOffers[pricedOffers.length - 1].current_price) - Number(pricedOffers[0].current_price) : 0;
@@ -1656,7 +1728,7 @@ const ProductAnalytics = ({ row, onBack, backLabel }: { row: ComparisonRow; onBa
       <div className="mt-4 grid items-start gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(360px,0.85fr)]">
         <section className="data-panel">
           <div className="data-panel__header"><div><h2>Distribuição de preços</h2><p>{row.name}</p></div></div>
-          <div className="p-4 sm:p-5"><PriceChart products={offers} /></div>
+          <div className="p-4 sm:p-5"><Suspense fallback={<LoadingState />}><PriceChart products={offers} /></Suspense></div>
         </section>
         <section className="data-panel">
           <div className="data-panel__header"><div><h2>Ofertas por loja</h2><p>{offers.length} fontes encontradas</p></div></div>
@@ -1665,7 +1737,7 @@ const ProductAnalytics = ({ row, onBack, backLabel }: { row: ComparisonRow; onBa
               <a key={`${offer.store}-${offer.url}`} href={offer.url} target="_blank" rel="noreferrer" className="detail-offer-row">
                 <span className="store-ranking-index">{String(index + 1).padStart(2, "0")}</span>
                 <span className="min-w-0 flex-1"><strong>{offer.store}</strong><small>{offer.source && offer.source !== offer.store ? `${offer.source} · ` : ""}{formatDate(offer.last_update)}</small></span>
-                <span className="detail-offer-logistics"><strong>{analyticsShippingLabel(offer)}</strong><small>{analyticsLeadTimeLabel(offer)}</small></span>
+                <span className="detail-offer-logistics"><strong>{analyticsShippingLabel(offer, formatCurrency)}</strong><small>{analyticsLeadTimeLabel(offer)}</small></span>
                 <span className="text-right"><strong className={index === 0 && offerIsAvailable(offer) ? "!text-[var(--success)]" : ""}>{(offerIsAvailable(offer) ? formatCurrency(offer.current_price) : "Sem estoque")}</strong><small>{offerIsAvailable(offer) ? "Ver produto" : "Sem estoque"}</small></span>
                 <ExternalLink size={14} />
               </a>

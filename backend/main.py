@@ -1,4 +1,9 @@
-import re
+
+import sys
+
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, 'reconfigure'):
+        _stream.reconfigure(encoding='utf-8', errors='backslashreplace')
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -6,11 +11,11 @@ from fastapi.middleware.cors import CORSMiddleware
 import models.product  # noqa: F401
 import models.auth  # noqa: F401
 from database import Base, SessionLocal, engine
-from models.product import KnownSku
 from routes.auth import auth_router
 from routes.integrations import integration_router
 from routes.lead_time import lead_time_router
 from routes.analysis import analysis_router
+from routes.database_transfer import database_transfer_router
 from routes.sku_metadata import sku_metadata_router
 from routes.products import process_extraction_queue_item, product_router
 from services.auth_service import ensure_owner_user
@@ -19,8 +24,7 @@ from services.extraction_queue import (
     start_extraction_queue,
 )
 from services.extraction_scheduler import start_extraction_scheduler
-from services.scraper_service import KNOWN_SKUS
-from services.sku_metadata_seed import RETIRED_AUTO_SEED_SKUS, seed_sku_business_metadata
+from services.sku_metadata_seed import seed_sku_business_metadata
 
 Base.metadata.create_all(bind=engine)
 
@@ -30,17 +34,30 @@ def _ensure_sqlite_columns():
         return
 
     with engine.begin() as connection:
+        connection.exec_driver_sql('CREATE INDEX IF NOT EXISTS ix_quote_sku_captured ON lead_time_quotes(sku, captured_at, status)')
+        connection.exec_driver_sql('CREATE INDEX IF NOT EXISTS ix_observation_offer_latest ON offer_observations(offer_key, observed_at DESC, id DESC)')
+        connection.exec_driver_sql('CREATE INDEX IF NOT EXISTS ix_observation_sku_date ON offer_observations(sku, observed_at DESC, id DESC)')
+        connection.exec_driver_sql('CREATE INDEX IF NOT EXISTS ix_source_offer_validation ON product_sources(sku, url, seller, validation_status)')
         for table, columns in {
             'auth_users': {'logistics_postal_code': "VARCHAR(8) NOT NULL DEFAULT '01001000'"},
-            'extraction_jobs': {'owner_user_id': 'INTEGER', 'api_with_scraping': 'BOOLEAN NOT NULL DEFAULT 1'},
+            'extraction_jobs': {'owner_user_id': 'INTEGER', 'api_with_scraping': 'BOOLEAN NOT NULL DEFAULT 1', 'postal_codes_json':'TEXT', 'stores_json':'TEXT','sellers_json':'TEXT'},
+            'extraction_job_items': {'progress_json':'TEXT','results_json':'TEXT','waiting_stores_json':'TEXT','resume_stores_json':'TEXT', 'store_phase':"VARCHAR(20) NOT NULL DEFAULT 'legacy'"},
             'extraction_schedule': {'owner_user_id': 'INTEGER'},
-            'crawler_control': {'api_with_scraping': 'BOOLEAN NOT NULL DEFAULT 1'},
+            'crawler_control': {'api_with_scraping': 'BOOLEAN NOT NULL DEFAULT 1','precise_sku_workers':'INTEGER NOT NULL DEFAULT 8','quick_sku_workers':'INTEGER NOT NULL DEFAULT 4','quote_workers':'INTEGER NOT NULL DEFAULT 12','quick_timeout_seconds':'INTEGER NOT NULL DEFAULT 5','discovery_stores_per_round':'INTEGER NOT NULL DEFAULT 3'},
         }.items():
             existing = {row[1] for row in connection.exec_driver_sql(f'PRAGMA table_info({table})')}
             for column, definition in columns.items():
                 if column not in existing:
                     connection.exec_driver_sql(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
         control_columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(crawler_control)")}
+        if 'adaptive_parallelism' not in control_columns:
+            connection.exec_driver_sql('ALTER TABLE crawler_control ADD COLUMN adaptive_parallelism BOOLEAN NOT NULL DEFAULT 1')
+        if 'hardware_acceleration' not in control_columns:
+            connection.exec_driver_sql('ALTER TABLE crawler_control ADD COLUMN hardware_acceleration BOOLEAN NOT NULL DEFAULT 0')
+        if 'reuse_public_browser' not in control_columns:
+            connection.exec_driver_sql('ALTER TABLE crawler_control ADD COLUMN reuse_public_browser BOOLEAN NOT NULL DEFAULT 1')
+        if 'browser_failure_cooldown_seconds' not in control_columns:
+            connection.exec_driver_sql('ALTER TABLE crawler_control ADD COLUMN browser_failure_cooldown_seconds INTEGER NOT NULL DEFAULT 30')
         if "playwright_product_fallback" not in control_columns:
             connection.exec_driver_sql(
                 "ALTER TABLE crawler_control ADD COLUMN playwright_product_fallback BOOLEAN NOT NULL DEFAULT 1"
@@ -96,6 +113,11 @@ def _ensure_sqlite_columns():
             "CREATE INDEX IF NOT EXISTS ix_price_history_discovery_source "
             "ON price_history (discovery_source)"
         )
+        connection.exec_driver_sql('CREATE INDEX IF NOT EXISTS ix_price_latest_offer ON price_history(product_id, destination_zip, timestamp DESC, id DESC)')
+        connection.exec_driver_sql('CREATE INDEX IF NOT EXISTS ix_price_product_latest ON price_history(product_id, timestamp DESC, id DESC)')
+        connection.exec_driver_sql('CREATE INDEX IF NOT EXISTS ix_price_source_seller ON price_history(source, store)')
+        connection.exec_driver_sql('CREATE INDEX IF NOT EXISTS ix_price_timestamp ON price_history(timestamp)')
+        connection.exec_driver_sql('CREATE INDEX IF NOT EXISTS ix_price_url_latest ON price_history(url, timestamp DESC, id DESC)')
 
         known_sku_columns = {
             row[1] for row in connection.exec_driver_sql("PRAGMA table_info(known_skus)")
@@ -228,38 +250,23 @@ def _ensure_sqlite_columns():
 
 
 _ensure_sqlite_columns()
+if engine.dialect.name == "postgresql":
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "ALTER TABLE crawler_control ADD COLUMN IF NOT EXISTS hardware_acceleration BOOLEAN NOT NULL DEFAULT FALSE"
+        )
 from services.availability_migration import ensure_nullable_price
 ensure_nullable_price(engine)
 
 
-def _seed_known_skus():
-    with engine.begin() as connection:
-        existing = {
-            row[0]
-            for row in connection.exec_driver_sql("SELECT sku FROM known_skus")
-        }
-        discovered = set(KNOWN_SKUS)
-        product_rows = connection.exec_driver_sql(
-            "SELECT sku, name FROM products"
-        ).fetchall()
-        for stored_sku, product_name in product_rows:
-            for value in (stored_sku, product_name):
-                discovered.update(
-                    re.findall(r"\bW\d{6,}\b|\b\d{8,}\b", (value or "").upper())
-                )
-
-        for sku in sorted(discovered - existing - RETIRED_AUTO_SEED_SKUS):
-            connection.execute(KnownSku.__table__.insert().values(sku=sku))
-
-
-_seed_known_skus()
+# Materials are created by explicit imports/requests; titles are never a catalog.
 
 from services.price_observations import backfill_observations
 with SessionLocal() as history_db:
     backfill_observations(history_db)
 
 with SessionLocal() as metadata_db:
-    seed_sku_business_metadata(metadata_db)
+    seed_sku_business_metadata(metadata_db, create_missing=False)
 
 with SessionLocal() as auth_db:
     ensure_owner_user(auth_db)
@@ -285,6 +292,7 @@ app.include_router(product_router, prefix="/products", tags=["Products"])
 app.include_router(sku_metadata_router, prefix='/products/skus/metadata', tags=['Products'])
 app.include_router(lead_time_router, prefix='/products/lead-time', tags=['Lead Time'])
 app.include_router(analysis_router, prefix='/analysis', tags=['Analysis'])
+app.include_router(database_transfer_router, prefix='/products/database', tags=['Database'])
 app.include_router(auth_router, prefix="/auth", tags=["Auth"])
 app.include_router(
     integration_router,
@@ -295,6 +303,8 @@ app.include_router(
 
 @app.on_event("startup")
 def start_background_services():
+    from services.database_maintenance import start_database_maintenance
+    start_database_maintenance(engine)
     configure_extraction_processor(process_extraction_queue_item)
     start_extraction_queue()
     start_extraction_scheduler()

@@ -1,0 +1,188 @@
+{
+  "generated_at_utc": "2026-11-17T04:32:02.805400",
+  "job_id": "888809d7-a310-4628-98be-369e6064c0cf",
+  "job_status": "running",
+  "execution_started_at_utc": "2026-11-16T22:47:58.099031",
+  "total_skus": 311,
+  "skus_with_new_observations": 271,
+  "skus_without_new_observations": [
+    "W10185560",
+    "W10240846",
+    "W10245836",
+    "W10295370",
+    "W10341170",
+    "W103513",
+    "W1039148",
+    "W10416686",
+    "W104771",
+    "W10558255",
+    "W10575852",
+    "W10582195",
+    "W10593545",
+    "W10749469",
+    "W10776410",
+    "W10792163",
+    "W10798571",
+    "W10816021",
+    "W10856146",
+    "W108667",
+    "W10896284",
+    "W10918539",
+    "W11108466",
+    "W11176404",
+    "W11225557",
+    "W11242971",
+    "W11253656",
+    "W11297611",
+    "W11302120",
+    "W11302144",
+    "W11309905",
+    "W11380601",
+    "W11380602",
+    "W11449399",
+    "W11479508",
+    "W1150938",
+    "W11522615",
+    "W11523230",
+    "W1166161",
+    "W11725485"
+  ],
+  "store_observations": [
+    {
+      "store": "Amazon Brasil",
+      "skus": 32,
+      "observations": 1947
+    },
+    {
+      "store": "Brastemp",
+      "skus": 137,
+      "observations": 5038
+    },
+    {
+      "store": "ComClick",
+      "skus": 128,
+      "observations": 3615
+    },
+    {
+      "store": "Consul",
+      "skus": 110,
+      "observations": 5005
+    },
+    {
+      "store": "Dufrio",
+      "skus": 10,
+      "observations": 308
+    },
+    {
+      "store": "Electrolux",
+      "skus": 17,
+      "observations": 1179
+    },
+    {
+      "store": "Friolar",
+      "skus": 130,
+      "observations": 4182
+    },
+    {
+      "store": "Gold Service",
+      "skus": 107,
+      "observations": 3335
+    },
+    {
+      "store": "Leroy Merlin",
+      "skus": 9,
+      "observations": 482
+    },
+    {
+      "store": "MG Parts",
+      "skus": 83,
+      "observations": 3109
+    },
+    {
+      "store": "Magazine Luiza",
+      "skus": 245,
+      "observations": 72851
+    },
+    {
+      "store": "Mercado Livre",
+      "skus": 77,
+      "observations": 18112
+    },
+    {
+      "store": "Midea",
+      "skus": 4,
+      "observations": 448
+    },
+    {
+      "store": "Refrigeração Mota",
+      "skus": 11,
+      "observations": 364
+    },
+    {
+      "store": "Shopee",
+      "skus": 4,
+      "observations": 290
+    }
+  ],
+  "quotes_checked": 120432,
+  "quotes_complete": 80011,
+  "quotes_out_of_stock": 8532,
+  "quotes_incomplete": 31889,
+  "failed_items": [
+    {
+      "sku": "W103513",
+      "message": "Pendente de identificação: código possivelmente incompleto, sem descrição, EAN, modelo ou fonte confirmada. Mantido no cadastro, sem associar preço de outra peça. A coleta dos demais materiais continua."
+    },
+    {
+      "sku": "W1039148",
+      "message": "Pendente de identificação: código possivelmente incompleto, sem descrição, EAN, modelo ou fonte confirmada. Mantido no cadastro, sem associar preço de outra peça. A coleta dos demais materiais continua."
+    },
+    {
+      "sku": "W104771",
+      "message": "Pendente de identificação: código possivelmente incompleto, sem descrição, EAN, modelo ou fonte confirmada. Mantido no cadastro, sem associar preço de outra peça. A coleta dos demais materiais continua."
+    },
+    {
+      "sku": "W108667",
+      "message": "Pendente de identificação: código possivelmente incompleto, sem descrição, EAN, modelo ou fonte confirmada. Mantido no cadastro, sem associar preço de outra peça. A coleta dos demais materiais continua."
+    },
+    {
+      "sku": "W1150938",
+      "message": "Pendente de identificação: código possivelmente incompleto, sem descrição, EAN, modelo ou fonte confirmada. Mantido no cadastro, sem associar preço de outra peça. A coleta dos demais materiais continua."
+    },
+    {
+      "sku": "W1166161",
+      "message": "Pendente de identificação: código possivelmente incompleto, sem descrição, EAN, modelo ou fonte confirmada. Mantido no cadastro, sem associar preço de outra peça. A coleta dos demais materiais continua."
+    }
+  ],
+  "validation": {
+    "full_suite": "525 tests passed",
+    "additional_progress_and_queue": "36 tests passed",
+    "additional_timeout_regression": "1 test passed",
+    "shopee_after_silent_transport_fix": "42 tests passed",
+    "frontend_lint": "passed",
+    "frontend_build": "passed"
+  },
+  "measured_speedups": {
+    "magalu_27_postals": {
+      "before_seconds": 9.157,
+      "after_seconds": 1.757,
+      "same_results": true
+    },
+    "mercado_livre_4_authenticated_postals": {
+      "before_seconds": 7.843,
+      "after_seconds": 3.483,
+      "same_results": true
+    },
+    "shopee_postal_pacing": {
+      "seconds_between_postals": 2,
+      "additional_confirmed_destinations_W10624070": 17,
+      "additional_confirmed_destinations_W11199342": 18,
+      "verified_total_destinations_per_listing": 27
+    }
+  },
+  "limitations": [
+    "The job remains active; these counts do not imply full coverage of every store and postal code.",
+    "Shopee delivery requests can be refused with 90309999 despite a valid login; verified products use automatic backoff.",
+    "Six incomplete codes remain pending identification as requested; no guessed prices or replacements were saved."
+  ]
+}

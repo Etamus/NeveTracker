@@ -1,19 +1,23 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 import math
 import re
+from services.seller_selection import seller_matches
 from types import SimpleNamespace
 from sqlalchemy.orm import sessionmaker
-from threading import Condition, RLock
+from sqlalchemy import tuple_
+from threading import BoundedSemaphore, Condition, RLock
 from cachetools import TTLCache, cached
 from urllib.parse import urlparse
 
 from crawlers.paged_discovery import STORE_HOSTS
 from crawlers.registry import collect_product_source
 from crawlers.scrapy_engine import collect_sources_with_scrapy
+from services.extraction_resources import check_cancelled, submit_in_context
 from services.offer_enrichment import enrich_offers, normalize_postal_code
 from models.product import KnownSku, PriceHistory, Product, ProductSource, ScrapeCursor
 from services.bing_shopping import search_bing_shopping
@@ -22,12 +26,13 @@ from services.crawler_control import get_control
 from services.integration_settings import (
     get_runtime_provider_settings,
 )
-from services.product_resolver import identity_from_models, resolve_candidate
+from services.product_resolver import appliance_variant, identity_from_models, resolve_candidate
 from services.scrape_pagination import (
     browser_retry_due, coverage_by_store, discover_html_pages, discover_indexed_pages, enqueue_seller_offer_page,
 )
 from services.product_sources import (
     active_sources,
+    canonical_source_url,
     mark_source_result,
     upsert_product_source,
 )
@@ -43,6 +48,23 @@ MAX_DISCOVERY_STORES_PER_RUN = 3
 FAILED_SOURCE_RETRY_AFTER = timedelta(minutes=30)
 _external_cache = TTLCache(maxsize=1000, ttl=900)
 _external_condition = Condition(RLock())
+_sqlite_discovery_connections = BoundedSemaphore(4)
+
+
+@contextmanager
+def _discovery_connection(bind):
+    if bind.dialect.name != 'sqlite':
+        yield
+        return
+    # Parallel discovery nests under SKU workers. Reserve a shared budget so it
+    # cannot occupy all SQLite connections while other SKUs and the UI need them.
+    while not _sqlite_discovery_connections.acquire(timeout=.1):
+        check_cancelled()
+    try:
+        check_cancelled()
+        yield
+    finally:
+        _sqlite_discovery_connections.release()
 
 
 @cached(_external_cache, key=lambda search, term: (search, term.strip().lower()), condition=_external_condition)
@@ -52,12 +74,23 @@ def _shared_external_search(search, term):
 
 
 def _source_due(source, collection_after, now):
+    from services.marketplace_intervention import suspension as pending,released_after
+    if getattr(source,'store',None) in {'mercado_livre','shopee'}:
+        if pending(source.store):return False
+        if source.validation_status!='ok' and released_after(source.store,source.last_attempted_at):return True
     if collection_after and source.last_attempted_at and source.last_attempted_at >= collection_after:
         return False
+    if collection_after and getattr(source,'store',None)=='mercado_livre' and source.validation_status in {'blocked','timeout','parser_error'}:
+        # A new explicit run must try the public transport, rather than inherit
+        # the previous run's desktop failure for another thirty minutes.
+        return True
     if getattr(source, 'store', None) == 'mercado_livre':
         from services.mercado_livre_session import validated_after
         if validated_after(source.last_attempted_at):
             return True
+    if getattr(source,'store',None)=='shopee':
+        from services.marketplace_session import validated_after
+        if validated_after('shopee',source.last_attempted_at):return True
     return not (
         source.validation_status in {"blocked", "timeout", "parser_error"}
         and source.last_attempted_at
@@ -89,44 +122,60 @@ def _identity(db, sku):
     return identity_from_models(known, products), products
 
 
-def _bootstrap_existing_sources(db, identity, products):
+def _bootstrap_existing_sources(db, identity, products, selected_stores=None):
+    variant = appliance_variant(identity.sku)
+    if not products and not variant:
+        return 0
+    # A product can have separate seller observations on the same PDP, and
+    # dozens of historical rows per CEP. Read only distinct source identities.
+    known = set(db.query(ProductSource.store, ProductSource.url, ProductSource.seller)
+                .filter(ProductSource.sku == identity.sku))
+    by_id = {product.id: product for product in products}
+    offers = db.query(PriceHistory.product_id, PriceHistory.url, PriceHistory.source, PriceHistory.store).join(
+        Product, Product.id == PriceHistory.product_id
+    ).filter(Product.sku == identity.sku, PriceHistory.url.is_not(None)).distinct()
     created = 0
-    for product in products:
-        latest_by_url = {}
-        for price in product.prices:
-            current = latest_by_url.get(price.url)
-            if not current or (price.timestamp or datetime.min) > (current.timestamp or datetime.min):
-                latest_by_url[price.url] = price
-        for price in latest_by_url.values():
-            store = find_target_store(price.source, price.store, price.url)
-            if not store:
+    if variant:
+        for source in active_sources(db, variant.group(1), selected_stores):
+            if selected_stores is not None and source.store not in selected_stores:
                 continue
-            existing_source = (
-                db.query(ProductSource.id)
-                .filter(
-                    ProductSource.sku == identity.sku,
-                    ProductSource.store == store["key"],
-                    ProductSource.url == price.url,
-                )
-                .first()
-            )
-            if existing_source:
+            key = (source.store, source.url, source.seller)
+            if key in known or not source.listing_name:
                 continue
-            candidate = {
-                "name": product.name,
-                "url": price.url,
-                "seller": price.store,
-                "brand": product.brand,
-            }
+            candidate = {"name": source.listing_name, "url": source.url, "seller": source.seller,
+                         "model": source.model, "brand": source.brand, "_seller_unknown": not source.seller}
             match = resolve_candidate(identity, candidate)
-            if match.accepted and upsert_product_source(db, identity, store["key"], candidate, match):
+            if match.accepted and upsert_product_source(db, identity, source.store, candidate, match):
+                known.add(key)
                 created += 1
+    for price in offers:
+        store = find_target_store(price.source, price.store, price.url)
+        if not store:
+            continue
+        key = (store["key"], canonical_source_url(price.url)[:2000], str(price.store or store['key'])[:120])
+        product = by_id.get(price.product_id)
+        if key in known or product is None:
+            continue
+        candidate = {"name": product.name, "url": key[1], "seller": key[2], "brand": product.brand}
+        match = resolve_candidate(identity, candidate)
+        if match.accepted and upsert_product_source(db, identity, store["key"], candidate, match):
+            known.add(key)
+            created += 1
     if created:
         db.commit()
     return created
 
 
-def _direct_candidates(store, identity, timeout):
+def _direct_candidates(store, identity, timeout, catalog_products=None, catalog_snapshots=None):
+    if store['key'] in {'electrolux','midea','consul','brastemp'}:
+        from services.vtex_public import catalog, catalog_offers
+        try:
+            if catalog_products is None or isinstance(catalog_products, Exception):
+                catalog_products = catalog(store['key'], identity.sku, timeout)
+            if catalog_snapshots is not None:
+                catalog_snapshots[store['key']] = catalog_products
+            return catalog_offers(store['key'], identity.sku, catalog_products)
+        except Exception as exc:print(f"[CATALOG][{store['key']}] {exc}")
     if store["key"] in {"amazon", "magalu"}:
         return []
 
@@ -178,7 +227,7 @@ def _valid_store_url(url, store_key):
     return bool(expected and (hostname == expected or hostname.endswith(f".{expected}")))
 
 
-def _valid_offer(identity, item):
+def _valid_offer(identity, item, match=None):
     store = find_target_store(item.get("source"))
     price = item.get("price")
     seller = str(item.get("seller") or item.get("store") or "").strip()
@@ -189,7 +238,7 @@ def _valid_offer(identity, item):
         or (price is None and offer_available(item))
         or (price is not None and (not isinstance(price, (int, float)) or not math.isfinite(price) or price <= 0))
         or (re.fullmatch(r'W\d{8}', identity.sku.upper()) and title_skus and identity.sku.upper() not in title_skus)
-        or not resolve_candidate(identity, item).accepted
+        or not (match or resolve_candidate(identity, item)).accepted
     ):
         return False
     shipping = item.get("shipping_cost")
@@ -235,14 +284,18 @@ def _external_candidates(identity, store_key):
     return result
 
 
-def _html_and_parallel_api(db, identity, store, control, progress, include_other_sources):
-    """Overlap an explicitly enabled always-on API with public HTML discovery.
+def _html_and_parallel_api(db, identity, store, control, progress, include_other_sources, catalog_products=None, catalog_snapshots=None):
+    """Overlap native catalog or always-on API work with public HTML discovery.
 
     Only the calling thread accesses the SQLAlchemy session. Fallback-only
     providers retain their conditional use and do not consume extra quota.
     """
     settings = get_runtime_provider_settings('mercado_livre') if store['key'] == 'mercado_livre' else {}
-    parallel = include_other_sources and getattr(control, 'api_with_scraping', True) and settings.get('enabled') and settings.get('configured') and settings.get('usage_mode') == 'always'
+    from services.vtex_public import HOSTS
+    native_catalog = store['key'] in HOSTS
+    always_api = (getattr(control, 'api_with_scraping', True) and settings.get('enabled')
+                  and settings.get('configured') and settings.get('usage_mode') == 'always')
+    parallel = include_other_sources and (native_catalog or always_api)
     def html():
         try:
             return discover_html_pages(db, identity, store, control.request_timeout_seconds, progress=progress)
@@ -252,7 +305,11 @@ def _html_and_parallel_api(db, identity, store, control, progress, include_other
     if not parallel:
         return html(), None
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(_direct_candidates, store, identity, control.request_timeout_seconds)
+        future = submit_in_context(executor,
+            _direct_candidates, store, identity, control.request_timeout_seconds,
+            **({'catalog_products': catalog_products} if catalog_products is not None else {}),
+            **({'catalog_snapshots': catalog_snapshots} if native_catalog and catalog_snapshots is not None else {}),
+        )
         candidates = html()
         try:
             direct = future.result()
@@ -264,8 +321,9 @@ def _html_and_parallel_api(db, identity, store, control, progress, include_other
 
 def _discover_store(
     db, identity, store, control, known_source_ids=None, retry_failed=False,
-    progress=None, include_other_sources=True,
+    progress=None, include_other_sources=True, catalog_products=None, catalog_snapshots=None,
 ):
+    check_cancelled()
     known_source_ids = set(known_source_ids or ())
     saved = []
     seen = set()
@@ -274,6 +332,9 @@ def _discover_store(
 
     def save_candidates(candidates, method):
         for candidate in candidates:
+            check_cancelled()
+            if not seller_matches(getattr(control,'sellers',{}),candidate,store['key'],allow_unknown=True):
+                continue
             candidate_method = candidate.get("discovery_method") or method
             if not _valid_store_url(candidate.get("url"), store["key"]):
                 continue
@@ -290,6 +351,11 @@ def _discover_store(
             if has_price:
                 seen_with_price.add(identity_key)
             match = resolve_candidate(identity, candidate)
+            if match.accepted and candidate.get('discovery_source')=='storefront_public_catalog':
+                known=db.query(KnownSku).filter_by(sku=identity.sku).first()
+                if known:
+                    if not known.description:known.description=candidate.get('name')
+                    if not known.brand:known.brand=candidate.get('brand')
             if not match.accepted and candidate.get('_requires_pdp_verification'):
                 db.commit()
                 provisional = ProductSource(sku=identity.sku, store=store['key'], url=candidate['url'],
@@ -316,15 +382,19 @@ def _discover_store(
                     f"({match.confidence:.2f}, {candidate_method})"
                 )
 
-    html_candidates, parallel_direct = _html_and_parallel_api(db, identity, store, control, progress, include_other_sources)
+    html_candidates, parallel_direct = _html_and_parallel_api(
+        db, identity, store, control, progress, include_other_sources, catalog_products, catalog_snapshots,
+    )
     save_candidates(html_candidates, "html_pages")
     db.commit()
+    check_cancelled()
     if control.external_discovery_fallback:
         indexed_candidates = discover_indexed_pages(
             db, identity, store, control.request_timeout_seconds, progress=progress,
         )
         save_candidates(indexed_candidates, "indexed_search")
         db.commit()
+    check_cancelled()
     skip_fallback_api = (
         store["key"] == "mercado_livre"
         and (not getattr(control, 'api_with_scraping', True) or (
@@ -333,7 +403,8 @@ def _discover_store(
     )
     direct_candidates = parallel_direct if parallel_direct is not None else (
         [] if skip_fallback_api or not include_other_sources
-        else _direct_candidates(store, identity, control.request_timeout_seconds)
+        else _direct_candidates(store, identity, control.request_timeout_seconds,
+                                **({'catalog_products':catalog_products} if catalog_products is not None else {}))
     )
     save_candidates(direct_candidates, "direct")
     db.commit()
@@ -362,7 +433,10 @@ def _discover_store(
     return saved
 
 
-def _collect_sources(db, identity, sources, postal_code, control, progress=None):
+def _collect_sources(db, identity, sources, postal_code, control, progress=None, catalog_snapshots=None):
+    check_cancelled()
+    from services.marketplace_intervention import suspension as pending,defer_access
+    sources=[source for source in sources if not pending(source.store) and seller_matches(getattr(control,'sellers',{}),source,source.store,allow_unknown=True)]
     if not sources:
         return [], set()
     grouped = defaultdict(list)
@@ -371,34 +445,111 @@ def _collect_sources(db, identity, sources, postal_code, control, progress=None)
     collected = []
     logistics_indices = []
     successful_stores = set()
-    http_sources = [source for source in sources if source.store not in {"mercado_livre", "shopee"}]
-    try:
-        http_results = collect_sources_with_scrapy(
-            http_sources, identity,
-            control.concurrent_requests_per_domain,
-            control.request_timeout_seconds,
-        ) if http_sources else {}
-    except Exception as exc:
-        http_results = {
-            source.id: {"status": "PARSER_ERROR", "reason": str(exc)}
-            for source in http_sources
-        }
+    from urllib.parse import parse_qs, urlsplit
+    native_sources = [source for source in sources if source.store in {'electrolux','midea','brastemp','consul'} and 'idsku' in parse_qs(urlsplit(source.url).query)]
+    native_ids = {source.id for source in native_sources}
+    magalu_sources=[source for source in sources if source.store=='magalu' and urlsplit(source.url).hostname=='www.magazinevoce.com.br']
+    magalu_ids = {source.id for source in magalu_sources}
+    native_ids.update(magalu_ids)
+    http_sources = [source for source in sources if source.store not in {"mercado_livre", "shopee"} and source.id not in native_ids]
+    snapshots = catalog_snapshots if catalog_snapshots is not None else {}
+
+    def collect_http():
+        if not http_sources:
+            return {}
+        try:
+            return collect_sources_with_scrapy(
+                http_sources, identity, control.concurrent_requests_per_domain,
+                control.request_timeout_seconds,
+            )
+        except Exception as exc:
+            return {source.id: {"status": "PARSER_ERROR", "reason": str(exc)} for source in http_sources}
+
+    @cached({}, condition=Condition(RLock()))
+    def prepare_catalog(store_key):
+        from services.vtex_public import catalog, index_catalog_offers
+
+        products = snapshots.get(store_key)
+        if store_key not in snapshots:
+            try:
+                products = catalog(store_key, identity.sku, control.request_timeout_seconds)
+            except Exception as exc:
+                products = exc
+        snapshots[store_key] = products
+        if isinstance(products, Exception):
+            return products
+        try:
+            return index_catalog_offers(store_key, identity.sku, products)
+        except Exception as exc:
+            return exc
+
+    def collect_native():
+        from services.vtex_public import collect_source
+        from services.magalu_public_shipping import collect_source as collect_magalu_source
+        from services.extraction_resources import fair_map
+
+        def collect_one(source):
+            try:
+                if source.id in magalu_ids:
+                    return collect_magalu_source(source, identity, postal_code, control.request_timeout_seconds)
+                # Reuse the in-flight catalog for this store. A slow catalog
+                # never delays another store's product or delivery requests.
+                index = prepare_catalog(source.store)
+                if isinstance(index, Exception):
+                    raise index
+                return collect_source(source, identity, postal_code, control.request_timeout_seconds, offer_index=index)
+            except Exception as exc:
+                return {"status": "PARSER_ERROR", "reason": str(exc)}
+
+        return {source.id: result for source, result in fair_map(
+            collect_one, [*native_sources, *magalu_sources], key=lambda source: source.store,
+        )}
+
+    if http_sources and (native_sources or magalu_sources):
+        # Scrapy and native storefront requests share the same global budget.
+        # Network workers return plain data. The calling thread owns ORM writes.
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="precise-scrapy") as executor:
+            http_work = submit_in_context(executor, collect_http)
+            http_results = collect_native()
+            http_results.update(http_work.result())
+    elif native_sources or magalu_sources:
+        http_results = collect_native()
+    else:
+        http_results = collect_http()
+    from services.vtex_public import HOSTS, published_catalog_listing
+    native_results = {
+        item['url']: item for source in native_sources for item in (http_results.get(source.id) or {}).get('items', [])
+        if item.get('_vtex_store') and item.get('url')
+    }
+    seen_catalog_offers = set()
+    browser_checked=set()
     for store_key, store_sources in grouped.items():
+        check_cancelled()
+        catalog_aliases = set()
         selected = store_sources
         if store_key in {"mercado_livre", "shopee"}:
             workers = min(control.concurrent_requests_per_domain, len(selected))
+            if store_key == 'shopee':
+                workers = 1
             collector = collect_product_source
             if store_key == 'mercado_livre' and not getattr(control, 'api_with_scraping', True):
                 from crawlers.mercado_livre_public import collect_public_product
                 collector = collect_public_product
+            elif store_key == 'shopee':
+                from services.marketplace_session import browser_endpoint, metadata_file
+                from services.marketplace_intervention import enabled
+                if enabled('shopee') and (browser_endpoint('shopee') or metadata_file('shopee').exists()):
+                    from services.shopee_public import collect_account_product
+                    collector = collect_account_product
+            def guarded_collect(source):
+                access=pending(store_key)
+                if access:return {'status':'ACCESS_REQUIRED','reason':access['reason']}
+                return collector(source,identity,postal_code,control.request_timeout_seconds)
             with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
                 futures = {
-                    executor.submit(
-                        collector,
+                    submit_in_context(executor,
+                        guarded_collect,
                         source,
-                        identity,
-                        postal_code,
-                        control.request_timeout_seconds,
                     ): source
                     for source in selected
                 }
@@ -413,6 +564,8 @@ def _collect_sources(db, identity, sources, postal_code, control, progress=None)
             results = http_results
 
         browser_sources = [source for source in selected if (
+            not pending(store_key)
+            and
             getattr(control, "playwright_product_fallback", False)
             and browser_available(source.url)
             and (results.get(source.id) or {}).get("status") in {"BLOCKED", "TIMEOUT", "PARSER_ERROR"}
@@ -427,19 +580,20 @@ def _collect_sources(db, identity, sources, postal_code, control, progress=None)
                 first, identity, postal_code, control.request_timeout_seconds,
                 include_shipping=bool(getattr(control, "playwright_shipping_fallback", False)),
             )
-            if browser_result.get("status") != "BROWSER_ERROR":
+            browser_checked.add(first.id)
+            if store_key in {'mercado_livre','shopee'} or browser_result.get("status") != "BROWSER_ERROR":
                 results[first.id] = browser_result
             browser_status = browser_result.get("status")
             failed_block_recovery = http_status == "BLOCKED" and browser_status not in {"OK", "OUT_OF_STOCK"}
             if store_key != 'mercado_livre':
-                record_browser_result(first.url, 'OK' if browser_status == 'OK' else 'BLOCKED' if failed_block_recovery else browser_status)
+                record_browser_result(first.url, browser_status)
             if (
                 browser_status not in {"BLOCKED", "BROWSER_ERROR", "LOGIN_REQUIRED"} and not failed_block_recovery
                 or store_key == 'mercado_livre' and browser_status == 'BLOCKED' and browser_available(first.url)
             ):
                 workers = min(2, control.concurrent_requests_per_domain)
                 with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-                    futures = {executor.submit(
+                    futures = {submit_in_context(executor,
                         collect_product_with_playwright, source, identity,
                         postal_code, control.request_timeout_seconds,
                         include_shipping=bool(getattr(control, "playwright_shipping_fallback", False)),
@@ -448,37 +602,70 @@ def _collect_sources(db, identity, sources, postal_code, control, progress=None)
                         source = futures[future]
                         try:
                             recovered = future.result()
-                            if recovered.get("status") != "BROWSER_ERROR":
+                            browser_checked.add(source.id)
+                            if store_key in {'mercado_livre','shopee'} or recovered.get("status") != "BROWSER_ERROR":
                                 results[source.id] = recovered
                         except Exception as exc:
                             print(f"[FALLBACK][{store_key.upper()}] BROWSER_ERROR: {exc}")
 
         for source in selected:
+            check_cancelled()
             result = results.get(source.id) or {
                 "status": "PARSER_ERROR", "reason": "Coletor nao retornou esta fonte",
             }
             status = result.get("status") or "PARSER_ERROR"
-            mark_source_result(source, status, result.get("reason"))
+            if store_key in {'mercado_livre','shopee'} and status in {'BLOCKED','LOGIN_REQUIRED','ACCESS_REQUIRED'} and source.id in browser_checked:
+                from services.marketplace_intervention import require_access
+                require_access(store_key,identity.sku,result.get('reason'),source.url)
+            elif status in {'BROWSER_BUSY','BROWSER_ERROR','TIMEOUT','RETRY_LATER','LOGIN_PENDING'}:
+                defer_access(store_key,identity.sku,result.get('reason'))
             if status == "OK":
                 items = result.get("items") or [result["item"]]
-                successful_stores.add(store_key)
-                offer_urls = [offer.get("url") for offer in items]
+                offer_urls = Counter(offer.get("url") for offer in items)
+                rejected = 0
+                valid_items = 0
                 for item in items:
-                    if not _valid_offer(identity, item):
+                    if not seller_matches(getattr(control,'sellers',{}),item,store_key):
+                        continue
+                    single_offer_url = offer_urls[item.get('url')] == 1
+                    # Manufacturer PDPs sometimes omit the channel in their
+                    # generated URL. Quoting with the default channel can
+                    # create a duplicate listing with another price or SLA.
+                    if store_key in HOSTS and store_key in snapshots and not item.get('_vtex_store'):
+                        index = prepare_catalog(store_key)
+                        published = published_catalog_listing(item, index) if isinstance(index, dict) else None
+                        if published:
+                            catalog_aliases.add((canonical_source_url(item['url']), item.get('seller') or item.get('store')))
+                            from services.structured_products import LOGISTICS_FIELDS
+                            item = {key: value for key, value in item.items() if key not in LOGISTICS_FIELDS
+                                    and key not in {'_page_context', '_logistics_attempted_zip', '_http_logistics_attempted_zip'}}
+                            item.update(native_results.get(published['url'], published))
+                    seller_match = resolve_candidate(identity, item)
+                    if not _valid_offer(identity, item, seller_match):
+                        rejected += 1
                         print(f"[COLLECTION][{store_key.upper()}] Oferta de vendedor invalida")
                         continue
-                    seller_match = resolve_candidate(identity, item)
+                    valid_items += 1
+                    successful_stores.add(store_key)
                     seller_source = upsert_product_source(db, identity, store_key, item, seller_match)
                     if seller_source and seller_source.id != source.id:
                         mark_source_result(seller_source, 'OK')
                         seller_source.listing_method = "pdp_offers"
+                    if item.get('_vtex_store'):
+                        if item['url'] in seen_catalog_offers:
+                            continue
+                        seen_catalog_offers.add(item['url'])
                     if (
-                        postal_code and store_key != "mercado_livre" and offer_urls.count(item.get("url")) == 1
+                        postal_code and store_key != "mercado_livre" and single_offer_url
                         and offer_available(item) and item.get("_logistics_attempted_zip") != postal_code
                         and not (item.get("destination_zip") == postal_code and item.get("shipping_cost") is not None and item.get("delivery_max_days") is not None)
                     ):
                         logistics_indices.append(len(collected))
                     collected.append(item)
+                if rejected and not valid_items:
+                    mark_source_result(source, "PARSER_ERROR", "Nenhuma oferta retornada passou na validação.")
+                    continue
+                mark_source_result(source, status, result.get("reason"))
                 source.match_confidence = result["match"].confidence
                 source.match_method = result["match"].method
                 if result.get('seller_coverage_limited'):
@@ -489,6 +676,7 @@ def _collect_sources(db, identity, sources, postal_code, control, progress=None)
                         "A abertura de mais opcoes pode exigir login no Mercado Livre."
                     )
             else:
+                mark_source_result(source, status, result.get("reason"))
                 candidate = result.get('candidate')
                 if store_key == 'shopee' and candidate and resolve_candidate(identity, candidate).accepted:
                     # Public metadata can confirm identity while prices remain
@@ -496,10 +684,8 @@ def _collect_sources(db, identity, sources, postal_code, control, progress=None)
                     source.listing_name = candidate.get('name') or source.listing_name
                     source.shop_id = candidate.get('shop_id') or source.shop_id
                     source.item_id = candidate.get('item_id') or source.item_id
-                if status == "OUT_OF_STOCK":
-                    db.query(PriceHistory).filter(
-                        PriceHistory.url == source.url, PriceHistory.store == source.seller,
-                    ).update({PriceHistory.availability: "out_of_stock"}, synchronize_session=False)
+                # A page-level stockout without an identifiable offer cannot
+                # overwrite historical prices or establish stock for another seller.
                 print(
                     f"[COLLECTION][{store_key.upper()}] {status}: "
                     f"{result.get('reason') or identity.sku}"
@@ -508,6 +694,7 @@ def _collect_sources(db, identity, sources, postal_code, control, progress=None)
                 listing_seen_at = getattr(source, "listing_seen_at", None)
                 if (
                     status in {"BLOCKED", "TIMEOUT", "PARSER_ERROR"}
+                    and seller_matches(getattr(control,'sellers',{}),source,store_key)
                     and listing_price is not None
                     and listing_seen_at is not None
                     and datetime.utcnow() - listing_seen_at <= timedelta(hours=24)
@@ -533,7 +720,18 @@ def _collect_sources(db, identity, sources, postal_code, control, progress=None)
                         "is_cached": True,
                     })
                     print(f"[COLLECTION][{store_key.upper()}] Preco preservado da listagem para {source.seller}")
+        if catalog_aliases:
+            # Old installations can have price history for both URLs. Keep the
+            # observations while excluding only the confirmed alias from current views.
+            db.flush()
+            db.query(ProductSource).filter(
+                ProductSource.sku == identity.sku, ProductSource.store == store_key,
+                tuple_(ProductSource.url, ProductSource.seller).in_(catalog_aliases),
+            ).update({ProductSource.active: False, ProductSource.validation_status: 'consolidated',
+                      ProductSource.failure_reason: 'Oferta confirmada no canal de venda publicado pelo catálogo.'},
+                     synchronize_session=False)
         db.commit()
+    check_cancelled()
     if logistics_indices:
         if progress:
             progress(f"{identity.sku}: cotando frete e prazo de {len(logistics_indices)} ofertas para {postal_code}")
@@ -559,7 +757,8 @@ def _collect_sources(db, identity, sources, postal_code, control, progress=None)
                 return host, indices, collect_shipping_with_playwright(
                     collected[indices[0]]["url"], postal_code, control.request_timeout_seconds)
             with ThreadPoolExecutor(max_workers=min(2, len(by_host)) or 1) as executor:
-                probes = list(executor.map(probe_host, by_host.items()))
+                futures = [submit_in_context(executor, probe_host, value) for value in by_host.items()]
+                probes = [future.result() for future in futures]
             for host, indices, shipping in probes:
                 first = indices[0]
                 if shipping.get("_blocked_status") in {403, 429}:
@@ -577,7 +776,9 @@ def _collect_sources(db, identity, sources, postal_code, control, progress=None)
                 )
             if remaining:
                 with ThreadPoolExecutor(max_workers=min(2, len(remaining))) as executor:
-                    for index, shipping in executor.map(browser_shipping, remaining):
+                    futures = [submit_in_context(executor, browser_shipping, value) for value in remaining]
+                    for future in futures:
+                        index, shipping = future.result()
                         if not shipping.get("_blocked_status"):
                             collected[index] = merge_offer_details(collected[index], shipping)
     return collected, successful_stores
@@ -596,7 +797,7 @@ def _stores_requiring_discovery(stores, successful_stores, known_stores=None, at
     ]
 
 
-def _discovery_batch(db, sku, stores):
+def _discovery_batch(db, sku, stores, limit=MAX_DISCOVERY_STORES_PER_RUN):
     """Rotate stores between batches so one blocked marketplace cannot monopolize a job."""
     last_attempted = {}
     for store, attempted_at in db.query(
@@ -608,7 +809,7 @@ def _discovery_batch(db, sku, stores):
         stores,
         key=lambda store: (last_attempted.get(store["key"]) is not None,
                            last_attempted.get(store["key"]) or datetime.min),
-    )[:MAX_DISCOVERY_STORES_PER_RUN]
+    )[:limit]
 
 
 def _discovery_attempted_since(cursors, started_at):
@@ -620,12 +821,15 @@ def _discovery_attempted_since(cursors, started_at):
 
 def run_precise_extraction(
     sku, db, postal_code=None, scope="all", rediscover=False,
-    collection_after=None, resume=False, progress=None, api_with_scraping=None,
+    collection_after=None, resume=False, progress=None, api_with_scraping=None, stores=None,
+    catalog_snapshots=None, sellers=None,
 ):
     from services.scraper_service import _cached_sku_observations, _save_result, build_summary_from_cached_results
     from routes.products import _serialize_results
 
+    check_cancelled()
     postal_code = normalize_postal_code(postal_code)
+    catalog_snapshots = dict(catalog_snapshots or {})
     execution_started = datetime.utcnow()
     identity, products = _identity(db, sku)
     from types import SimpleNamespace
@@ -634,15 +838,22 @@ def run_precise_extraction(
         'request_timeout_seconds': 15, 'concurrent_requests_per_domain': 2,
         'external_discovery_fallback': True, 'playwright_product_fallback': True,
         'playwright_shipping_fallback': True, 'api_with_scraping': True,
+        'discovery_stores_per_round': 3,
     }.items()})
     if api_with_scraping is not None:
         control.api_with_scraping = api_with_scraping
+    control.sellers = sellers or {}
     selected_stores = [
         store for store in TARGET_STORES
-        if scope == "all" or store.get("scope") == scope
+        if (scope == "all" or store.get("scope") == scope) and (not stores or store['key'] in stores)
     ]
+    from services.marketplace_intervention import waiting_stores,suspension as pending
+    requested_keys={store['key'] for store in selected_stores}
+    selected_stores=[store for store in selected_stores if not pending(store['key'])]
     selected_keys = {store["key"] for store in selected_stores}
-    _bootstrap_existing_sources(db, identity, products)
+    _bootstrap_existing_sources(db, identity, products, selected_keys)
+    from services.scrape_pagination import retire_redundant_seller_pages, OPERATIONAL_KINDS
+    retire_redundant_seller_pages(db, sku)
     if rediscover:
         db.query(ProductSource).filter(
             ProductSource.sku == sku,
@@ -650,7 +861,7 @@ def run_precise_extraction(
         ).update({ProductSource.active: False}, synchronize_session=False)
         db.query(ScrapeCursor).filter(
             ScrapeCursor.sku == sku,
-            ScrapeCursor.store.in_(selected_keys),
+            ScrapeCursor.store.in_(selected_keys), ScrapeCursor.kind.in_(OPERATIONAL_KINDS),
         ).update(
             {
                 ScrapeCursor.completed: True,
@@ -669,9 +880,11 @@ def run_precise_extraction(
 
     if not resume:
         for cursor in db.query(ScrapeCursor).filter(
-            ScrapeCursor.sku == sku, ScrapeCursor.store.in_(selected_keys),
+            ScrapeCursor.sku == sku, ScrapeCursor.store.in_(selected_keys), ScrapeCursor.kind.in_(OPERATIONAL_KINDS),
             ScrapeCursor.completed.is_(True),
         ).all():
+            if cursor.store == 'shopee' and cursor.kind == 'seller_offers':
+                continue
             cursor.completed = False
             cursor.next_url = cursor.initial_url or cursor.next_url
             cursor.visited_urls = "[]"
@@ -679,12 +892,13 @@ def run_precise_extraction(
 
     current_terms = tuple(dict.fromkeys((identity.sku, *identity.search_terms)))[:3]
     db.query(ScrapeCursor).filter(
-        ScrapeCursor.sku == sku, ScrapeCursor.store.in_(selected_keys),
+        ScrapeCursor.sku == sku, ScrapeCursor.store.in_(selected_keys), ScrapeCursor.kind.in_(OPERATIONAL_KINDS),
         ScrapeCursor.kind == "search", ScrapeCursor.key.notin_(current_terms),
     ).update({ScrapeCursor.completed: True}, synchronize_session=False)
     db.commit()
 
-    known_sources = active_sources(db, sku, selected_keys)
+    known_sources = active_sources(db, sku, selected_keys) if selected_keys else []
+    known_sources = [source for source in known_sources if seller_matches(sellers,source,source.store,allow_unknown=True)]
     product_names = {product.id: product.name for product in products}
     for source in known_sources:
         title = getattr(source, "listing_name", None) or product_names.get(getattr(source, "product_id", None))
@@ -705,10 +919,11 @@ def run_precise_extraction(
     known_batch = _source_batch(eligible_sources)
     if progress:
         progress(f"{sku}: coletando {len(known_batch)} paginas de produto conhecidas")
-    collected, successful_stores = _collect_sources(db, identity, known_batch, postal_code, control, progress)
+    collected, successful_stores = _collect_sources(db, identity, known_batch, postal_code, control, progress,
+                                                  catalog_snapshots=catalog_snapshots)
     cursors = db.query(ScrapeCursor).filter(
         ScrapeCursor.sku == sku,
-        ScrapeCursor.store.in_(selected_keys),
+        ScrapeCursor.store.in_(selected_keys), ScrapeCursor.kind.in_(OPERATIONAL_KINDS),
     ).all()
     cursor_work_stores = {
         cursor.store for cursor in cursors
@@ -725,7 +940,7 @@ def run_precise_extraction(
     )
     stores_to_discover = [
         store for store in selected_stores
-        if store in stores_to_discover or store["key"] in cursor_work_stores
+        if not pending(store['key']) and (store in stores_to_discover or store["key"] in cursor_work_stores)
     ]
 
     new_sources = []
@@ -743,7 +958,7 @@ def run_precise_extraction(
             store for store in stores_to_discover
             if store["key"] not in attempted_this_job or store["key"] in cursor_work_stores
         ]
-    discovery_stores = _discovery_batch(db, sku, stores_to_discover)
+    discovery_stores = _discovery_batch(db, sku, stores_to_discover, limit=control.discovery_stores_per_round)
     pending_stores = len(stores_to_discover) - len(discovery_stores)
     known_ids_by_store = {
         store["key"]: {source.id for source in known_sources if source.store == store["key"]}
@@ -757,12 +972,15 @@ def run_precise_extraction(
             retry_failed=store["key"] in attempted_stores and store["key"] not in successful_stores,
             progress=store_progress,
             include_other_sources=not resume or store["key"] not in attempted_discovery_stores,
+            **({'catalog_products':catalog_snapshots[store['key']]} if catalog_snapshots and store['key'] in catalog_snapshots else {}),
+            **({'catalog_snapshots':catalog_snapshots} if store['key'] in {'consul','brastemp','midea','electrolux'} else {}),
         )
 
     discovery_control = SimpleNamespace(
         api_with_scraping=control.api_with_scraping,
         request_timeout_seconds=control.request_timeout_seconds,
         external_discovery_fallback=getattr(control, "external_discovery_fallback", True),
+        sellers=sellers or {},
     )
     bind = db.get_bind()
     # In-memory SQLite fixtures share one connection; production uses isolated
@@ -774,11 +992,11 @@ def run_precise_extraction(
             progress(f"{sku}: buscando lojistas em " + ", ".join(store['label'] for store in discovery_stores))
         worker_sessions = sessionmaker(bind=bind, autoflush=False, expire_on_commit=False)
         def discover_worker(store):
-            with worker_sessions() as worker_db:
+            with _discovery_connection(bind), worker_sessions() as worker_db:
                 return [source.id for source in discover_one(store, worker_db, {"collection_after": collection_after})]
         found_ids = set()
         with ThreadPoolExecutor(max_workers=min(3, len(discovery_stores))) as executor:
-            futures = {executor.submit(discover_worker, store): store for store in discovery_stores}
+            futures = {submit_in_context(executor, discover_worker, store): store for store in discovery_stores}
             for future in as_completed(futures):
                 try:
                     found_ids.update(future.result())
@@ -801,17 +1019,23 @@ def run_precise_extraction(
         if progress:
             progress(f"{sku}: conferindo {min(len(new_sources), remaining)} novas ofertas")
         new_items, _ = _collect_sources(
-            db, identity, _source_batch(new_sources, limit=remaining), postal_code, control, progress
+            db, identity, _source_batch(new_sources, limit=remaining), postal_code, control, progress,
+            catalog_snapshots=catalog_snapshots,
         )
         collected.extend(new_items)
 
     processed_count = 0
     fresh_count = 0
     reused_count = 0
+    identity,_=_identity(db,sku)
     for item in collected:
+        check_cancelled()
+        if not seller_matches(sellers,item):
+            continue
         if not _valid_offer(identity, item):
             print(f"[COLLECTION][VALIDATION] Oferta rejeitada para {sku}")
             continue
+        item['sku']=identity.sku
         item["destination_zip"] = item.pop("shipping_zip_code", None) or item.get("destination_zip")
         try:
             with db.begin_nested():
@@ -827,30 +1051,36 @@ def run_precise_extraction(
         progress(f"{sku}: consolidando {fresh_count} ofertas verificadas")
     cached = _serialize_results(list(_cached_sku_observations(db, sku)), db,
                                 fresh_after=collection_after or execution_started)
+    cached=[item for item in cached if (store:=find_target_store(item.get('source'))) and store['key'] in selected_keys and seller_matches(sellers,item)]
     summary = build_summary_from_cached_results(cached, sku)
     summary["processed_count"] = processed_count
     summary["fresh_count"] = fresh_count
     summary["reused_listing_count"] = reused_count
     summary["mode"] = "precise"
-    summary["coverage_by_store"] = coverage_by_store(db, sku, selected_stores)
+    # Access can be released while other stores are running. Stores skipped at
+    # the start still need a resume pass even if their global wait is now clear.
+    summary['waiting_marketplaces']=sorted((requested_keys-selected_keys)|set(waiting_stores(requested_keys)))
+    summary["coverage_by_store"] = coverage_by_store(db, sku, selected_stores, **({'sellers':sellers} if sellers else {}))
     summary["failed_sources"] = sum(row["failed_sources"] for row in summary["coverage_by_store"])
     summary['limited_sources'] = sum(row.get('limited_sources', 0) for row in summary['coverage_by_store'])
     summary["failed_sources_without_price"] = sum(
         row["failed_sources_without_price"] for row in summary["coverage_by_store"]
     )
-    active_after = active_sources(db, sku, selected_keys)
+    active_after = active_sources(db, sku, selected_keys) if selected_keys else []
+    active_after = [source for source in active_after if seller_matches(sellers,source,source.store,allow_unknown=True)]
     summary["source_count"] = len(active_after)
     if collection_after:
         pending_sources = sum(
             _source_due(source, collection_after, datetime.utcnow())
-            for source in active_after
+            for source in active_after if not pending(source.store)
         )
         pending_pages = db.query(ScrapeCursor).filter(
             ScrapeCursor.sku == sku,
-            ScrapeCursor.store.in_(selected_keys),
+            ScrapeCursor.store.in_(selected_keys), ScrapeCursor.kind.in_(OPERATIONAL_KINDS),
             ScrapeCursor.completed.is_(False),
         ).count()
         summary["pending_sources"] = pending_sources
+        pending_stores=sum(not pending(store['key']) for store in stores_to_discover if store not in discovery_stores)
         summary["pending_stores"] = pending_stores
         summary["pending_pages"] = pending_pages
         pending_browser = sum(store["browser_pending"] for store in summary["coverage_by_store"])
@@ -858,12 +1088,12 @@ def run_precise_extraction(
         summary["pending_browser"] = pending_browser
         summary["pending_unattempted_pages"] = pending_unattempted
         actionable_pages = sum(
-            not cursor.completed and (
+            not pending(cursor.store) and not cursor.completed and (
                 cursor.last_attempted_at is None or cursor.last_status in {"OK", "OK_BROWSER"}
                 or browser_retry_due(cursor)
             )
             for cursor in db.query(ScrapeCursor).filter(
-                ScrapeCursor.sku == sku, ScrapeCursor.store.in_(selected_keys),
+                ScrapeCursor.sku == sku, ScrapeCursor.store.in_(selected_keys), ScrapeCursor.kind.in_(OPERATIONAL_KINDS),
             ).all()
         )
         summary["pending_actionable_pages"] = actionable_pages

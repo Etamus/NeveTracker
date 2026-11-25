@@ -14,7 +14,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from database import Base, get_db
-from models.product import OfferObservation, Product, PriceHistory, LeadTimeDestination, LeadTimeQuote
+from models.product import OfferObservation, Product, ProductSource, PriceHistory, LeadTimeDestination, LeadTimeQuote
 from routes.analysis import analysis_router
 from routes.lead_time import lead_time_router
 from services.auth_service import require_operator, get_current_user
@@ -73,12 +73,87 @@ class AnalysisTests(unittest.TestCase):
         _save_result({**self.item, 'is_cached': True, 'captured_at': '2020-01-01T00:00:00'}, self.db); self.db.commit()
         self.assertEqual(self.db.query(OfferObservation).count(), 1)
 
+    def test_all_history_includes_older_years_and_exports_same_period(self):
+        self.observe('2024-01-01T12:00:00')
+        self.observe('2026-11-17T12:00:00', price=120)
+        # An unrelated material must not expand the selected SKU's interval.
+        self.observe('2020-01-01T12:00:00', sku='OTHER')
+        _, client = self.client()
+        query = '/analysis/history?skus=W11199342&all_dates=true'
+        response = client.get(query)
+        self.assertEqual(response.status_code, 200, response.text)
+        report = response.json()
+        self.assertEqual(report['series'][0]['date'], '2024-01-01')
+        self.assertEqual(report['series'][-1]['date'], '2026-11-17')
+        self.assertGreater(report['total'], 366)
+        exported = client.get(query + '&export=true')
+        self.assertEqual(exported.status_code, 200)
+        workbook = load_workbook(BytesIO(exported.content), read_only=True)
+        self.assertGreater(workbook.worksheets[0].max_row, 366)
+        workbook.close()
+
+    def test_history_pages_preserve_all_rows_and_daily_chart(self):
+        self.observe('2026-11-01T12:00:00')
+        self.observe('2026-11-02T12:00:00', price=125, shipping_cost=0)
+        self.observe('2026-11-02T12:00:00', destination_zip='30130003')
+        self.observe('2026-11-04T12:00:00', price=140, seller='Parceiro B')
+        start, end = date(2026, 11, 1), date(2026, 11, 5)
+        full = history_report(self.db, start, end, page_size=None)
+        for page in range(1, 8):
+            report = history_report(self.db, start, end, page=page, page_size=2)
+            self.assertEqual(report['items'], full['items'][(page - 1) * 2:page * 2])
+            self.assertEqual(report['total'], full['total'])
+            self.assertEqual(report['series'], full['series'])
+
+    def test_history_search_matches_whole_report_and_preserves_timeline(self):
+        self.observe('2020-01-01T12:00:00', sku='OTHER')
+        self.observe('2026-11-01T12:00:00')
+        self.observe('2026-11-02T12:00:00', name='Sensor atual', price=125)
+        self.observe('2026-11-04T12:00:00', name='Tampa corrigida', price=150)
+        _, client = self.client()
+        params = {'all_dates': True, 'search': 'SENSOR parceiro', 'page_size': 1}
+        with client:
+            first = client.get('/analysis/history', params=params).json()
+            self.assertEqual(first['total'], 2)
+            self.assertEqual(first['start'], '2026-11-01')
+            self.assertEqual([day['offers'] for day in first['series']], [0, 1, 1, 0])
+            self.assertTrue(first['items'][0]['carried'])
+            second = client.get('/analysis/history', params={**params, 'page': 2}).json()
+            self.assertEqual(second['items'][0]['previous_price'], 100)
+            self.assertEqual(second['items'][0]['difference'], 25)
+            response = client.get('/analysis/history', params={**params, 'export': True})
+            with BytesIO(response.content) as data:
+                workbook = load_workbook(data, read_only=True)
+                self.assertEqual(workbook.worksheets[0].max_row, 3)
+                workbook.close()
+
+    def test_comparison_search_uses_latest_observation_and_literal_wildcards(self):
+        self.observe('2026-11-01T12:00:00', name='Sensor antigo')
+        self.observe('2026-11-02T12:00:00', name='Tampa corrigida')
+        self.observe('2026-11-01T12:00:00', sku='SENSOR_2', name='Sensor precision 50%', price=45)
+        _, client = self.client()
+        params = {'left': 'Magazine Luiza', 'right': 'Brastemp', 'search': 'parceiro %'}
+        with client:
+            report = client.get('/analysis/comparison', params=params).json()
+            self.assertEqual(report['groups'][0]['offers'], 1)
+            self.assertEqual(report['groups'][0]['minimum'], 45)
+            self.assertEqual([row['sku'] for row in report['items']], ['SENSOR_2'])
+            obsolete = client.get('/analysis/comparison', params={**params, 'search': 'antigo'}).json()
+            self.assertEqual(obsolete['items'], [])
+            response = client.get('/analysis/comparison', params={**params, 'export': True})
+            with BytesIO(response.content) as data:
+                workbook = load_workbook(data, read_only=True)
+                rows = list(workbook.worksheets[1].values)
+                self.assertEqual([row[0] for row in rows[1:]], ['SENSOR_2'])
+                workbook.close()
+
     def test_cached_price_later_confirmed_does_not_get_backfilled_twice(self):
         _save_result({**self.item, 'is_cached': True, 'captured_at': '2026-01-01T00:00:00'}, self.db); self.db.commit()
         self.assertEqual(self.db.query(OfferObservation).count(), 0)
         _save_result(self.item, self.db); self.db.commit()
         self.assertEqual(self.db.query(OfferObservation).count(), 1)
         self.assertEqual(backfill_observations(self.db), 0)
+
 
     def test_freight_and_stock_changes_are_immutable(self):
         self.observe('2026-11-01T12:00:00')
@@ -107,6 +182,18 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(len(only['items']), 1)
         self.assertEqual(only['items'][0]['date'], '2026-11-02')
 
+    def test_stock_events_use_confirmed_observations_including_intraday_changes(self):
+        self.observe('2026-11-01T12:00:00', availability='in_stock')
+        self.observe('2026-11-02T12:00:00', price=None, availability='out_of_stock')
+        self.observe('2026-11-02T16:00:00', availability='in_stock')
+        self.observe('2026-11-04T12:00:00', availability=None)
+        self.observe('2026-11-04T16:00:00', price=None, availability='out_of_stock')
+        rows = {r['date']: r for r in history_report(self.db, date(2026,11,2), date(2026,11,4))['items']}
+        self.assertEqual([e['kind'] for e in rows['2026-11-02']['stock_events']], ['rupture', 'restock'])
+        self.assertEqual(rows['2026-11-02']['stock_events'][0]['previous_observed_at'], datetime(2026,11,1,12))
+        self.assertFalse(rows['2026-11-03']['stock_events'])
+        self.assertFalse(rows['2026-11-04']['stock_events'])
+
     def test_backfill_preserves_legacy_seller_and_is_idempotent(self):
         p = Product(sku='W11199342', name='Filtro', brand='BRASTEM')
         self.db.add(p); self.db.flush()
@@ -115,6 +202,21 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(backfill_observations(self.db), 1)
         self.assertEqual(backfill_observations(self.db), 0)
         self.assertEqual(self.db.query(OfferObservation).one().seller, 'Parceiro antigo')
+
+    def test_comparison_period_uses_observations_inside_brasilia_dates(self):
+        self.observe('2026-11-01T02:59:59',price=50)
+        self.observe('2026-11-01T03:00:00',price=100)
+        self.observe('2026-11-02T02:59:59',price=110)
+        self.observe('2026-11-02T03:00:00',price=999)
+        result=compare_groups(self.db,'source','Magazine Luiza','Brastemp',start=date(2026,11,1),end=date(2026,11,1))
+        self.assertEqual(result['groups'][0]['minimum'],110)
+        with self.assertRaises(ValueError):compare_groups(self.db,'source','Magazine Luiza','Brastemp',start=date(2026,11,2),end=date(2026,11,1))
+        _,client=self.client()
+        with client:
+            response=client.get('/analysis/comparison?left=Magazine%20Luiza&right=Brastemp&start=2026-11-01&end=2026-11-01')
+            self.assertEqual(response.status_code,200)
+            self.assertEqual(response.json()['groups'][0]['minimum'],110)
+            self.assertEqual(client.get('/analysis/comparison?left=Magazine%20Luiza&right=Brastemp&start=2026-11-02&end=2026-11-01').status_code,400)
 
     def test_store_and_brand_comparisons_use_latest_available_sellers(self):
         self.observe('2026-11-01T12:00:00')
@@ -152,6 +254,17 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(book.worksheets[0].max_column, 5)
         self.assertTrue(any(cell.value == '13010000' for row in book.worksheets[1] for cell in row))
 
+    def test_consolidated_listing_is_hidden_only_in_current_comparison(self):
+        self.observe('2026-11-02T12:00:00')
+        self.db.add(ProductSource(sku=self.item['sku'], store='magalu', seller=self.item['seller'],
+                                  url=self.item['url'], validation_status='consolidated', active=False))
+        self.db.commit()
+        current = compare_groups(self.db, 'source', 'Magazine Luiza', 'Brastemp')
+        self.assertEqual(current['groups'][0]['offers'], 0)
+        historical = compare_groups(self.db, 'source', 'Magazine Luiza', 'Brastemp', end=date(2026, 11, 2))
+        self.assertEqual(historical['groups'][0]['offers'], 1)
+        self.assertEqual(history_report(self.db, date(2026, 11, 2), date(2026, 11, 2))['total'], 1)
+
     def test_comparison_does_not_resurrect_old_brand_after_correction(self):
         self.observe('2026-11-01T12:00:00', brand='Brastemp')
         self.observe('2026-11-02T12:00:00', brand='Electrolux')
@@ -170,6 +283,21 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(destinations(self.db)[0]['postal_code'], '01001000')
         with self.assertRaises(ValueError): save_destinations(self.db, ['abc'])
         self.assertEqual(len(save_destinations(self.db, [])['destinations']), 27)
+
+    def test_extraction_destinations_keep_valid_addresses_when_one_cep_is_unknown(self):
+        from services.delivery_destinations import PostalCodeNotFound, first_quotable_cep, save_destinations
+        from unittest.mock import patch
+        def resolve(cep):
+            if cep == '01000000':
+                raise PostalCodeNotFound(cep)
+            return {'postal_code': cep, 'uf': 'SP', 'city': 'São Paulo'}
+        with patch('services.delivery_destinations.resolve_cep', side_effect=resolve):
+            self.assertEqual(first_quotable_cep(['01000000', '01001000']), '01001000')
+            result = save_destinations(self.db, ['01000000', '01001000', '02022010'], skip_unknown=True)
+            self.assertEqual([row['postal_code'] for row in result['destinations']], ['01001000', '02022010'])
+            self.assertEqual(result['unknown_postal_codes'], ['01000000'])
+            with self.assertRaises(ValueError):
+                save_destinations(self.db, ['01000000'], skip_unknown=True)
 
     def test_history_filter_pagination_and_all_rows_excel(self):
         self.observe('2026-11-01T12:00:00')

@@ -38,6 +38,8 @@ INTEGRATION_ENV_KEYS = {
 
 class IntegrationSettingsTests(unittest.TestCase):
     def setUp(self):
+        from tests.marketplace_fixture import isolate_marketplace_control
+        isolate_marketplace_control(self)
         self.previous_env = {key: os.environ.get(key) for key in INTEGRATION_ENV_KEYS}
         for key in INTEGRATION_ENV_KEYS:
             os.environ.pop(key, None)
@@ -134,6 +136,9 @@ class IntegrationSettingsTests(unittest.TestCase):
         self.assertEqual(len(items), 4)
         for item in items:
             self.assertTrue(item["credential_url"].startswith("https://"))
+            if item['provider']=='mercado_livre':
+                self.assertEqual(item['description'],'Conta do navegador para coleta de anúncios e cotações.')
+                continue
             self.assertTrue(
                 any(
                     marker in item["description"].lower()
@@ -160,6 +165,8 @@ class IntegrationSettingsTests(unittest.TestCase):
 
 class ExternalProviderTests(unittest.TestCase):
     def setUp(self):
+        from tests.marketplace_fixture import isolate_marketplace_control
+        isolate_marketplace_control(self)
         self.quota_patch = patch(
             "services.external_market_providers.reserve_provider_quota"
         )

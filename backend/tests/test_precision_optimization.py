@@ -61,6 +61,8 @@ class PrecisionOptimizationTests(unittest.TestCase):
             self.assertTrue(all(item['shipping_cost']==12 for item in items))
         engine.dispose()
     def setUp(self):
+        from tests.marketplace_fixture import isolate_marketplace_control
+        isolate_marketplace_control(self)
         self.url = 'https://www.dufrio.com.br/sensor-w10531315'
         product = {'@type': 'Product', 'name': 'Sensor W10531315', 'offers': {'@type': 'Offer',
                    'seller': {'name': 'Loja A'}, 'price': 20, 'shippingDetails': {'shippingRate': {'value': 12},

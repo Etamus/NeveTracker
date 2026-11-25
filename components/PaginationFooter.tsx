@@ -22,7 +22,7 @@ export default function PaginationFooter({
     <div className="panel-footer panel-footer--pagination">
       <p>Exibindo <strong>{rangeStart}-{rangeEnd}</strong> de <strong>{total}</strong></p>
       <nav className="pagination" aria-label="Paginação de produtos">
-        <button type="button" onClick={() => onPageChange(page - 1)} disabled={page <= 1} aria-label="Página anterior">
+        <button className="icon-only-button" type="button" onClick={() => onPageChange(page - 1)} disabled={page <= 1} aria-label="Página anterior">
           <ChevronLeft size={15} />
         </button>
         {pages.map((pageNumber) => (
@@ -36,7 +36,7 @@ export default function PaginationFooter({
             {pageNumber}
           </button>
         ))}
-        <button type="button" onClick={() => onPageChange(page + 1)} disabled={page >= totalPages} aria-label="Próxima página">
+        <button className="icon-only-button" type="button" onClick={() => onPageChange(page + 1)} disabled={page >= totalPages} aria-label="Próxima página">
           <ChevronRight size={15} />
         </button>
       </nav>

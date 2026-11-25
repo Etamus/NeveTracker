@@ -14,9 +14,6 @@ export default defineConfig(({ mode }) => {
         output: {
           manualChunks(id) {
             if (!id.includes("node_modules")) return undefined;
-            if (id.includes("recharts") || id.includes("d3-") || id.includes("victory-vendor")) {
-              return "charts";
-            }
             if (id.includes("lucide-react")) return "icons";
             return undefined;
           },
@@ -31,7 +28,7 @@ export default defineConfig(({ mode }) => {
       watch: {
         // Chromium locks its session databases while scraping. These runtime
         // files and backend outputs are not frontend sources or HMR inputs.
-        ignored: [/(?:^|[/\\])(?:\.tools|\.logs|backend|\.artifacts|\.iniciar\.lock|\.install\.lock|playwright-report|test-results)(?:[/\\]|$)/],
+        ignored: [/(?:^|[/\\])(?:\.tools|\.logs|backend|Nevereferencia|\.artifacts|\.iniciar\.lock|\.install\.lock|playwright-report|test-results)(?:[/\\]|$)/],
       },
     },
   };

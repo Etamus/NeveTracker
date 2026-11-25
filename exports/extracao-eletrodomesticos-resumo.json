@@ -1,0 +1,294 @@
+{
+  "job_id": "302c618b-aea4-4ac7-9c50-c939733143df",
+  "models": 47,
+  "offer_destination_records": 6920,
+  "unique_ads": 1384,
+  "unique_sellers": 260,
+  "confirmed_delivery_quotes": 5225,
+  "sku_postal_delivery_pairs": 234,
+  "expected_sku_postal_pairs": 235,
+  "missing_delivery_pairs": [
+    [
+      "MD-RT611EVK46",
+      "20211110"
+    ]
+  ],
+  "by_store": {
+    "Amazon Brasil": 60,
+    "Brastemp": 85,
+    "Consul": 145,
+    "Electrolux": 165,
+    "Magazine Luiza": 2995,
+    "Mercado Livre": 3240,
+    "Midea": 80,
+    "Shopee": 150
+  },
+  "by_postal": {
+    "30130003": 1384,
+    "80530908": 1384,
+    "20211110": 1384,
+    "90010170": 1384,
+    "01002020": 1384
+  },
+  "postal_codes": [
+    "01002020",
+    "20211110",
+    "30130003",
+    "80530908",
+    "90010170"
+  ],
+  "sheets": {
+    "Parâmetros": 8,
+    "Database": 6920,
+    "Ofertas": 6920,
+    "Catálogo": 1384,
+    "Analytics por SKU": 235,
+    "Preço por loja": 755,
+    "Comparar lojas": 235,
+    "Lead Time detalhes": 6920,
+    "Frete por estado": 6920,
+    "Lead Time matriz": 1384,
+    "Histórico de preços": 6955,
+    "Evolução de preços": 1,
+    "Cadastros": 47,
+    "Cobertura da extração": 1880
+  },
+  "views": {
+    "BLF61AR": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 5,
+      "shipping_states": 5
+    },
+    "BRE66AK": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 4,
+      "shipping_states": 5
+    },
+    "BRM46MB": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 5,
+      "shipping_states": 5
+    },
+    "BRM46MK": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 4,
+      "shipping_states": 5
+    },
+    "BRM62AK": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 4,
+      "shipping_states": 5
+    },
+    "BRO88AK": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 4,
+      "shipping_states": 5
+    },
+    "BWF16AB": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "BWF18AB": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 4,
+      "shipping_states": 5
+    },
+    "BWJ14A9": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 4,
+      "shipping_states": 5
+    },
+    "BWJ14AB": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "CFO4NAR": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "CHA31MB": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "CHB53MB": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 4,
+      "shipping_states": 5
+    },
+    "CRA30MB": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "CRD37MB": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 4,
+      "shipping_states": 5
+    },
+    "CRE45MB": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 2,
+      "shipping_states": 5
+    },
+    "CRM40MB": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "CRM44MK": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "CRM53MK": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "CVU20MB": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "CWB10BB": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "CWH13AB": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "CWN14AB": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "CWN16AB": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 4,
+      "shipping_states": 5
+    },
+    "CZD12MT": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "LS14E": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "IB7S": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "IF44": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "IF44S": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 4,
+      "shipping_states": 5
+    },
+    "TF71S": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 4,
+      "shipping_states": 5
+    },
+    "IM8S": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "LEE15": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 4,
+      "shipping_states": 5
+    },
+    "LEE18": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "LEP15": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "300001610": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 2,
+      "shipping_states": 5
+    },
+    "HI330": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "HI550": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "RE31": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 4,
+      "shipping_states": 5
+    },
+    "MD-RT411FGF01": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "IB6": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "TF38": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "MD-RT611EVK46": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 2,
+      "shipping_states": 4
+    },
+    "FEI19": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "LED09": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 2,
+      "shipping_states": 5
+    },
+    "LDA13": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "MA512W150A": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    },
+    "MDRX150FGGDX01": {
+      "lead_time_has_offers": true,
+      "lead_time_stores": 3,
+      "shipping_states": 5
+    }
+  },
+  "export": "C:\\Users\\Etamus\\Documents\\NeveTracker\\exports\\extracao-eletrodomesticos-5-ceps.xlsx"
+}

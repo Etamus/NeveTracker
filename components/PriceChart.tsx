@@ -28,7 +28,6 @@ export const PriceChart = ({ products }: PriceChartProps) => {
   const [interfacePreferences, setInterfacePreferences] = useState<InterfacePreferences>(getInterfacePreferences);
   const currencyFormatter = useMemo(() => createCurrencyFormatter(interfacePreferences, 0, 0), [interfacePreferences]);
   const preciseCurrencyFormatter = useMemo(() => createCurrencyFormatter(interfacePreferences), [interfacePreferences]);
-  const cheapestByStore = new Map<string, { store: string; price: number }>();
 
   useEffect(() => {
     const syncPreferences = () => setInterfacePreferences(getInterfacePreferences());
@@ -36,18 +35,15 @@ export const PriceChart = ({ products }: PriceChartProps) => {
     return () => window.removeEventListener(INTERFACE_PREFERENCES_EVENT, syncPreferences);
   }, []);
 
-  products.forEach((product) => {
-    if (product.current_price == null || !offerIsAvailable(product)) return;
-    const price = Number(product.current_price);
-    if (!Number.isFinite(price) || price <= 0) return;
-
-    const current = cheapestByStore.get(product.store);
-    if (!current || price < current.price) {
-      cheapestByStore.set(product.store, { store: product.store, price });
+  const chartData = useMemo(() => {
+    const cheapest = new Map<string, number>();
+    for (const product of products) {
+      const price = product.current_price;
+      if (price == null || !Number.isFinite(price) || price <= 0 || !offerIsAvailable(product)) continue;
+      if (price < (cheapest.get(product.store) ?? Infinity)) cheapest.set(product.store, price);
     }
-  });
-
-  const chartData = [...cheapestByStore.values()].sort((a, b) => a.price - b.price);
+    return [...cheapest].map(([store, price]) => ({ store, price })).sort((a, b) => a.price - b.price);
+  }, [products]);
 
   if (!chartData.length) return null;
 

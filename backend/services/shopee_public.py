@@ -11,7 +11,7 @@ import re
 from urllib.parse import unquote, urlparse
 
 from bs4 import BeautifulSoup
-from services.product_resolver import resolve_candidate
+from services.product_resolver import appliance_variant, normalize_text, resolve_candidate
 
 MOBILE_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36',
@@ -60,7 +60,8 @@ def parse_payload(payload, source, identity, shop=None, provenance='shopee_inter
     if not isinstance(payload, dict):
         return {'status': 'PARSER_ERROR', 'reason': 'Resposta Shopee sem objeto JSON'}
     if payload.get('error'):
-        return {'status': 'BLOCKED', 'reason': f"Shopee recusou a coleta (erro {payload['error']}); login/verificação pode ser necessário."}
+        denied=payload['error']==90309999
+        return {'status':'BLOCKED' if denied else 'HTTP_ERROR','reason':f"Shopee recusou a coleta (erro {payload['error']})." if denied else f"Erro temporário na resposta Shopee ({payload['error']})."}
     url_shop, url_item = item_ids(source.url)
     shop_id = str(getattr(source, 'shop_id', None) or url_shop or '')
     item_id = str(getattr(source, 'item_id', None) or url_item or '')
@@ -81,6 +82,16 @@ def parse_payload(payload, source, identity, shop=None, provenance='shopee_inter
                      'brand': item.get('brand', {}).get('name') if isinstance(item.get('brand'), dict) else item.get('brand'),
                      'model': next((attribute.get('value') for attribute in item.get('attributes') or [] if isinstance(attribute, dict) and str(attribute.get('name', '')).lower() in {'modelo', 'model'}), None),
                      'item_id': item_id, 'shop_id': shop_id}
+        if appliance_variant(identity.sku):
+            models = item.get('models') or block.get('models') or []
+            labels = {normalize_text(model.get('name')) for model in models if isinstance(model, dict) and model.get('name')}
+            if len(models) > 1 and (not labels or len(labels) > 1):
+                return {'status': 'INVALID_MATCH', 'reason': 'O anúncio não identificou uma única variante selecionada.'}
+            candidate['voltage'] = next(
+                (attribute.get('value') for attribute in item.get('attributes') or []
+                 if isinstance(attribute, dict) and normalize_text(attribute.get('name')) in {'voltagem', 'tensao', 'voltage'}),
+                None,
+            ) or ' '.join(labels)
         # The slug can retain an old SKU after a seller changes the listing.
         # Only the returned title/attributes can confirm the material itself.
         match = resolve_candidate(identity, {**candidate, 'url': f'https://shopee.com.br/product/{shop_id}/{item_id}'})
@@ -95,7 +106,9 @@ def parse_payload(payload, source, identity, shop=None, provenance='shopee_inter
             saved_seller = None
         seller = shop_data.get('name') or account.get('username') or saved_seller or f'Shopee Loja {shop_id}'
         raw_price = item.get('price')
-        display_price = (block.get('product_price') or {}).get('price')
+        product_price = block.get('product_price') or {}
+        display_price = product_price.get('price')
+        conditional_price = bool(product_price.get('has_final_price') or product_price.get('final_price_vouchers'))
         if isinstance(display_price, dict):
             raw_price = display_price.get('single_value')
             interval = display_price.get('range') or {}
@@ -103,23 +116,32 @@ def parse_payload(payload, source, identity, shop=None, provenance='shopee_inter
                 raw_price = interval.get('min')
         elif display_price is not None:
             raw_price = display_price
+        if conditional_price:
+            # The large displayed number may include a personal voucher and
+            # Pix discount. Publish the ordinary price explicitly returned
+            # by the same item, never the conditional final price.
+            raw_price = item.get('price')
         if raw_price is None and item.get('price_min') == item.get('price_max'):
             raw_price = item.get('price_min')
-        unavailable = item.get('stock') == 0 or str(item.get('item_status')).lower() in {'sold_out', 'out_of_stock'}
+        models = item.get('models') or []
+        unavailable = item.get('stock') == 0 or item.get('is_unavailable') is True or str(item.get('item_status')).lower() in {'sold_out', 'out_of_stock'}
+        if models and all(model.get('has_stock') is False for model in models):
+            unavailable = True
         price = money(raw_price)
         if price is None and not unavailable:
             return {'status': 'BLOCKED' if block.get('removed_fields') else 'PARSER_ERROR',
                     'reason': 'A página pública identifica o produto, mas não libera seu preço. Nenhum preço ou estoque foi presumido.',
                     'candidate': {**candidate, 'seller': seller}, 'match': match}
         plan = next((value for value in item.get('installment_plans') or [] if isinstance(value, dict)), {})
-        count = plan.get('installment_count') or plan.get('tenure')
-        installment = money(plan.get('installment_amount'))
+        plan = plan or (product_price.get('installment_info') or {}).get('recommended_plan') or {}
+        count = plan.get('installment_count') or plan.get('tenure') or plan.get('months')
+        installment = money(plan.get('installment_amount') or plan.get('pay_per_month'))
         total = round(count * installment, 2) if isinstance(count, int) and count > 0 and installment else None
         result = {**candidate, 'sku': identity.sku, 'category': identity.sku, 'brand': candidate['brand'] or identity.brand or 'Não informada',
                   'store': seller, 'seller': seller, 'source': 'Shopee', 'price': price, 'cash_price': price,
                   'installment_count': count, 'installment_value': installment, 'installment_price': total,
                   'payment_difference': round(max(0, total-price), 2) if total and price is not None else None,
-                  'availability': 'out_of_stock' if unavailable else 'in_stock' if item.get('stock') is not None and item['stock'] > 0 else None,
+                  'availability': 'out_of_stock' if unavailable else 'in_stock' if (item.get('stock') is not None and item['stock'] > 0) or any(model.get('has_stock') is True for model in models) else None,
                   'image_url': f"https://down-br.img.susercontent.com/file/{item['image']}" if item.get('image') else None,
                   'match_confidence': match.confidence, 'match_method': match.method,
                   'captured_at': datetime.utcnow().isoformat(), 'discovery_source': provenance}
@@ -146,25 +168,81 @@ def parse_public_html(html, source, identity):
     if last:
         return last
     text = soup.get_text(' ', strip=True)
-    if re.search(r'login necess[aá]rio|fa[cç]a login para continuar|captcha|verifica[cç][aã]o', text, re.I):
+    if re.search(r'login necess[aá]rio|fa[cç]a login para continuar|captcha|verifique sua identidade|verifica[cç][aã]o de seguran[cç]a|atividade incomum', text, re.I):
         return {'status': 'BLOCKED', 'reason': 'Shopee solicitou login/verificação; a coleta não foi confirmada.'}
     return {'status': 'PARSER_ERROR', 'reason': 'HTML público sem dados estruturados do anúncio'}
 
 
-def collect_browser(source, identity, timeout=15):
+def collect_account_product(source, identity, postal_code=None, timeout=15):
+    from services.marketplace_intervention import suspension as pending,require_access,defer_access
+    access=pending('shopee')
+    if access:return {'status':'ACCESS_REQUIRED','reason':access['reason']}
+    result=collect_browser(source, identity, timeout, postal_code=postal_code)
+    if result.get('status')=='OK' and (result.get('item') or {}).get('_access_required'):
+        defer_access('shopee',identity.sku,(result.get('item') or {}).get('_logistics_error'),seconds=180)
+    elif result.get('status') in {'BLOCKED','LOGIN_REQUIRED'} or (result.get('item') or {}).get('_access_required'):
+        require_access('shopee',identity.sku,result.get('reason') or (result.get('item') or {}).get('_logistics_error'),source.url)
+    elif result.get('status') in {'BROWSER_BUSY','BROWSER_ERROR','TIMEOUT','RETRY_LATER','LOGIN_PENDING'}:
+        defer_access('shopee',identity.sku,result.get('reason'))
+    return result
+
+
+def collect_browser(source, identity, timeout=15, postal_code=None):
     """Observe the public page's own responses; never solve a login challenge."""
+    from services.marketplace_session import ensure_account_browser
+    if ensure_account_browser('shopee'):
+        from services.shopee_page_transport import read_page
+        from services.marketplace_access import limited, record_limit
+        blocked = limited('shopee')
+        if blocked:
+            return blocked
+        if not all(item_ids(source.url)):
+            return {'status': 'INVALID_MATCH', 'reason': 'URL fora de um anúncio Shopee Brasil'}
+        try:
+            fetched = read_page(source.url, timeout, ('/api/v4/pdp/get_pc', '/api/v4/pdp/get_rw', '/api/v4/item/get'), postal_code=postal_code)
+            if fetched.get('status') != 'OK':
+                return {'status': fetched['status'], 'reason': fetched.get('reason')}
+            access_refused=False
+            for response in fetched.get('payloads', []):
+                payload = response['data']
+                if payload.get('error') == 90309999:
+                    record_limit('shopee')
+                if payload.get('error')==90309999:access_refused=True
+                result = parse_payload(payload, source, identity, provenance='shopee_account_page')
+                if result['status'] == 'OK':
+                    if access_refused:result['item']['_access_required']=True
+                    if postal_code:
+                        from services.shopee_shipping import parse_shipping
+                        shop,item=item_ids(source.url)
+                        result['item'].update(parse_shipping(payload,shop,item,postal_code))
+                        if result['item'].get('delivery_max_days') is None:
+                            result['item']['_logistics_error']=fetched.get('postal_error') or 'A Shopee não confirmou entrega para este CEP.'
+                    return result
+            result=parse_public_html(fetched.get('html', ''), source, identity)
+            if access_refused:
+                if result.get('status')=='OK':
+                    result['item']['_access_required']=True
+                    result['item']['_logistics_error']='A Shopee recusou a consulta do anúncio ou da entrega (erro 90309999).'
+                else:return {'status':'BLOCKED','reason':'A Shopee recusou a consulta deste anúncio (erro 90309999).'}
+            return result
+        except Exception as exc:
+            return {'status': 'BROWSER_ERROR', 'reason': str(exc)[:250]}
     from urllib.parse import parse_qs
-    from services.playwright_fallback import BROWSER_SLOT
+    from services.marketplace_session import configuration,account_context,session_status
+    profile,BROWSER_SLOT,_,_=configuration('shopee')
+    if session_status('shopee')['status'] in {'opening','waiting'}:
+        return {'status':'LOGIN_PENDING','reason':'Conclua o login da Shopee na janela aberta.'}
     from services.browser_health import record_browser_result
     import time
     if not all(item_ids(source.url)):
         return {'status': 'INVALID_MATCH', 'reason': 'URL fora de um anúncio Shopee Brasil'}
     try:
-        from playwright.sync_api import sync_playwright
+        from patchright.sync_api import sync_playwright
         with BROWSER_SLOT, sync_playwright() as runtime:
-            browser = runtime.chromium.launch(headless=True, timeout=8000)
+            profile.mkdir(parents=True,exist_ok=True)
+            manager=account_context(runtime,'shopee')
+            context=manager.__enter__()
             try:
-                context = browser.new_context(**runtime.devices['Pixel 7'], locale='pt-BR')
                 page = context.new_page()
                 results = []
                 expected_shop, expected_item = item_ids(source.url)
@@ -199,6 +277,7 @@ def collect_browser(source, identity, timeout=15):
                 record_browser_result(source.url, result['status'])
                 return result
             finally:
-                browser.close()
+                if not page.is_closed():page.close()
+                manager.__exit__(None,None,None)
     except Exception as exc:
         return {'status': 'BROWSER_ERROR', 'reason': str(exc)[:250]}

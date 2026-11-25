@@ -6,6 +6,8 @@ import unicodedata
 from datetime import datetime
 from threading import BoundedSemaphore
 from urllib.parse import urlparse
+from services.extraction_resources import check_cancelled
+from services.public_browser_pool import public_render, public_runtime
 
 
 BROWSER_SLOT = BoundedSemaphore(2)
@@ -19,19 +21,22 @@ def _skip_heavy_assets(page):
     )
 
 
+@public_render
 def render_discovery_page(url, timeout_seconds=15):
     """Render one public discovery page; parsing and host checks stay with the caller."""
     with BROWSER_SLOT:
+        check_cancelled()
         try:
-            from playwright.sync_api import TimeoutError as BrowserTimeout, sync_playwright
+            from playwright.sync_api import TimeoutError as BrowserTimeout
 
-            with sync_playwright() as runtime:
+            with public_runtime() as runtime:
                 browser = runtime.chromium.launch(headless=True, timeout=10000)
                 try:
                     page = browser.new_page(locale="pt-BR")
                     page.set_default_timeout(timeout_seconds * 1000)
                     _skip_heavy_assets(page)
                     response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_seconds * 1000)
+                    check_cancelled()
                     if response and response.status >= 400:
                         return page.content(), page.url
                     if "/gp/offer-listing/" in url:
@@ -58,19 +63,22 @@ def render_discovery_page(url, timeout_seconds=15):
             return None
 
 
+@public_render
 def render_product_page(url, timeout_seconds=15, page_handler=None, ready_identifier=None):
     """Render a public PDP with bounded navigation, JS wait and guaranteed cleanup."""
     with BROWSER_SLOT:
+        check_cancelled()
         try:
-            from playwright.sync_api import TimeoutError as BrowserTimeout, sync_playwright
+            from playwright.sync_api import TimeoutError as BrowserTimeout
 
-            with sync_playwright() as runtime:
+            with public_runtime() as runtime:
                 browser = runtime.chromium.launch(headless=True, timeout=10000)
                 try:
                     page = browser.new_page(locale="pt-BR")
                     page.set_default_timeout(timeout_seconds * 1000)
                     _skip_heavy_assets(page)
                     response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_seconds * 1000)
+                    check_cancelled()
                     status = response.status if response else 0
                     if status in {401, 403, 429}:
                         return {"status": "BLOCKED", "reason": f"Navegador HTTP {status}"}
@@ -92,6 +100,7 @@ def render_product_page(url, timeout_seconds=15, page_handler=None, ready_identi
                         )
                     except BrowserTimeout:
                         pass
+                    check_cancelled()
                     return page_handler(page) if page_handler else {"status": "OK", "html": page.content(), "url": page.url}
                 finally:
                     browser.close()
@@ -271,6 +280,7 @@ def _woocommerce_rate_details(cart):
             "delivery_days_type": selected[0]["delivery_days_type"] if all(option["delivery_days_type"] == selected[0]["delivery_days_type"] for option in selected) else None}
 
 
+@public_render
 def collect_shipping_with_playwright(url, postal_code, timeout_seconds=15):
     if not postal_code:
         return {}
@@ -278,16 +288,16 @@ def collect_shipping_with_playwright(url, postal_code, timeout_seconds=15):
     if not shipping_form_available(url):
         return {"_unsupported_shipping": True}
     with BROWSER_SLOT:
+        check_cancelled()
         try:
-            from playwright.sync_api import sync_playwright
-
-            with sync_playwright() as runtime:
+            with public_runtime() as runtime:
                 browser = runtime.chromium.launch(headless=True, timeout=10000)
                 try:
                     page = browser.new_page(locale="pt-BR")
                     page.set_default_timeout(timeout_seconds * 1000)
                     _skip_heavy_assets(page)
                     response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_seconds * 1000)
+                    check_cancelled()
                     if response and response.status in {403, 429}:
                         return {"_blocked_status": response.status}
                     if urlparse(page.url).hostname != urlparse(url).hostname:
@@ -297,8 +307,8 @@ def collect_shipping_with_playwright(url, postal_code, timeout_seconds=15):
                         record_shipping_form_found(url)
                         return platform_quote
                     zip_input = page.locator(
-                        'input[placeholder*="CEP" i], input[name*="cep" i], input[id*="cep" i], '
-                        'input[placeholder*="postal" i]'
+                        'input:is([placeholder*="CEP" i], [name*="cep" i], [id*="cep" i], '
+                        '[placeholder*="postal" i]):not([type="checkbox"]):not([type="radio"]):not([type="hidden"]):not([type="button"]):not([type="submit"]):not([disabled]):not([readonly]):visible'
                     ).first
                     if not zip_input.count():
                         try:
@@ -308,6 +318,7 @@ def collect_shipping_with_playwright(url, postal_code, timeout_seconds=15):
                             return {"_unsupported_shipping": True}
                     record_shipping_form_found(url)
                     before = _shipping_texts(page)
+                    check_cancelled()
                     zip_input.fill(postal_code)
                     form = zip_input.locator("xpath=ancestor::form[1]")
                     button = form.locator('button:has-text("Calcular"), button:has-text("Consultar"), button[type="submit"], input[type="submit"]').first

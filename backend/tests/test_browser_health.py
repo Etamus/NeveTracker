@@ -8,6 +8,41 @@ from services.scrape_pagination import browser_retry_due
 
 
 class BrowserHealthTests(unittest.TestCase):
+    def test_transient_backoff_grows_and_does_not_shorten_a_captcha_block(self):
+        url = 'https://example.test/product'
+        with patch('services.extraction_resources.settings', return_value={'browser_failure_cooldown_seconds':30}):
+            with patch('services.browser_health.time.monotonic', return_value=100):
+                record_browser_result(url,'TIMEOUT')
+                record_browser_result(url,'TIMEOUT')
+            with patch('services.browser_health.time.monotonic', return_value=129):
+                self.assertFalse(browser_available(url))
+            with patch('services.browser_health.time.monotonic', return_value=131):
+                self.assertTrue(browser_available(url))
+                record_browser_result(url,'TIMEOUT')
+            with patch('services.browser_health.time.monotonic', return_value=190):
+                self.assertFalse(browser_available(url))
+            with patch('services.browser_health.time.monotonic', return_value=192):
+                self.assertTrue(browser_available(url))
+                record_browser_result(url,'BLOCKED')
+                record_browser_result(url,'TIMEOUT')
+            with patch('services.browser_health.time.monotonic', return_value=700):
+                self.assertFalse(browser_available(url))
+            with patch('services.browser_health.time.monotonic', return_value=793):
+                self.assertTrue(browser_available(url))
+                record_browser_result(url,'OK')
+                self.assertTrue(browser_available(url))
+
+    def test_repeated_browser_transport_failure_uses_short_host_only_cooldown(self):
+        url='https://html.duckduckgo.com/html/?q=W10531315'
+        with patch('services.browser_health.time.monotonic', return_value=100):
+            record_browser_result(url,'BROWSER_ERROR')
+            self.assertTrue(browser_available(url))
+            record_browser_result(url,'TIMEOUT')
+            self.assertFalse(browser_available(url))
+            self.assertTrue(browser_available('https://www.friolarpecas.com.br/'))
+        with patch('services.browser_health.time.monotonic', return_value=161):
+            self.assertTrue(browser_available(url))
+
     def test_all_inaccessible_catalog_urls_get_diagnostics_without_extra_queue_rounds(self):
         from services.scrape_pagination import _seller_page_batch
         url = 'https://www.mercadolivre.com.br/item/p/MLB123'

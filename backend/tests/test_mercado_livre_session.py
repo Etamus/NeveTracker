@@ -15,6 +15,8 @@ from services.scrape_pagination import browser_retry_due
 
 class MercadoLivreSessionTests(unittest.TestCase):
     def setUp(self):
+        from tests.marketplace_fixture import isolate_marketplace_control
+        isolate_marketplace_control(self)
         self.app = FastAPI()
         self.app.include_router(integration_router, prefix='/integrations')
         self.client = TestClient(self.app)

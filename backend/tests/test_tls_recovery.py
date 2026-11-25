@@ -11,6 +11,28 @@ from services.product_resolver import ProductIdentity
 
 
 class TlsRecoveryTests(unittest.TestCase):
+    def test_scrapy_downloads_identical_url_once_and_validates_each_seller(self):
+        import asyncio
+
+        url = "https://www.dufrio.com.br/sensor-w10531315"
+        sources = [SimpleNamespace(id=index, url=url, store="dufrio", seller=seller)
+                   for index, seller in enumerate(("Loja A", "Loja B"), 1)]
+        output = {}
+        spider = ProductSourceSpider(sources, ProductIdentity(sku="W10531315"), output)
+
+        async def collect_requests():
+            return [request async for request in spider.start()]
+
+        requests = asyncio.run(collect_requests())
+        self.assertEqual(len(requests), 1)
+        with patch("crawlers.scrapy_engine.parse_product_response", side_effect=[
+            ValueError("Falha de parser na loja A"), {"status": "OK", "item": {"seller": "Loja B"}},
+        ]) as parse:
+            spider.parse_source(HtmlResponse(url=url), **requests[0].cb_kwargs)
+        self.assertEqual([call.args[1].seller for call in parse.call_args_list], ["Loja A", "Loja B"])
+        self.assertEqual(output[1]["status"], "PARSER_ERROR")
+        self.assertEqual(output[2]["item"]["seller"], "Loja B")
+
     def test_magalu_storefront_keeps_product_and_seller_without_redirecting_other_sites(self):
         from services.magalu_public import public_storefront_url
         source = "https://www.magazineluiza.com.br/compressor/p/abc123/ed/acrf/?seller_id=lojista"

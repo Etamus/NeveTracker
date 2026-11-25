@@ -237,8 +237,14 @@ class AuthTests(unittest.TestCase):
         admin=self.login('ADMIN2','5678')
         self.assertEqual(self.client.get('/integrations',headers=admin).status_code,200)
         self.assertEqual(self.client.get('/products/crawler-control',headers=admin).status_code,200)
-        control=self.client.put('/products/crawler-control',headers=admin,json={'default_mode':'precise'})
-        self.assertEqual(control.status_code,200,control.text)
+        for enabled in (True, False):
+            control = self.client.put('/products/crawler-control', headers=admin,
+                                      json={'default_mode': 'precise', 'hardware_acceleration': enabled})
+            self.assertEqual(control.status_code, 200, control.text)
+            self.assertIs(control.json()['hardware_acceleration'], enabled)
+            saved = self.client.get('/products/crawler-control', headers=admin)
+            self.assertEqual(saved.status_code, 200, saved.text)
+            self.assertIs(saved.json()['hardware_acceleration'], enabled)
         subordinate=self.client.post('/auth/users',headers=admin,json={'username':'ADMIN3','password':'5678','role':'administrator'})
         self.assertEqual(subordinate.status_code,201,subordinate.text)
         target=subordinate.json()['id']

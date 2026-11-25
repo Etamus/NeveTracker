@@ -23,6 +23,8 @@ from services.playwright_fallback import render_discovery_page
 
 class IndexedDiscoveryTests(unittest.TestCase):
     def setUp(self):
+        from tests.marketplace_fixture import isolate_marketplace_control
+        isolate_marketplace_control(self)
         self.identity = ProductIdentity(sku="W11199342")
 
     def test_browser_waits_for_delayed_public_cards(self):

@@ -4,7 +4,7 @@ import json
 import re
 import hashlib
 from datetime import datetime, timedelta
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from sqlalchemy.orm import object_session
 
 from models.product import ProductSource, ScrapeCursor
@@ -21,12 +21,29 @@ from services.browser_health import browser_available, record_browser_result
 from crawlers.indexed_discovery import SEARCH_ENGINES, fetch_indexed_page, indexed_search_url
 
 
+OPERATIONAL_KINDS = frozenset({"search", "indexed_search", "seller_offers"})
+
 REFRESH_AFTER = timedelta(hours=24)
 FAILED_RETRY_AFTER = timedelta(minutes=30)
 AMAZON_OFFER_PAGES_PER_RUN = 5
 SELLER_OFFER_PAGES_PER_RUN = 4
 BROWSER_ATTEMPTS_PER_RUN = 3
-MULTI_SELLER_STORES = {"mercado_livre", "shopee", "leroy_merlin", "magalu"}
+MULTI_SELLER_STORES = {"mercado_livre", "leroy_merlin", "magalu"}
+
+
+def retire_redundant_seller_pages(db, sku):
+    db.query(ScrapeCursor).filter(ScrapeCursor.sku == sku,
+        ScrapeCursor.kind.notin_(OPERATIONAL_KINDS), ScrapeCursor.completed.is_(False)).update(
+        {ScrapeCursor.completed: True, ScrapeCursor.last_status: 'AUDIT_ONLY',
+         ScrapeCursor.failure_reason: 'Registro de auditoria; não é uma página da fila.'},
+        synchronize_session=False)
+    # A Shopee PDP belongs to one shop/item. Its sellers are discovered through
+    # search pagination; the PDP is already collected as a ProductSource.
+    # There is no second multi-seller page to crawl for that same listing.
+    db.query(ScrapeCursor).filter_by(sku=sku, store='shopee', kind='seller_offers').update(
+        {ScrapeCursor.completed: True, ScrapeCursor.last_status: 'NOT_APPLICABLE',
+         ScrapeCursor.failure_reason: 'Anúncio individual já tratado pela coleta de produto.'},
+        synchronize_session=False)
 
 
 def _cursor(db, sku, store, kind, key, initial_url):
@@ -59,8 +76,29 @@ def _cursor(db, sku, store, kind, key, initial_url):
     return cursor
 
 
+def pagination_key(url):
+    """Ignore tracking changes, while preserving real page/offset/seller tokens."""
+    parsed=urlparse(str(url or ''))
+    ignored={'fpig','form','ghsh','ghacc','ghpl','cvid'} if (parsed.hostname or '').endswith('bing.com') else set()
+    query=sorted((key,value) for key,value in parse_qsl(parsed.query,keep_blank_values=True)
+                 if key.lower() not in ignored and not key.lower().startswith('utm_'))
+    return urlunparse(parsed._replace(path=parsed.path.rstrip('/') or '/',query=urlencode(query),fragment=''))
+
+
 def _advance(cursor, initial_url, fetch, progress):
     now = datetime.utcnow()
+    if getattr(cursor, 'kind', None) == 'search' and cursor.next_url:
+        from crawlers.paged_discovery import preserve_search_scope
+        if pagination_key(preserve_search_scope(initial_url, cursor.next_url)) != pagination_key(cursor.next_url):
+            # Old checkpoints may already have escaped the search. Restart this
+            # query so pages skipped by that historical bug are recovered too.
+            cursor.next_url = initial_url
+            cursor.completed = False
+            cursor.visited_urls = '[]'
+            cursor.last_status = None
+            cursor.last_attempted_at = None
+            cursor.browser_attempted_at = None
+            cursor.browser_attempted_url = None
     cursor.last_checked_at = now
     if cursor.completed:
         if cursor.updated_at and now - cursor.updated_at < REFRESH_AFTER:
@@ -68,6 +106,11 @@ def _advance(cursor, initial_url, fetch, progress):
         cursor.next_url = initial_url
         cursor.completed = False
         cursor.visited_urls = "[]"
+    from services.marketplace_intervention import suspension as pending,defer_access
+    access=pending(getattr(cursor,'store',None))
+    if access:
+        cursor.last_status='ACCESS_REQUIRED';cursor.failure_reason=access['reason']
+        return []
     current_url = cursor.next_url or initial_url
     cursor.initial_url = getattr(cursor, "initial_url", None) or initial_url
     cursor.next_url = current_url
@@ -101,6 +144,7 @@ def _advance(cursor, initial_url, fetch, progress):
             diagnostics.update(status="PARSER_ERROR", reason=str(exc)[:300])
     cursor.last_attempted_at = now
     used_browser = False
+    browser_checked=False
     if not success and (
         browser_available(current_url)
         and diagnostics.get("status") != "SEARCH_MISMATCH"
@@ -118,6 +162,7 @@ def _advance(cursor, initial_url, fetch, progress):
         cursor.browser_attempted_at = now
         cursor.browser_attempted_url = current_url
         browser_diagnostics = {}
+        browser_checked=True
         try:
             browser_items, browser_next, browser_success = fetch(
                 current_url, diagnostics=browser_diagnostics, use_browser=True,
@@ -126,15 +171,14 @@ def _advance(cursor, initial_url, fetch, progress):
             browser_items, browser_next, browser_success = [], None, False
             browser_diagnostics.update(status="PARSER_ERROR", reason=str(exc)[:300])
         if cursor.store != "mercado_livre":
-            record_browser_result(current_url, "OK" if browser_success else (
-                diagnostics.get("status") if diagnostics.get("status") in {"BLOCKED", "LOGIN_REQUIRED"}
-                else browser_diagnostics.get("status")
-            ))
+            record_browser_result(current_url, "OK" if browser_success else browser_diagnostics.get("status"))
         if browser_success:
             items, next_url, success = browser_items, browser_next, True
             diagnostics = browser_diagnostics
             used_browser = True
         else:
+            if cursor.store in {'mercado_livre','shopee'} and browser_diagnostics.get('status'):
+                diagnostics['status']=browser_diagnostics['status']
             diagnostics["reason"] = (
                 f"{diagnostics.get('reason') or 'HTML indisponivel'}; "
                 f"navegador: {browser_diagnostics.get('reason') or 'sem resultado'}"
@@ -142,16 +186,34 @@ def _advance(cursor, initial_url, fetch, progress):
     if not success:
         cursor.last_status = diagnostics.get("status") or "PARSER_ERROR"
         cursor.failure_reason = str(diagnostics.get("reason") or "Pagina indisponivel")[:500]
+        if cursor.store in {'mercado_livre','shopee'} and cursor.last_status in {'BLOCKED','LOGIN_REQUIRED','ACCESS_REQUIRED'} and browser_checked:
+            from services.marketplace_intervention import require_access
+            require_access(cursor.store,cursor.sku,cursor.failure_reason,current_url)
+        elif cursor.last_status in {'BROWSER_BUSY','BROWSER_ERROR','TIMEOUT','RETRY_LATER','LOGIN_PENDING'}:
+            defer_access(cursor.store,cursor.sku,cursor.failure_reason)
         return []
+    if used_browser:
+        from services.marketplace_intervention import record_transport_recovery
+        record_transport_recovery(cursor.store)
     cursor.last_status = "OK_BROWSER" if used_browser else "OK"
+    if next_url and getattr(cursor, 'kind', None) == 'search':
+        from crawlers.paged_discovery import preserve_search_scope
+        next_url = preserve_search_scope(initial_url, next_url)
     cursor.failure_reason = None
     try:
         visited = set(json.loads(cursor.visited_urls or "[]"))
     except (TypeError, ValueError):
         visited = set()
     visited.add(current_url)
-    if next_url in visited:
+    if next_url and pagination_key(next_url) in {pagination_key(value) for value in visited}:
         next_url = None
+    if items:
+        identities=sorted({(pagination_key(item.get('url')),str(item.get('seller') or item.get('store') or ''))
+                           for item in items if item.get('url')})
+        if identities:
+            fingerprint='page-sha256:'+hashlib.sha256(json.dumps(identities,ensure_ascii=False).encode()).hexdigest()
+            if fingerprint in visited:next_url=None
+            visited.add(fingerprint)
     cursor.visited_urls = json.dumps(sorted(visited))
     cursor.next_url = next_url or initial_url
     cursor.completed = not bool(next_url)
@@ -296,12 +358,28 @@ def _seller_page_batch(cursors, limit):
 
 def browser_retry_due(cursor, now=None):
     now = now or datetime.utcnow()
+    if getattr(cursor, "kind", None) is not None and cursor.kind not in OPERATIONAL_KINDS:
+        return False
+    if getattr(cursor, 'last_status', None) == 'SEARCH_MISMATCH':
+        # _advance deliberately excludes these pages from browser recovery.
+        # Classifying them as actionable creates a permanent no-op queue loop.
+        return False
+    if getattr(cursor, 'kind', None) == 'indexed_search':
+        # A store-session validation cannot unlock Bing/DuckDuckGo. Their
+        # failed HTTP cursors have no browser fallback and used to stay due
+        # forever simply because browser_attempted_at was empty.
+        return False
+    from services.marketplace_intervention import suspension as pending,released_after
+    if pending(getattr(cursor,'store',None)):return False
+    if getattr(cursor,'store',None) in {'mercado_livre','shopee'} and not cursor.completed and cursor.last_status not in {None,'OK','OK_BROWSER'}:
+        if released_after(cursor.store,cursor.last_attempted_at):return True
+    if getattr(cursor,'store',None)=='shopee' and not cursor.completed:
+        from services.marketplace_session import validated_after
+        if validated_after('shopee',cursor.browser_attempted_at or cursor.last_attempted_at):return True
     if getattr(cursor, 'store', None) == 'mercado_livre' and not cursor.completed and cursor.last_status not in {None, 'OK', 'OK_BROWSER'}:
         from services.mercado_livre_session import validated_after
         if validated_after(cursor.browser_attempted_at or cursor.last_attempted_at):
             return True
-    if getattr(cursor, "kind", None) == "indexed_search" and cursor.last_status == "SEARCH_MISMATCH":
-        return False
     if not browser_available(cursor.next_url or getattr(cursor, "initial_url", None)):
         return False
     return bool(
@@ -315,11 +393,14 @@ def browser_retry_due(cursor, now=None):
     )
 
 
-def coverage_by_store(db, sku, stores):
-    cursors = db.query(ScrapeCursor).filter(ScrapeCursor.sku == sku).all()
+def coverage_by_store(db, sku, stores, sellers=None):
+    cursors = db.query(ScrapeCursor).filter(ScrapeCursor.sku == sku, ScrapeCursor.kind.in_(OPERATIONAL_KINDS)).all()
     sources = db.query(ProductSource).filter(
         ProductSource.sku == sku, ProductSource.active.is_(True),
     ).all()
+    if sellers:
+        from services.seller_selection import seller_matches
+        sources=[source for source in sources if seller_matches(sellers,source,source.store,allow_unknown=True)]
     result = []
     for store in stores:
         key = store["key"]

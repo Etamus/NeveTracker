@@ -108,10 +108,11 @@ export interface SkuStatusItem {
 
 export interface SkuStatusResponse {
   items: SkuStatusItem[];
+  total?: number;
 }
 
 export interface SkuBatchResult extends SkuStatusItem {
-  status: "updated" | "cached" | "error" | "queued" | "running" | "cancelled";
+  status: "updated" | "cached" | "error" | "queued" | "running" | "waiting_access" | "cancelled" | "skipped";
   message: string;
   results_count: number;
   stores_count: number;
@@ -126,12 +127,19 @@ export interface SkuBatchResponse {
 export type ExtractionJobStatus =
   | "queued"
   | "running"
+  | "waiting_access"
+  | "paused"
   | "completed"
   | "completed_with_errors"
   | "cancelled"
   | "failed";
 
 export interface ExtractionJob {
+  waiting_access?: Array<{ store: "mercado_livre" | "shopee"; status: string; sku?: string; reason?: string; retry_at?: string }>;
+  waiting_skus?: number;
+  postal_codes?: string[];
+  stores?: string[];
+  sellers?: Record<string, string[]>;
   owner_user_id?: number | null;
   api_with_scraping?: boolean;
   id: string;
@@ -153,6 +161,15 @@ export interface ExtractionJob {
   cancel_requested: boolean;
   progress_percent: number;
   work_progress_percent?: number;
+  active_skus?: {sku: string; phase: string; message: string; progress?: {done?: number; total?: number}}[];
+  general_skus_done?: number;
+  quotes_checked?: number;
+  quotes_complete?: number;
+  observed_skus?: number;
+  observations_saved?: number;
+  quotes_out_of_stock?: number;
+  quotes_incomplete?: number;
+  resources?: {active_requests: number; io_budget: number; peak_requests: number};
   started_rounds?: number;
   store_steps_done?: number;
   store_steps_total?: number;
@@ -173,6 +190,15 @@ export interface CrawlerControlSettings {
   playwright_shipping_fallback: boolean;
   concurrent_requests_per_domain: number;
   request_timeout_seconds: number;
+  precise_sku_workers: number;
+  quick_sku_workers: number;
+  quote_workers: number;
+  quick_timeout_seconds: number;
+  discovery_stores_per_round: number;
+  adaptive_parallelism: boolean;
+  hardware_acceleration: boolean;
+  reuse_public_browser: boolean;
+  browser_failure_cooldown_seconds: number;
   updated_at?: string | null;
 }
 
@@ -192,6 +218,9 @@ export interface ProductSourceItem {
 
 export interface ProductSourceResponse {
   items: ProductSourceItem[];
+  total: number;
+  page: number;
+  page_size: number;
   active_count: number;
   invalid_count: number;
 }

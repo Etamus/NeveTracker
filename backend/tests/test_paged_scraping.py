@@ -96,6 +96,8 @@ class PagedScrapingTests(unittest.TestCase):
         self.assertTrue(cursor.completed)
 
     def setUp(self):
+        from tests.marketplace_fixture import isolate_marketplace_control
+        isolate_marketplace_control(self)
         self.engine = create_engine(
             "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
         )
@@ -112,6 +114,19 @@ class PagedScrapingTests(unittest.TestCase):
         self.assertEqual(set(STORE_HOSTS), {store["key"] for store in TARGET_STORES})
         for store in TARGET_STORES:
             self.assertIn("w10531315", search_url(store["key"], "W10531315").lower())
+
+    def test_access_released_during_other_stores_does_not_lose_skipped_marketplace_work(self):
+        from services.marketplace_intervention import require_access,_write,_path
+        require_access('shopee',self.identity.sku,'Login')
+        visited=[]
+        def discover(db,identity,store,*args,**kwargs):
+            visited.append(store['key'])
+            _write(_path('shopee','access-request'),{'status':'verified'})
+            return []
+        with patch('services.precise_extraction._discover_store',side_effect=discover),patch('services.precise_extraction._collect_sources',return_value=([],set())):
+            result=run_precise_extraction(self.identity.sku,self.db,stores=['shopee','brastemp'],collection_after=datetime.utcnow())
+        self.assertEqual(visited,['brastemp'])
+        self.assertEqual(result['waiting_marketplaces'],['shopee'])
 
     @patch('services.scrape_pagination.fetch_seller_offer_page', return_value=([], None, True))
     @patch('services.scrape_pagination.fetch_search_page')

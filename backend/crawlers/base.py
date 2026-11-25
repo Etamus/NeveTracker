@@ -59,7 +59,7 @@ def _party_name(value):
 def _availability(value):
     normalized = str(value or "").rsplit("/", 1)[-1].lower()
     words = normalize_text(normalized)
-    if words in {"sem estoque", "esgotado", "produto esgotado", "indisponivel", "nao disponivel", "fora de estoque", "out of stock"}:
+    if words in {"sem estoque", "esgotado", "produto esgotado", "indisponivel", "nao disponivel", "fora de estoque", "out of stock", "avise me quando estiver disponivel"}:
         return "out_of_stock"
     if words in {"em estoque", "disponivel"}:
         return "in_stock"

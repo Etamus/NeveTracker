@@ -1,5 +1,6 @@
 import re
 import unicodedata
+from functools import lru_cache
 from urllib.parse import urlparse
 
 from scrapers.amazon import scrape_amazon
@@ -123,6 +124,21 @@ def _normalize_store_name(value):
     return " ".join(re.findall(r"[a-z0-9]+", ascii_text))
 
 
+_STORE_NAMES = [
+    (store, tuple(f' {_normalize_store_name(name)} ' for name in (store['label'], *store['aliases'])))
+    for store in TARGET_STORES
+]
+_STORE_HOSTS = [
+    (alias, store) for store in TARGET_STORES for alias in store['aliases'] if '.' in alias
+]
+
+
+@lru_cache(maxsize=2048)
+def _store_for_name(value):
+    text = f' {_normalize_store_name(value)} '
+    return next((store for store, names in _STORE_NAMES if any(name in text for name in names)), None)
+
+
 def find_target_store(*values):
     """Return the configured storefront represented by a merchant name or URL."""
     # A brand/manufacturer name in a merchant label must never override the
@@ -131,22 +147,15 @@ def find_target_store(*values):
         if '://' not in str(value or ''):
             continue
         host = (urlparse(str(value)).hostname or '').lower()
-        for store in TARGET_STORES:
-            for alias in store.get('aliases', ()):
-                if '.' in alias and (host == alias or host.endswith('.' + alias)):
-                    return store
-    haystack = f" {' '.join(_normalize_store_name(value) for value in values)} "
-    if not haystack.strip():
-        return None
+        for alias, store in _STORE_HOSTS:
+            if host == alias or host.endswith('.' + alias):
+                return store
 
     for value in values:
-        text = f' {_normalize_store_name(value)} '
-        for store in TARGET_STORES:
-            names = (store["label"], *store.get("aliases", ()))
-            for name in names:
-                needle = _normalize_store_name(name)
-                if needle and f" {needle} " in text:
-                    return store
+        if value:
+            store = _store_for_name(str(value))
+            if store:
+                return store
     return None
 
 

@@ -10,6 +10,7 @@ sqlalchemy==2.0.32
 python-dotenv==1.0.1
 cachetools==7.0.4
 openpyxl==3.1.5
+XlsxWriter==3.3.1
 python-multipart==0.0.20
 scrapy==2.13.3
 playwright==1.55.0
@@ -19,3 +20,5 @@ Twisted==24.11.0
 pyOpenSSL==25.3.0
 service-identity==24.2.0
 extruct==0.18.0
+websockets==17.1
+psutil==7.2.2

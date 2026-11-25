@@ -37,6 +37,50 @@ class SkuBatchRequest(BaseModel):
     mode: Literal["quick", "precise"] = "quick"
     local_only: bool = False
     api_with_scraping: Optional[bool] = None
+    postal_codes: List[str] = Field(default_factory=list, max_length=200)
+    stores: List[str] = Field(default_factory=list, max_length=15)
+    sellers: dict[str, List[str]] = Field(default_factory=dict, max_length=15)
+
+    @field_validator('sellers')
+    @classmethod
+    def validate_sellers(cls, values):
+        from services.store_registry import TARGET_STORES
+        from services.seller_selection import seller_key
+        known = {store['key'] for store in TARGET_STORES}
+        result = {}
+        for store, names in values.items():
+            if store not in known:
+                raise ValueError('Loja de lojista inválida.')
+            if len(names) > 200:
+                raise ValueError('Selecione até 200 lojistas por loja.')
+            unique = {}
+            for name in names:
+                name = name.strip()
+                if not name or len(name) > 160 or any(ord(char) < 32 for char in name):
+                    raise ValueError('Informe nomes de lojistas entre 1 e 160 caracteres.')
+                unique.setdefault(seller_key(store, name), name)
+            if unique: result[store] = list(unique.values())
+        return result
+
+    @field_validator('stores')
+    @classmethod
+    def validate_stores(cls, values):
+        from services.store_registry import TARGET_STORES
+        known={store['key'] for store in TARGET_STORES}
+        if any(value not in known for value in values):raise ValueError('Loja de extração inválida.')
+        return list(dict.fromkeys(values))
+
+    @field_validator('postal_codes')
+    @classmethod
+    def validate_postal_codes(cls, values):
+        import re
+        normalized=[]
+        for value in values:
+            if not re.fullmatch(r'\d{5}-?\d{3}', value.strip()):
+                raise ValueError('Informe CEPs com oito dígitos.')
+            value=value.strip().replace('-','')
+            if value not in normalized:normalized.append(value)
+        return normalized
 
 
 class ExtractionDatabaseJobRequest(BaseModel):
@@ -55,6 +99,15 @@ class CrawlerControlRequest(BaseModel):
     api_with_scraping: bool = True
     concurrent_requests_per_domain: int = Field(default=2, ge=1, le=4)
     request_timeout_seconds: int = Field(default=15, ge=5, le=45)
+    precise_sku_workers: int = Field(default=8, ge=1, le=8)
+    quick_sku_workers: int = Field(default=4, ge=1, le=8)
+    quote_workers: int = Field(default=12, ge=2, le=32)
+    quick_timeout_seconds: int = Field(default=5, ge=3, le=10)
+    discovery_stores_per_round: int = Field(default=3, ge=1, le=6)
+    adaptive_parallelism: bool = True
+    hardware_acceleration: bool = False
+    reuse_public_browser: bool = True
+    browser_failure_cooldown_seconds: int = Field(default=30, ge=15, le=300)
 
 
 class ExtractionScheduleRequest(BaseModel):

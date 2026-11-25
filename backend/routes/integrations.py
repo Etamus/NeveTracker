@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from models.auth import AuthUser
 from schemas.integration import IntegrationUpdateRequest
+from pydantic import BaseModel
 from services.auth_service import require_developer
 from services.integration_settings import (
     get_integration_settings,
@@ -10,6 +11,40 @@ from services.integration_settings import (
 
 
 integration_router = APIRouter()
+
+
+@integration_router.get('/accounts/{store}')
+def browser_account_status(store: str, _actor: AuthUser = Depends(require_developer)):
+    from services.marketplace_session import session_status
+    from services.marketplace_intervention import enabled,pending
+    try:return {**session_status(store),'enabled':enabled(store),'intervention':pending(store)}
+    except ValueError as exc:raise HTTPException(400,str(exc))
+
+
+class BrowserAccountUpdate(BaseModel):
+    enabled:bool
+
+
+@integration_router.put('/accounts/{store}')
+def configure_browser_account(store:str,payload:BrowserAccountUpdate,_actor:AuthUser=Depends(require_developer)):
+    from services.marketplace_intervention import configure
+    try:configure(store,payload.enabled)
+    except ValueError as exc:raise HTTPException(400,str(exc))
+    return browser_account_status(store,_actor)
+
+
+@integration_router.post('/accounts/{store}/connect')
+def connect_browser_account(store: str, _actor: AuthUser = Depends(require_developer)):
+    from services.marketplace_session import start_validation
+    try:return start_validation(store)
+    except ValueError as exc:raise HTTPException(409,str(exc))
+
+
+@integration_router.post('/accounts/{store}/confirm')
+def confirm_browser_account(store: str, _actor: AuthUser = Depends(require_developer)):
+    from services.marketplace_session import finish_validation
+    try:return finish_validation(store)
+    except ValueError as exc:raise HTTPException(400,str(exc))
 
 
 @integration_router.get('/mercado-livre/session')

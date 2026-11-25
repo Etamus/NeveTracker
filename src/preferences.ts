@@ -99,17 +99,22 @@ export const saveInterfacePreferences = (preferences: InterfacePreferences) => {
   window.dispatchEvent(new CustomEvent(INTERFACE_PREFERENCES_EVENT, { detail: preferences }));
 };
 
+const currencyFormatters = new Map<string, Intl.NumberFormat>();
 export const createCurrencyFormatter = (
   preferences: InterfacePreferences,
   minimumFractionDigits = 2,
   maximumFractionDigits = 2,
-) =>
-  new Intl.NumberFormat(preferences.locale, {
-    style: "currency",
-    currency: preferences.currency,
-    minimumFractionDigits,
-    maximumFractionDigits,
-  });
+) => {
+  const key = `${preferences.locale}|${preferences.currency}|${minimumFractionDigits}|${maximumFractionDigits}`;
+  let formatter = currencyFormatters.get(key);
+  if (!formatter) {
+    formatter = new Intl.NumberFormat(preferences.locale, {
+      style: "currency", currency: preferences.currency, minimumFractionDigits, maximumFractionDigits,
+    });
+    currencyFormatters.set(key, formatter);
+  }
+  return formatter;
+};
 
 export const createCompactFormatter = (preferences: InterfacePreferences) =>
   new Intl.NumberFormat(preferences.locale, {

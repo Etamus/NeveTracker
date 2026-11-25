@@ -26,13 +26,16 @@ from services.store_registry import find_target_store
 
 class ExtractionAccessTests(unittest.TestCase):
     def setUp(self):
+        from tests.marketplace_fixture import isolate_marketplace_control
+        isolate_marketplace_control(self)
         self.temp=TemporaryDirectory()
         self.engine=create_engine('sqlite:///'+str(Path(self.temp.name)/'access.db'), connect_args={'check_same_thread':False})
         Base.metadata.create_all(self.engine)
         self.sessions=sessionmaker(bind=self.engine)
         self.tokens={}
         with self.sessions() as db:
-            for username,role in [('ALICE','governor'),('BOB','governor'),('VIEWER','viewer')]:
+            for username,role in [('ALICE','governor'),('BOB','governor'),('VIEWER','viewer'),
+                                  ('ADMIN_A','administrator'),('ADMIN_B','administrator')]:
                 user=AuthUser(username=username,role=role,is_owner=username=='ALICE');set_password(user,'test-password')
                 db.add(user);db.flush()
                 token,_=create_session(db,user);self.tokens[username]=(user.id,token)
@@ -60,19 +63,44 @@ class ExtractionAccessTests(unittest.TestCase):
             scrape.assert_not_called()
             self.assertEqual(self.client.post('/products/search/batch',json={'skus':['W11509387']}).status_code,409)
 
-    def test_only_initiator_can_cancel_even_another_operator_cannot(self):
+    def test_governor_cannot_cancel_another_users_extraction(self):
         a=self.client.post('/products/extraction-jobs',headers=self.headers('ALICE'),json={'skus':['W11509387']})
         self.assertEqual(a.status_code,200,a.text);job=a.json()
         self.assertEqual(job['owner_user_id'],self.tokens['ALICE'][0])
         self.assertEqual(self.client.post('/products/extraction-jobs/'+job['id']+'/cancel',headers=self.headers('BOB')).status_code,403)
         busy=self.client.post('/products/extraction-jobs',headers=self.headers('BOB'),json={'skus':['W11199342']})
         self.assertEqual(busy.status_code,409,busy.text)
+        with self.sessions() as db:
+            self.assertIsNone(db.query(KnownSku).filter_by(sku='W11199342').first())
         self.assertIn('Aguarde',busy.json()['detail'])
-        self.assertEqual(self.client.post('/products/extraction-jobs/'+job['id']+'/cancel',headers=self.headers('ALICE')).status_code,200)
-        # Cancellation still holds the slot until the current work has stopped.
-        self.assertEqual(self.client.post('/products/extraction-jobs',headers=self.headers('BOB'),json={'skus':['W11199342']}).status_code,409)
-        queue._finish_or_requeue_job(job['id'])
+        cancelled = self.client.post('/products/extraction-jobs/'+job['id']+'/cancel',headers=self.headers('ALICE'))
+        self.assertEqual(cancelled.status_code, 200)
+        self.assertEqual(cancelled.json()['status'], 'cancelled')
+        # A queued job has no active task to drain.
         self.assertEqual(self.client.post('/products/extraction-jobs',headers=self.headers('BOB'),json={'skus':['W11199342']}).status_code,200)
+
+    def test_administrator_can_cancel_another_administrators_extraction(self):
+        url = '/products/extraction-jobs'
+        for creator, actor in [('ADMIN_A', 'ADMIN_B'), ('ADMIN_B', 'ADMIN_A'), ('BOB', 'ADMIN_A'), ('ALICE', 'ADMIN_B')]:
+            with self.subTest(creator=creator, actor=actor):
+                created = self.client.post(url, headers=self.headers(creator), json={'skus': ['W11509387']})
+                self.assertEqual(created.status_code, 200, created.text)
+                job = created.json()
+                cancel_url = f"{url}/{job['id']}/cancel"
+                self.assertEqual(self.client.post(cancel_url, headers=self.headers('VIEWER')).status_code, 403)
+                response = self.client.post(cancel_url, headers=self.headers(actor))
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertTrue(response.json()['cancel_requested'])
+                self.assertEqual(response.json()['owner_user_id'], self.tokens[creator][0])
+                queue._finish_or_requeue_job(job['id'])
+
+    def test_governor_can_cancel_own_extraction(self):
+        url = '/products/extraction-jobs'
+        created = self.client.post(url, headers=self.headers('BOB'), json={'skus': ['W11509387']})
+        self.assertEqual(created.status_code, 200, created.text)
+        response = self.client.post(f"{url}/{created.json()['id']}/cancel", headers=self.headers('BOB'))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()['cancel_requested'])
 
     def test_simultaneous_requests_from_different_users_reserve_one_owner(self):
         def enqueue(owner):
@@ -166,10 +194,29 @@ class ExtractionAccessTests(unittest.TestCase):
                 self.assertEqual(response.json()['results'][0]['current_price'],123)
                 scrape.assert_called_once()
                 self.assertEqual(scrape.call_args.kwargs['postal_code'],'01001000')
+                self.assertFalse(scrape.call_args.kwargs['persist'])
         with patch('routes.products.run_all_scrapers') as scrape:
             self.assertEqual(self.client.get('/products/search',params={'q':'Produto fora do banco'}).json()['results'],[])
             self.assertEqual(self.client.get('/products/search',params={'q':'Produto fora do banco'},headers={'Authorization':'Bearer invalid'}).status_code,401)
             scrape.assert_not_called()
+
+    def test_metadata_does_not_register_codes_mentioned_in_product_names(self):
+        with self.sessions() as db:
+            db.add(Product(sku='W11509387', name='Refil W11509387 compatível com W12345678'))
+            db.commit()
+        response = self.client.put('/products/skus/metadata', headers=self.headers('ALICE'),
+                                   json={'items': [{'sku': 'W12345678', 'category': 'Outros'}]})
+        self.assertEqual(response.status_code, 404, response.text)
+        with self.sessions() as db:
+            self.assertIsNone(db.query(KnownSku).filter_by(sku='W12345678').first())
+
+    def test_live_exact_sku_search_does_not_register_material(self):
+        with patch('routes.products.run_all_scrapers', return_value={'results': [], 'comparison': [], 'stores': []}) as scrape:
+            response = self.client.get('/products/search?q=W12345678', headers=self.headers('ALICE'))
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertFalse(scrape.call_args.kwargs['persist'])
+        with self.sessions() as db:
+            self.assertIsNone(db.query(KnownSku).filter_by(sku='W12345678').first())
 
     def test_live_navbar_search_respects_other_users_extraction(self):
         queue.enqueue_extraction_job(['W11509387'],owner_user_id=self.tokens['ALICE'][0])
@@ -193,7 +240,12 @@ class ExtractionAccessTests(unittest.TestCase):
             queue.configure_extraction_processor(lambda sku,options:(calls.append((sku,options)) or {'status':'updated'}))
             try:
                 job=scheduler._run_cycle(schedule['postal_code'],key,True,owner_user_id=schedule['owner_user_id'])
+                self.assertEqual(queue._process_job_batch(job['id']),'queued')
+                self.assertEqual(calls[0][1]['store_phase'],'general')
+                self.assertNotIn('shopee',calls[0][1]['stores'])
                 self.assertEqual(queue._process_job_batch(job['id']),'completed')
+                self.assertEqual(calls[1][1]['store_phase'],'marketplaces')
+                self.assertEqual(set(calls[1][1]['stores']),{'mercado_livre','shopee'})
                 self.assertEqual(calls[0][0],'W11509387')
                 self.assertEqual(scheduler._schedule_snapshot()['last_run_key'],key)
                 with patch.object(scheduler,'_due_run_key',return_value=key),patch.object(scheduler,'_run_cycle') as again:

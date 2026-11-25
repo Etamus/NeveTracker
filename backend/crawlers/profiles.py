@@ -52,5 +52,9 @@ STORE_PROFILES = {
     "refrigeracao_mota": DEFAULT_PROFILE,
     "mg_parts": DEFAULT_PROFILE,
     "gold_service": DEFAULT_PROFILE,
-    "comclick": DEFAULT_PROFILE,
+    "comclick": {
+        **DEFAULT_PROFILE,
+        "title": ("h1.product-name::text", *DEFAULT_PROFILE["title"]),
+        "availability": ("#produto_nao_disp #nao_disp .color::text", *DEFAULT_PROFILE["availability"]),
+    },
 }

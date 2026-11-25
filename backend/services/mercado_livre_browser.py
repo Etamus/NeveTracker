@@ -5,6 +5,7 @@ import re
 import sys
 from threading import BoundedSemaphore
 from urllib.parse import urlparse
+import time
 
 from bs4 import BeautifulSoup
 
@@ -106,6 +107,11 @@ def fetch_public_html(url, timeout=15, use_browser=False, page_handler=None):
         return {"status": "INVALID_MATCH", "reason": "URL fora do Mercado Livre Brasil"}
     if use_browser:
         return _render_public_html(url, timeout, page_handler)
+    from services.mercado_livre_mobile import fetch_mobile_html
+    started=time.monotonic()
+    mobile=fetch_mobile_html(url,timeout=min(10,max(1,timeout*.6)))
+    if mobile.get('status') in {'OK','NOT_FOUND','INVALID_MATCH'}:return mobile
+    timeout=max(1,timeout-(time.monotonic()-started))
     from services.browser_health import browser_available, record_browser_result
     family = 'catalog' if re.search(r'/(?:p|up)/', urlparse(url).path) else 'listing'
     channel = 'http_' + family
@@ -114,10 +120,12 @@ def fetch_public_html(url, timeout=15, use_browser=False, page_handler=None):
     global _http_session
     try:
         from curl_cffi.requests import Session
+        from services.extraction_resources import remaining_request_time
         with HTTP_SLOT:
+            remaining = remaining_request_time()
             if _http_session is None:
                 _http_session = Session(impersonate="chrome")
-            response = _http_session.get(url, timeout=(5, timeout))
+            response = _http_session.get(url, timeout=min(timeout, remaining) if remaining is not None else timeout)
         status, reason = page_status(response.text, response.url, response.status_code)
         if status in {'LOGIN_REQUIRED', 'OK'}:
             record_browser_result(url, status, channel)
@@ -127,26 +135,27 @@ def fetch_public_html(url, timeout=15, use_browser=False, page_handler=None):
 
 
 def _render_public_html(url, timeout, page_handler):
+    from services.marketplace_intervention import suspension as pending,enabled
+    access=pending('mercado_livre')
+    if access:return {'status':'ACCESS_REQUIRED' if access['status']=='waiting' else 'RETRY_LATER','reason':access['reason']}
     from patchright.sync_api import TimeoutError as BrowserTimeout, sync_playwright
     from services.mercado_livre_session import session_status
     from services.browser_health import browser_available, record_browser_result
     if not browser_available(url):
-        return {'status': 'BLOCKED', 'reason': 'Navegador em pausa temporaria neste host apos bloqueios confirmados; HTTP continua disponivel.'}
-    if session_status()['status'] in {'opening', 'waiting'}:
+        return {'status': 'RETRY_LATER', 'reason': 'Navegador em pausa temporaria neste host apos bloqueios confirmados; HTTP continua disponivel.'}
+    if enabled('mercado_livre') and session_status()['status'] in {'opening', 'waiting'}:
         return {'status': 'BROWSER_ERROR', 'reason': 'Conclua a validacao na janela do Mercado Livre e atualize novamente.'}
 
     with BROWSER_SLOT:
         try:
             PROFILE_DIR.mkdir(parents=True, exist_ok=True)
             with sync_playwright() as runtime:
-                context = runtime.chromium.launch_persistent_context(
-                    str(PROFILE_DIR), headless=sys.platform != 'win32', locale="pt-BR",
-                    timezone_id="America/Sao_Paulo", no_viewport=True, timeout=10000,
-                    args=['--window-position=-32000,-32000', '--window-size=1280,800'] if sys.platform == 'win32' else [],
-                )
+                from services.marketplace_session import account_context
+                manager=account_context(runtime,'mercado_livre',visible=sys.platform=='win32')
+                context=manager.__enter__()
                 try:
                     _hide_owned_windows(runtime._impl_obj._connection._transport._proc.pid)
-                    page = context.pages[0] if context.pages else context.new_page()
+                    page = context.new_page()
                     page.set_default_timeout(timeout * 1000)
                     # Keep scripts and styles intact: the public access check needs JS.
                     page.route("**/*", lambda route: route.abort() if route.request.resource_type in {"image", "font", "media"} else route.continue_())
@@ -172,7 +181,8 @@ def _render_public_html(url, timeout, page_handler):
                     record_browser_result(url, status)
                     return {"status": status, "reason": reason, "html": page.content(), "url": page.url}
                 finally:
-                    context.close()
+                    if not page.is_closed():page.close()
+                    manager.__exit__(None,None,None)
         except Exception as exc:
             return {"status": "BROWSER_ERROR", "reason": str(exc)[:300]}
 

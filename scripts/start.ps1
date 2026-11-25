@@ -187,6 +187,9 @@ try {
         $script:StartedProcesses.Add($backendProcess)
     } else {
         Write-Step "Backend existente validado em $backendUrl."
+        if (-not (Test-HttpService "$backendUrl/openapi.json" "hardware_acceleration")) {
+            Write-Warning "O backend existente pode estar desatualizado. Encerre a instancia anterior e abra o NeveTracker novamente para usar a aceleracao precisa."
+        }
     }
 
     Write-Step "Aguardando backend responder..."

@@ -1,0 +1,105 @@
+{
+  "date": "2026-11-12",
+  "job_id": "ba853fc9-72a8-4c5f-b130-f67358d6b0d3",
+  "status": "completed",
+  "models": 47,
+  "unique_ads": 1943,
+  "offer_destination_records": 9715,
+  "delivery_quotes": 6205,
+  "sku_postal_delivery_pairs": 234,
+  "missing_delivery_pairs": [
+    [
+      "MD-RT611EVK46",
+      "20211110"
+    ]
+  ],
+  "postal_codes": [
+    "30130003",
+    "80530908",
+    "20211110",
+    "90010170",
+    "01002020"
+  ],
+  "by_store": {
+    "Mercado Livre": {
+      "models": 46,
+      "ads": 867,
+      "offer_destination_rows": 4335,
+      "delivery_quotes": 2447,
+      "models_with_delivery": 46
+    },
+    "Consul": {
+      "models": 15,
+      "ads": 29,
+      "offer_destination_rows": 145,
+      "delivery_quotes": 140,
+      "models_with_delivery": 15
+    },
+    "Brastemp": {
+      "models": 10,
+      "ads": 17,
+      "offer_destination_rows": 85,
+      "delivery_quotes": 85,
+      "models_with_delivery": 10
+    },
+    "Amazon Brasil": {
+      "models": 24,
+      "ads": 35,
+      "offer_destination_rows": 175,
+      "delivery_quotes": 0,
+      "models_with_delivery": 0
+    },
+    "Magazine Luiza": {
+      "models": 44,
+      "ads": 708,
+      "offer_destination_rows": 3540,
+      "delivery_quotes": 3118,
+      "models_with_delivery": 44
+    },
+    "Shopee": {
+      "models": 43,
+      "ads": 239,
+      "offer_destination_rows": 1195,
+      "delivery_quotes": 275,
+      "models_with_delivery": 43
+    },
+    "Electrolux": {
+      "models": 17,
+      "ads": 33,
+      "offer_destination_rows": 165,
+      "delivery_quotes": 115,
+      "models_with_delivery": 13
+    },
+    "Midea": {
+      "models": 4,
+      "ads": 15,
+      "offer_destination_rows": 75,
+      "delivery_quotes": 25,
+      "models_with_delivery": 3
+    }
+  },
+  "shopee_models_without_confirmed_offer": [
+    "300001610",
+    "MD-RT411FGF01",
+    "IB6",
+    "MD-RT611EVK46"
+  ],
+  "file": "C:\\Users\\Etamus\\Documents\\NeveTracker\\exports\\extracao-eletrodomesticos-2026-11-12.xlsx",
+  "sheets": [
+    "Parâmetros",
+    "Database",
+    "Ofertas",
+    "Catálogo",
+    "Analytics por SKU",
+    "Preço por loja",
+    "Comparar lojas",
+    "Lead Time detalhes",
+    "Frete por estado",
+    "Lead Time matriz",
+    "Histórico de preços",
+    "Evolução de preços",
+    "Cadastros",
+    "Cobertura da extração"
+  ],
+  "bytes": 4025993
+}

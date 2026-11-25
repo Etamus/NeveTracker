@@ -9,6 +9,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from sqlalchemy.orm import Session
 
 from models.product import KnownSku, PriceHistory, Product, ProductSource
+from services.product_sources import HIDDEN_CURRENT_SOURCE_STATUSES
 from scrapers.comparison import (
     scrape_comparison_offers,
     scrape_target_catalog,
@@ -298,7 +299,7 @@ def _tokens(value):
 
 def _extract_skus(value):
     normalized = _normalize_text(value).upper()
-    skus = re.findall(r"\bW\d{6,}\b|\bMD-RT\d+[A-Z]+\d*\b|\b(?:BWF|BRO|CRD|CRM|BRM|BWJ|LEE|IM|IF|CIX)\d+[A-Z]*\b|\b\d{8,}\b", normalized)
+    skus = re.findall(r"\bW\d{6,}\b|\bMD-RT\d+[A-Z]+\d*\b|\b[A-Z]{1,8}\d+[A-Z0-9]*(?:-[A-Z0-9]+)*\b|\b\d{6,}\b", normalized)
     return list(dict.fromkeys(skus))
 
 
@@ -311,7 +312,6 @@ def _item_sku(item, fallback_query=None):
     for value in (
         item.get("sku"),
         item.get("name"),
-        item.get("url"),
         fallback_query,
     ):
         sku = _primary_sku(value or "")
@@ -437,10 +437,10 @@ def _normalize_result(item, product_query, store_label=None):
     if re.search(r'\b(?:garantia estendida|seguro garantia|servico de instalacao)\b', _normalize_text(name)):
         return None
 
-    if query_sku and sku != query_sku:
-        return None
     if query_sku and not resolve_candidate(ProductIdentity(sku=query_sku, model=query_sku), item).accepted:
         return None
+    if query_sku:
+        sku = query_sku
 
     if not query_sku:
         query_tokens = _product_tokens(product_query)
@@ -492,7 +492,7 @@ def _offer_url_identity(url):
         for key, value in parse_qsl(parsed_url.query, keep_blank_values=False)
         if key.lower()
         in {
-            "item_id", "wid", "pdp_filters", "offer_id", "oid", "seller", "seller_id", "shop_id", "m", "smid", "variant", "skuid", "idsku"
+            "item_id", "wid", "pdp_filters", "offer_id", "oid", "seller", "seller_id", "shop_id", "m", "smid", "variant", "skuid", "idsku", "sc"
         }
     ]
     return urlunsplit(
@@ -1125,38 +1125,60 @@ def _price_detail_values(item, cached=False):
     return values
 
 
-def _save_result(item, db: Session):
-    item = {**item, "brand": canonical_brand(item.get("brand"))}
-    item = {**item, "url": _offer_url_identity(item["url"])}
-    candidates = (
-        db.query(PriceHistory)
-        .filter(
-            PriceHistory.url == item["url"],
-        )
-        .order_by(PriceHistory.timestamp.desc(), PriceHistory.id.desc())
-        .all()
-    )
-    existing_price = next((price for price in candidates if seller_scope_key(
-        {"source": price.source, "store": price.store}
-    ) == seller_scope_key(item)), None)
-    observed_at = datetime.utcnow()
+def _previous_offer(db, item):
+    rows = db.query(PriceHistory.id, PriceHistory.product_id, PriceHistory.source,
+                    PriceHistory.store, PriceHistory.destination_zip).filter(PriceHistory.url == item['url'])
+    if item.get('sku'):
+        rows = rows.join(Product, Product.id == PriceHistory.product_id).filter(Product.sku == item['sku'])
+    expected_seller = seller_scope_key(item)
+    requested_zip = re.sub(r'\D', '', str(item.get('destination_zip') or ''))
+    scope_matches = {}
+    product_id = None
+    price_id = None
+    # Old databases can contain several spellings of the same seller and CEP.
+    # Keep that normalization and read only keys until the newest match is found.
+    for row in rows.order_by(PriceHistory.timestamp.desc(), PriceHistory.id.desc()).yield_per(32):
+        key = (row.source, row.store)
+        if key not in scope_matches:
+            scope_matches[key] = seller_scope_key({'source': row.source, 'store': row.store}) == expected_seller
+        if scope_matches[key]:
+            if product_id is None:
+                product_id = row.product_id
+            if re.sub(r'\D', '', str(row.destination_zip or '')) == requested_zip:
+                price_id = row.id
+                break
+    return db.get(PriceHistory, price_id) if price_id is not None else None, product_id
+
+
+def _save_result(item, db: Session, *, observed_at=None):
+    item = {**item, "brand": canonical_brand(item.get("brand")), "url": _offer_url_identity(item["url"])}
+    existing_price, scoped_product_id = _previous_offer(db, item)
     if item.get("is_cached"):
         observed_at = _coerce_datetime(item.get("captured_at") or item.get("last_update"))
-        if not observed_at or (existing_price and existing_price.timestamp and existing_price.timestamp >= observed_at):
+        if not observed_at:
             return 0
+    elif observed_at is not None:
+        observed_at = _coerce_datetime(observed_at)
+        if observed_at is None:
+            raise ValueError("Data da observação inválida.")
+    if observed_at is not None and existing_price and existing_price.timestamp and existing_price.timestamp >= observed_at:
+        return 0
+    observed_at = observed_at or datetime.utcnow()
 
     from services.price_observations import record_observation
     observation = record_observation(db, item, observed_at)
 
     if not existing_price:
-        new_product = Product(
-            name=item["name"],
-            brand=item["brand"],
-            category=item["category"],
-            image_url=item["image_url"],
-            sku=item.get("sku"),
-        )
-        db.add(new_product)
+        new_product = db.get(Product, scoped_product_id) if scoped_product_id is not None else None
+        if new_product is None:
+            new_product = Product(
+                name=item["name"],
+                brand=item["brand"],
+                category=item["category"],
+                image_url=item["image_url"],
+                sku=item.get("sku"),
+            )
+            db.add(new_product)
         db.flush()
 
         new_price = PriceHistory(
@@ -1174,7 +1196,7 @@ def _save_result(item, db: Session):
             observation.legacy_price_id = new_price.id
         return 1
 
-    product = db.query(Product).filter(Product.id == existing_price.product_id).first()
+    product = db.get(Product, existing_price.product_id)
     if product:
         product.name = item["name"]
         product.brand = item["brand"]
@@ -1187,6 +1209,7 @@ def _save_result(item, db: Session):
         existing_price.price != item["price"]
         or existing_price.store != item["store"]
         or existing_price.source != source
+        or existing_price.destination_zip != item.get('destination_zip')
         or offer_available({'availability': existing_price.availability}) != offer_available(item)
     ):
         new_price = PriceHistory(
@@ -1264,17 +1287,32 @@ def _cached_sku_items_by_store(db: Session, sku: str):
     return cached
 
 
-def _cached_sku_observations(db, sku):
+def _cached_sku_observations(db, sku, preferred_zip=None):
     known = db.query(KnownSku).filter(KnownSku.sku == sku).first()
     identity = ProductIdentity(sku=sku, model=getattr(known, "model", None) or sku,
+                               ean=getattr(known,'ean',None),mpn=getattr(known,'mpn',None),
                                name=getattr(known, "description", None), brand=getattr(known, "brand", None))
     sources = {(source.url, source.seller): source for source in db.query(ProductSource).filter(ProductSource.sku == sku).all()}
-    for product in db.query(Product).filter(Product.sku == sku).all():
-        price = max(product.prices, key=lambda value: (value.timestamp or datetime.min, value.id or 0), default=None)
+    from sqlalchemy.orm import aliased
+    latest = aliased(PriceHistory)
+    newest = db.query(latest.id).filter(latest.product_id == Product.id).order_by(
+        latest.timestamp.desc(), latest.id.desc()).correlate(Product)
+    latest_id = newest.limit(1).scalar_subquery()
+    if preferred_zip:
+        from sqlalchemy import func, or_
+        same_zip = latest.destination_zip.in_((preferred_zip, f'{preferred_zip[:5]}-{preferred_zip[5:]}'))
+        # A more recent unscoped price or stockout also applies to this offer.
+        # A quote for a different CEP cannot displace this destination's price.
+        local_id = newest.filter(or_(same_zip, latest.destination_zip.is_(None),
+                                     latest.destination_zip == '')).limit(1).scalar_subquery()
+        latest_id = func.coalesce(local_id, latest_id)
+    # Hydrate the latest row only, rather than each product's entire history.
+    for product, price in db.query(Product, PriceHistory).join(
+        PriceHistory, PriceHistory.id == latest_id).filter(Product.sku == sku):
         if not price or (number(price.price) is None and offer_available({'availability': price.availability})):
             continue
         source = sources.get((_offer_url_identity(price.url), price.store))
-        if source and source.validation_status in {"invalid_match", "not_found"}:
+        if source and source.validation_status in HIDDEN_CURRENT_SOURCE_STATUSES:
             continue
         candidate = {"name": product.name, "url": price.url, "brand": product.brand,
                      "model": source.model if source else None, "mpn": source.mpn if source else None,
@@ -1298,6 +1336,8 @@ def _cached_discovered_sku_items(db: Session, sku: str):
 
 
 def _run_store_scrapers(store_config, product_query):
+    from services.marketplace_intervention import suspension as pending
+    if pending(store_config['key']):return []
     store_results = []
     from services.manufacturer_pages import MANUFACTURER_STORES
     if store_config['key'] in MANUFACTURER_STORES:
@@ -1380,6 +1420,20 @@ def _run_store_scrapers(store_config, product_query):
                 "retornou lista vazia."
             )
 
+    if not store_results and store_config['key'] in {'mercado_livre','shopee'}:
+        from services.marketplace_intervention import enabled,require_access,defer_access
+        if enabled(store_config['key']):
+            from services.marketplace_session import metadata_file,browser_endpoint
+            from crawlers.paged_discovery import fetch_search_page,search_url
+            url=search_url(store_config['key'],product_query)
+            if metadata_file(store_config['key']).exists() or browser_endpoint(store_config['key']):
+                diagnostics={}
+                values,_,success=fetch_search_page(store_config['key'],url,timeout=12,use_browser=True,diagnostics=diagnostics)
+                store_results.extend(normalized for value in values if (normalized:=_normalize_result(value,product_query,store_config['label'])) and not _is_accessory_mismatch(normalized,product_query))
+                if not success and diagnostics.get('status') in {'BLOCKED','LOGIN_REQUIRED','ACCESS_REQUIRED'}:
+                    require_access(store_config['key'],product_query,diagnostics.get('reason'),url)
+                elif not success and diagnostics.get('status') in {'BROWSER_BUSY','BROWSER_ERROR','TIMEOUT','RETRY_LATER','LOGIN_PENDING'}:
+                    defer_access(store_config['key'],product_query,diagnostics.get('reason'))
     return sorted(
         _deduplicate(store_results),
         key=lambda item: _sort_key(item, product_query),
@@ -1408,7 +1462,7 @@ def _interleave_store_items(raw_by_store, discovered_items):
     return interleaved
 
 
-def _run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="all"):
+def _run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="all", stores=None, catalog_snapshots=None, *, persist=True):
     postal_code = normalize_postal_code(postal_code)
     scope = scope if scope in {"all", "sites", "retail"} else "all"
     print(f" LOG: Iniciando buscas gratuitas para '{product_query}' ({scope})")
@@ -1416,7 +1470,7 @@ def _run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="
     selected_stores = [
         store
         for store in TARGET_STORES
-        if scope == "all" or store.get("scope") == scope
+        if (scope == "all" or store.get("scope") == scope) and (not stores or store['key'] in stores)
     ]
     worker_count = min(8, max(1, len(selected_stores) + 2))
     comparison_items = []
@@ -1462,6 +1516,19 @@ def _run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="
                 )
             except Exception as exc:
                 print(f" WARNING: Bing Shopping falhou: {exc}")
+
+    # A same-day price check may have found an actual change. Use that fresh
+    # authoritative catalog in quick mode too, instead of falling back to an
+    # older comparator price or making another identical catalog request.
+    if catalog_snapshots:
+        from services.vtex_public import catalog_offers
+        for store in selected_stores:
+            if store['key'] not in catalog_snapshots:
+                continue
+            for candidate in catalog_offers(store['key'], product_query, catalog_snapshots[store['key']]):
+                normalized = _normalize_result(candidate, product_query, store['label'])
+                if normalized:
+                    raw_by_store[store['key']].append(normalized)
 
     if scope in {"all", "retail"}:
         current_offer_count = (
@@ -1528,7 +1595,7 @@ def _run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="
         if normalized and not _is_accessory_mismatch(normalized, product_query):
             if store and store["key"] in selected_store_keys:
                 raw_by_store[store["key"]].append(normalized)
-            elif not store:
+            elif not store and not stores:
                 discovered_items.append(normalized)
 
     query_sku = _primary_sku(product_query)
@@ -1537,6 +1604,9 @@ def _run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="
     if query_sku:
         cached_by_store = _cached_sku_items_by_store(db, query_sku)
         cached_discovered = _cached_discovered_sku_items(db, query_sku)
+        if stores:
+            cached_by_store = {key: values if key in selected_store_keys else [] for key, values in cached_by_store.items()}
+            cached_discovered = []
         tagged_items = _interleave_store_items(raw_by_store, discovered_items)
         enriched = enrich_offers(
             tagged_items[:DETAIL_ENRICHMENT_LIMIT],
@@ -1548,6 +1618,10 @@ def _run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="
         discovered_items = []
         for enriched_item in enriched:
             item = enriched_item
+            if query_sku:
+                if not resolve_candidate(ProductIdentity(sku=query_sku, model=query_sku),item).accepted:
+                    continue
+                item['sku']=query_sku
             bucket = item.pop("_bucket", "_discovered")
             if bucket == "_discovered":
                 discovered_items.append(item)
@@ -1586,31 +1660,34 @@ def _run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="
     )
 
     processed_count = 0
-    storage_limit = STORE_ITEM_LIMIT * (len(TARGET_STORES) + 4)
-    for index, item in enumerate(fresh_results[:storage_limit]):
-        storage_item = {
-            "name": item["name"],
-            "price": item["current_price"],
-            "store": item["store"],
-            "source": item.get("source") or item["store"],
-            "url": item["url"],
-            "brand": item["brand"],
-            "category": item["category"],
-            "image_url": item.get("image_url"),
-            "sku": item.get("sku"),
-            **{
-                field: item.get(field)
-                for field in OFFER_DETAIL_FIELDS
-                if item.get(field) is not None
-            },
-        }
-        try:
-            processed_count += _save_result(storage_item, db)
-        except Exception as e:
-            print(f" ERROR: Falha ao processar item {index + 1}: {e}")
-            db.rollback()
+    if persist:
+        storage_limit = STORE_ITEM_LIMIT * (len(TARGET_STORES) + 4)
+        for index, item in enumerate(fresh_results[:storage_limit]):
+            if not item.get('sku'):
+                continue
+            storage_item = {
+                "name": item["name"],
+                "price": item["current_price"],
+                "store": item["store"],
+                "source": item.get("source") or item["store"],
+                "url": item["url"],
+                "brand": item["brand"],
+                "category": item["category"],
+                "image_url": item.get("image_url"),
+                "sku": item.get("sku"),
+                **{
+                    field: item.get(field)
+                    for field in OFFER_DETAIL_FIELDS
+                    if item.get(field) is not None
+                },
+            }
+            try:
+                processed_count += _save_result(storage_item, db)
+            except Exception as e:
+                print(f" ERROR: Falha ao processar item {index + 1}: {e}")
+                db.rollback()
 
-    db.commit()
+        db.commit()
     actual_comparison_rows = _build_comparison_rows(available_results, product_query)
     catalog_comparison_rows = _build_catalog_rows(product_query)
     comparison_rows = _merge_catalog_rows(
@@ -1645,11 +1722,14 @@ def _run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="
     }
 
 
-def run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="all"):
+def run_all_scrapers(product_query: str, db: Session, postal_code=None, scope="all", stores=None, catalog_snapshots=None, *, persist=True):
     with SCRAPE_SLOTS:
         return _run_all_scrapers(
             product_query,
             db,
             postal_code=postal_code,
             scope=scope,
+            persist=persist,
+            **({'stores': stores} if stores else {}),
+            **({'catalog_snapshots': catalog_snapshots} if catalog_snapshots else {}),
         )

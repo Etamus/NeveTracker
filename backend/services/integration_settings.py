@@ -66,7 +66,7 @@ PROVIDER_CONFIG = {
     "mercado_livre": {
         "label": "Mercado Livre",
         "description": (
-            "API oficial sem tarifa de uso."
+            "Conta do navegador para coleta de anúncios e cotações."
         ),
         "credential_url": "https://developers.mercadolivre.com.br/devcenter/",
         "category": "store",
